@@ -437,7 +437,9 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 				if (otherSignature.equals(newSignature)) {
 					if (rename) {
 						if (otherMth.contains(AFlag.DONT_RENAME) || otherMth.contains(AType.METHOD_OVERRIDE)) {
-							otherMth.addWarnComment("Can't rename method to resolve collision");
+							if (!isCompilerBridge(mth)) {
+								otherMth.addWarnComment("Can't rename method to resolve collision");
+							}
 						} else {
 							otherMth.getMethodInfo().setAlias(makeNewAlias(otherMth));
 							otherMth.addAttr(new RenameReasonAttr("avoid collision after fix types in other method"));
@@ -448,6 +450,10 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 				}
 			}
 		}
+	}
+
+	private static boolean isCompilerBridge(MethodNode mth) {
+		return mth.getAccessFlags().isBridge() && mth.getAccessFlags().isSynthetic();
 	}
 
 	// TODO: at this point deobfuscator is not available and map file already saved

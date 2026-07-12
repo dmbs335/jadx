@@ -3,7 +3,6 @@ package jadx.core.codegen;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -242,8 +241,7 @@ public class RegionGen extends InsnGen {
 	}
 
 	public void makeSwitch(SwitchRegion sw, ICodeWriter code) throws CodegenException {
-		SwitchInsn insn = (SwitchInsn) BlockUtils.getLastInsn(sw.getHeader());
-		Objects.requireNonNull(insn, "Switch insn not found in header");
+		SwitchInsn insn = sw.getInsn();
 		InsnArg arg = insn.getArg(0);
 		code.startLine("switch (");
 		addArg(code, arg, false);
@@ -366,10 +364,14 @@ public class RegionGen extends InsnGen {
 			code.add("unknown"); // throwing exception is too late at this point
 		} else if (arg instanceof RegisterArg) {
 			SSAVar ssaVar = ((RegisterArg) arg).getSVar();
-			if (code.isMetadataSupported()) {
-				code.attachDefinition(VarNode.get(mth, ssaVar));
+			if (ssaVar == null) {
+				code.add(handler.isCatchAll() ? "th" : "e");
+			} else {
+				if (code.isMetadataSupported()) {
+					code.attachDefinition(VarNode.get(mth, ssaVar));
+				}
+				code.add(mgen.getNameGen().assignArg(ssaVar.getCodeVar()));
 			}
-			code.add(mgen.getNameGen().assignArg(ssaVar.getCodeVar()));
 		} else if (arg instanceof NamedArg) {
 			code.add(mgen.getNameGen().assignNamedArg((NamedArg) arg));
 		} else {

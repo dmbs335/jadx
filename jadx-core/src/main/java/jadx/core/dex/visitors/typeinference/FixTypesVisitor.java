@@ -91,8 +91,12 @@ public final class FixTypesVisitor extends AbstractVisitor {
 		}
 		try {
 			for (Function<MethodNode, Boolean> resolver : resolvers) {
-				if (resolver.apply(mth) && checkTypes(mth)) {
-					break;
+				try {
+					if (resolver.apply(mth) && checkTypes(mth)) {
+						break;
+					}
+				} catch (JadxOverflowException e) {
+					LOG.debug("Type update limit reached in resolver for method: {}", mth, e);
 				}
 			}
 		} catch (Exception e) {
@@ -116,9 +120,7 @@ public final class FixTypesVisitor extends AbstractVisitor {
 	private boolean runMultiVariableSearch(MethodNode mth) {
 		try {
 			TypeSearch typeSearch = new TypeSearch(mth);
-			if (!typeSearch.run()) {
-				mth.addWarnComment("Multi-variable type inference failed");
-			}
+			typeSearch.run();
 			for (SSAVar var : mth.getSVars()) {
 				if (!var.getTypeInfo().getType().isTypeKnown()) {
 					return false;
@@ -126,7 +128,7 @@ public final class FixTypesVisitor extends AbstractVisitor {
 			}
 			return true;
 		} catch (Exception e) {
-			mth.addWarnComment("Multi-variable type inference failed. Error: " + Utils.getStackTrace(e));
+			LOG.debug("Multi-variable type inference failed in method: {}", mth, e);
 			return false;
 		}
 	}

@@ -448,6 +448,9 @@ public final class TypeUpdate {
 
 	private TypeUpdateResult sameFirstArgListener(TypeUpdateInfo updateInfo, InsnNode insn, InsnArg arg, ArgType candidateType) {
 		InsnArg changeArg = isAssign(insn, arg) ? insn.getArg(0) : insn.getResult();
+		if (changeArg == null) {
+			return CHANGED;
+		}
 		if (updateInfo.hasUpdateWithType(changeArg, candidateType)) {
 			return CHANGED;
 		}
@@ -485,7 +488,11 @@ public final class TypeUpdate {
 	 */
 	private TypeUpdateResult allSameListener(TypeUpdateInfo updateInfo, InsnNode insn, InsnArg arg, ArgType candidateType) {
 		if (!isAssign(insn, arg)) {
-			return queueTypeUpdate(updateInfo, insn.getResult(), candidateType, null);
+			RegisterArg result = insn.getResult();
+			if (result == null) {
+				return CHANGED;
+			}
+			return queueTypeUpdate(updateInfo, result, candidateType, null);
 		}
 		// update args with same type
 		var updateCallback = new ArgsListUpdateCallback<>(this, updateInfo, insn.getArgList(), candidateType, false);

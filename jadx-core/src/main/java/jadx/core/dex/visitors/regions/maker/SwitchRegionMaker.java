@@ -64,7 +64,7 @@ public final class SwitchRegionMaker {
 			keys.add(SwitchRegion.DEFAULT_CASE_KEY);
 		}
 
-		SwitchRegion sw = new SwitchRegion(currentRegion, block);
+		SwitchRegion sw = new SwitchRegion(currentRegion, block, insn);
 		insn.addAttr(new RegionRefAttr(sw));
 		currentRegion.getSubBlocks().add(sw);
 		stack.push(sw);
@@ -212,16 +212,25 @@ public final class SwitchRegionMaker {
 			stack.addExit(imPostDom);
 		}
 		if (out == null) {
-			mth.addWarnComment("Failed to find 'out' block for switch in " + block + ". Please report as an issue.");
-			// fallback option; should work in most cases
+			// No unambiguous dominance-frontier candidate. The immediate post-dominator is
+			// the existing fallback and is a valid structural switch exit.
 			out = block.getIPostDom();
+			if (out == null) {
+				mth.addWarnComment("Failed to find 'out' block for switch in " + block + ". Please report as an issue.");
+			}
 		}
 		if (out != null && regionMaker.isProcessed(out)) {
 			// 'out' block already processed, prevent endless loop
 			// in this case it might be that 'out' is the LOOP_START of a loop and occurs before 'block'
-			// just try the immediate post dominator as a fallback
-			mth.addWarnComment("Switch 'out' block " + out + " for " + block + " already processed. Defaulting to fallback option.");
-			out = block.getIPostDom();
+			// use the immediate post dominator if it has not been processed yet
+			BlockNode fallback = block.getIPostDom();
+			if (fallback != null && !regionMaker.isProcessed(fallback)) {
+				out = fallback;
+			} else {
+				mth.addWarnComment("Switch 'out' block " + out + " for " + block
+						+ " already processed. Failed to find an unprocessed fallback.");
+				out = fallback;
+			}
 		}
 		return out;
 	}
@@ -415,7 +424,7 @@ public final class SwitchRegionMaker {
 						}
 					}
 				}
-				if (insertBreak && canAppendBreak(region)) {
+				if (insertBreak && region instanceof Region && canAppendBreak(region)) {
 					region.getSubBlocks().add(buildBreakContainer(switchRegion));
 				}
 			}

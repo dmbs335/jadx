@@ -61,6 +61,7 @@ import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
+import jadx.core.dex.visitors.ProcessAnonymous;
 import jadx.core.utils.RegionUtils;
 import jadx.core.utils.exceptions.CodegenException;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -804,10 +805,12 @@ public class InsnGen {
 	}
 
 	private void inlineAnonymousConstructor(ICodeWriter code, ClassNode cls, ConstructorInsn insn) throws CodegenException {
+		if (!cls.checkProcessed()) {
+			mth.root().getProcessClasses().forceProcess(cls);
+		}
 		cls.ensureProcessed();
 		if (this.mth.getParentClass() == cls) {
-			cls.remove(AType.ANONYMOUS_CLASS);
-			cls.remove(AFlag.DONT_GENERATE);
+			ProcessAnonymous.convertToInner(cls);
 			mth.getParentClass().getTopParentClass().add(AFlag.RESTART_CODEGEN);
 			throw new CodegenException("Anonymous inner class unlimited recursion detected."
 					+ " Convert class to inner: " + cls.getClassInfo().getFullName());

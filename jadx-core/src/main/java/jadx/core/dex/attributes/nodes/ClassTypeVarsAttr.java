@@ -32,6 +32,9 @@ public class ClassTypeVarsAttr implements IJadxAttribute {
 	}
 
 	public Map<ArgType, ArgType> getTypeVarsMapFor(ArgType type) {
+		if (!type.isObject()) {
+			return Collections.emptyMap();
+		}
 		Map<ArgType, ArgType> typeMap = superTypeMaps.get(type.getObject());
 		if (typeMap == null) {
 			return Collections.emptyMap();

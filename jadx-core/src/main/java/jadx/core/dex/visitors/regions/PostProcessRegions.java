@@ -13,6 +13,7 @@ import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.SwitchRegion;
 import jadx.core.dex.regions.loops.LoopRegion;
 import jadx.core.dex.visitors.regions.maker.SwitchRegionMaker;
+import jadx.core.utils.RegionUtils;
 
 public final class PostProcessRegions extends AbstractRegionVisitor {
 	private static final IRegionVisitor INSTANCE = new PostProcessRegions();
@@ -43,6 +44,9 @@ public final class PostProcessRegions extends AbstractRegionVisitor {
 			return;
 		}
 		IContainer last = subBlocks.get(subBlocks.size() - 1);
+		if (RegionUtils.hasExitEdge(last)) {
+			return;
+		}
 		List<EdgeInsnAttr> edgeInsnAttrs = last.getAll(AType.EDGE_INSN);
 		if (edgeInsnAttrs.isEmpty()) {
 			return;

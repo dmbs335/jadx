@@ -728,7 +728,9 @@ public class BlockUtils {
 	private static boolean traverseSuccessorsUntil(BlockNode from, BlockNode until, BitSet visited, boolean clean,
 			Predicate<BlockNode> pred) {
 		List<BlockNode> nodes = clean ? from.getCleanSuccessors() : from.getSuccessors();
-		for (BlockNode s : nodes) {
+		int nodesCount = nodes.size();
+		for (int i = 0; i < nodesCount; i++) {
+			BlockNode s = nodes.get(i);
 			if (!pred.test(s)) {
 				// Only explore blocks such that the predicate holds
 				continue;
@@ -1473,11 +1475,15 @@ public class BlockUtils {
 	}
 
 	public static BlockNode getTopSplitterForHandler(BlockNode handlerBlock) {
-		BlockNode block = getBlockWithFlag(handlerBlock.getPredecessors(), AFlag.EXC_TOP_SPLITTER);
+		BlockNode block = findTopSplitterForHandler(handlerBlock);
 		if (block == null) {
 			throw new JadxRuntimeException("Can't find top splitter block for handler:" + handlerBlock);
 		}
 		return block;
+	}
+
+	public static @Nullable BlockNode findTopSplitterForHandler(BlockNode handlerBlock) {
+		return getBlockWithFlag(handlerBlock.getPredecessors(), AFlag.EXC_TOP_SPLITTER);
 	}
 
 	/**
@@ -1492,7 +1498,10 @@ public class BlockUtils {
 	@Nullable
 	public static BlockNode getTryAndHandlerCrossBlock(MethodNode mth, ExceptionHandler handler) {
 		BlockNode start = handler.getHandlerBlock();
-		BlockNode topSplitter = BlockUtils.getTopSplitterForHandler(start);
+		BlockNode topSplitter = BlockUtils.findTopSplitterForHandler(start);
+		if (topSplitter == null) {
+			return null;
+		}
 		List<ExceptionHandler> allHandlers = handler.getTryBlock().getHandlers();
 		List<BlockNode> handlerExitsCandidate = new ArrayList<>(BlockUtils.bitSetToBlocks(mth, start.getDomFrontier()));
 		BitSet visited = newBlocksBitSet(mth);

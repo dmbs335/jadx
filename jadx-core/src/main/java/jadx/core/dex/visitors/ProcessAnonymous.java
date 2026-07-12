@@ -110,8 +110,11 @@ public class ProcessAnonymous extends AbstractVisitor {
 		}
 	}
 
-	private static void undoAnonymousMark(ClassNode cls) {
+	public static void convertToInner(ClassNode cls) {
 		AnonymousClassAttr attr = cls.get(AType.ANONYMOUS_CLASS);
+		if (attr == null) {
+			return;
+		}
 		ClassNode outerCls = attr.getOuterCls();
 		cls.setDependencies(ListUtils.safeAdd(cls.getDependencies(), outerCls.getTopParentClass()));
 		outerCls.setUseIn(ListUtils.safeAdd(outerCls.getUseIn(), cls));
@@ -176,7 +179,7 @@ public class ProcessAnonymous extends AbstractVisitor {
 		while (true) {
 			if (!added.add(current)) {
 				current.addWarnComment("Loop in anonymous inline: " + current + ", path: " + added);
-				added.forEach(ProcessAnonymous::undoAnonymousMark);
+				added.forEach(ProcessAnonymous::convertToInner);
 				return;
 			}
 			ClassNode next = inlineMap.get(current);

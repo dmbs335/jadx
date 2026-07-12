@@ -428,12 +428,21 @@ public abstract class AbstractCodeArea extends RSyntaxTextArea {
 
 	public void scrollToPos(int pos) {
 		try {
-			setCaretPosition(pos);
+			int documentLength = getDocument().getLength();
+			int safePos = boundScrollPosition(pos, documentLength);
+			if (safePos != pos) {
+				LOG.debug("Scroll position adjusted from {} to {}, document length: {}", pos, safePos, documentLength);
+			}
+			setCaretPosition(safePos);
 			centerCurrentLine();
 			forceCurrentLineHighlightRepaint();
 		} catch (Exception e) {
 			LOG.warn("Can't scroll to position {}", pos, e);
 		}
+	}
+
+	static int boundScrollPosition(int pos, int documentLength) {
+		return Math.max(0, Math.min(pos, documentLength));
 	}
 
 	@SuppressWarnings("deprecation")

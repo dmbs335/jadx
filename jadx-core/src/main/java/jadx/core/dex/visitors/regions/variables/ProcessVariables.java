@@ -1,12 +1,10 @@
 package jadx.core.dex.visitors.regions.variables;
 
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -79,6 +77,9 @@ public class ProcessVariables extends AbstractVisitor {
 						continue;
 					}
 					SSAVar ssaVar = resultArg.getSVar();
+					if (ssaVar == null) {
+						continue;
+					}
 					if (isVarUnused(mth, ssaVar)) {
 						boolean remove = false;
 						if (insn.canRemoveResult()) {
@@ -288,24 +289,64 @@ public class ProcessVariables extends AbstractVisitor {
 	/**
 	 * Check if all {@code usePlaces} are after {@code checkPlace}
 	 */
-	private static boolean isAllUseAfter(UsePlace checkPlace, List<UsePlace> usePlaces) {
-
+	static boolean isAllUseAfter(UsePlace checkPlace, List<UsePlace> usePlaces) {
 		IRegion region = checkPlace.getRegion();
 		IBlock block = checkPlace.getBlock();
-		Set<UsePlace> toCheck = new HashSet<>(usePlaces);
-		boolean blockFound = false;
-		for (IContainer subBlock : region.getSubBlocks()) {
-			if (!blockFound && subBlock == block) {
-				blockFound = true;
+		List<IContainer> subBlocks = region.getSubBlocks();
+		int subBlocksCount = subBlocks.size();
+		int blockIndex = -1;
+		for (int i = 0; i < subBlocksCount; i++) {
+			if (subBlocks.get(i) == block) {
+				blockIndex = i;
+				break;
 			}
-			if (blockFound) {
-				toCheck.removeIf(usePlace -> isContainerContainsUsePlace(subBlock, usePlace));
-				if (toCheck.isEmpty()) {
-					return true;
-				}
+		}
+		if (blockIndex == -1) {
+			return false;
+		}
+		int usePlacesCount = usePlaces.size();
+		for (int i = 0; i < usePlacesCount; i++) {
+			IContainer directContainer = resolveDirectContainer(region, subBlocks, usePlaces.get(i));
+			if (directContainer == null || !containsIdentity(subBlocks, blockIndex, directContainer)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean containsIdentity(List<IContainer> containers, int fromIndex, IContainer target) {
+		int count = containers.size();
+		for (int i = fromIndex; i < count; i++) {
+			if (containers.get(i) == target) {
+				return true;
 			}
 		}
 		return false;
+	}
+
+	private static IContainer resolveDirectContainer(
+			IRegion region, List<IContainer> subBlocks, UsePlace usePlace) {
+		IRegion useRegion = usePlace.getRegion();
+		if (useRegion == region) {
+			return usePlace.getBlock();
+		}
+		IRegion current = useRegion;
+		while (current != null) {
+			IRegion parent = current.getParent();
+			if (parent == region) {
+				return current;
+			}
+			current = parent;
+		}
+		// Exception-handler regions can have no single parent, use the full containment check as a fallback.
+		int subBlocksCount = subBlocks.size();
+		for (int i = 0; i < subBlocksCount; i++) {
+			IContainer subBlock = subBlocks.get(i);
+			if (isContainerContainsUsePlace(subBlock, usePlace)) {
+				return subBlock;
+			}
+		}
+		return null;
 	}
 
 	private static boolean isContainerContainsUsePlace(IContainer subBlock, UsePlace usePlace) {

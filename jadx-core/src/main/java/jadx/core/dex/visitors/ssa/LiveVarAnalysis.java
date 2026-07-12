@@ -54,12 +54,20 @@ public class LiveVarAnalysis {
 	}
 
 	private void fillBasicBlockInfo() {
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		int blocksCount = blocks.size();
+		for (int blockIndex = 0; blockIndex < blocksCount; blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
 			int blockId = block.getId();
 			BitSet gen = uses[blockId];
 			BitSet kill = defs[blockId];
-			for (InsnNode insn : block.getInstructions()) {
-				for (InsnArg arg : insn.getArguments()) {
+			List<InsnNode> insns = block.getInstructions();
+			int insnsCount = insns.size();
+			for (int insnIndex = 0; insnIndex < insnsCount; insnIndex++) {
+				InsnNode insn = insns.get(insnIndex);
+				int argsCount = insn.getArgsCount();
+				for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+					InsnArg arg = insn.getArg(argIndex);
 					if (arg.isRegister()) {
 						int regNum = ((RegisterArg) arg).getRegNum();
 						if (!kill.get(regNum)) {

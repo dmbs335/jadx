@@ -229,7 +229,7 @@ public class TabbedPane extends JTabbedPane implements ITabStatesListener {
 		}
 		selectTab(contentPanel);
 		int pos = jumpPos.getPos();
-		if (pos <= 0) {
+		if (pos < 0) {
 			LOG.warn("Invalid jump: {}", jumpPos, new JadxRuntimeException());
 			pos = Math.max(0, jumpNode.getPos());
 		}

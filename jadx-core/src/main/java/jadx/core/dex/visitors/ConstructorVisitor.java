@@ -136,7 +136,7 @@ public class ConstructorVisitor extends AbstractVisitor {
 			// use new SSA var on usage from current path
 			RegisterArg newResArg = instArg.duplicateWithNewSSAVar(mth);
 			List<BlockNode> pathBlocks = BlockUtils.collectAllSuccessors(mth, curBlock, true);
-			for (RegisterArg useReg : instArg.getSVar().getUseList()) {
+			for (RegisterArg useReg : List.copyOf(instArg.getSVar().getUseList())) {
 				InsnNode parentInsn = useReg.getParentInsn();
 				if (parentInsn != null) {
 					BlockNode useBlock = BlockUtils.getBlockByInsn(mth, parentInsn, pathBlocks);

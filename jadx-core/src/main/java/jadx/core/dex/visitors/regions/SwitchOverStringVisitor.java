@@ -3,14 +3,15 @@ package jadx.core.dex.visitors.regions;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
-import jadx.api.plugins.input.data.annotations.EncodedType;
 import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.data.attributes.JadxAttrType;
 import jadx.core.dex.attributes.AFlag;
@@ -37,6 +38,7 @@ import jadx.core.dex.regions.conditions.IfRegion;
 import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.dex.visitors.JadxVisitor;
 import jadx.core.utils.BlockUtils;
+import jadx.core.utils.EncodedValueUtils;
 import jadx.core.utils.InsnRemover;
 import jadx.core.utils.InsnUtils;
 import jadx.core.utils.ListUtils;
@@ -89,9 +91,11 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 
 			IContainer nextContainer = RegionUtils.getNextContainer(mth, part1Region);
 			boolean isPart1Switch = part1Region instanceof SwitchRegion;
-			boolean isPart2Switch = nextContainer instanceof SwitchRegion;
-			if (isPart2Switch) {
-				SwitchRegion part2Region = (SwitchRegion) nextContainer;
+			boolean directPart2Switch = nextContainer instanceof SwitchRegion;
+			SwitchRegion part2Region = directPart2Switch
+					? (SwitchRegion) nextContainer
+					: getSwitchAfterEmptyBridge(part1Region, nextContainer);
+			if (part2Region != null) {
 				InsnNode part2SwInsn = BlockUtils.getLastInsnWithType(part2Region.getHeader(), InsnType.SWITCH);
 				if (part2SwInsn == null || !part2SwInsn.getArg(0).isRegister()) {
 					return false;
@@ -109,7 +113,9 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 				return false;
 			}
 			if (!prepareMergedSwitchCases(data) || !replaceWithMergedSwitch(data)) {
-				mth.addWarnComment("Failed to restore switch over string. Please report as a decompilation issue");
+				if (directPart2Switch || part2Region == null) {
+					mth.addWarnComment("Failed to restore switch over string. Please report as a decompilation issue");
+				}
 				return false;
 			}
 			return true;
@@ -117,6 +123,19 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 			mth.addWarnComment("Failed to restore switch over string. Please report as a decompilation issue", e);
 			return false;
 		}
+	}
+
+	static @Nullable SwitchRegion getSwitchAfterEmptyBridge(IRegion part1Region, @Nullable IContainer nextContainer) {
+		if (!(nextContainer instanceof BlockNode) || !((BlockNode) nextContainer).getInstructions().isEmpty()) {
+			return null;
+		}
+		List<IContainer> siblings = part1Region.getParent().getSubBlocks();
+		int bridgePos = siblings.indexOf(nextContainer);
+		if (bridgePos == -1 || bridgePos + 1 >= siblings.size()) {
+			return null;
+		}
+		IContainer afterBridge = siblings.get(bridgePos + 1);
+		return afterBridge instanceof SwitchRegion ? (SwitchRegion) afterBridge : null;
 	}
 
 	/**
@@ -242,6 +261,7 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 			for (CaseData caseData : cases) {
 				casesMap.computeIfAbsent(caseData.getCodeNum(), v -> new ArrayList<>()).add(caseData.getStrValue());
 			}
+			SwitchRegion.CaseInfo defaultCase = null;
 			for (SwitchRegion.CaseInfo caseInfo : Objects.requireNonNull(part2Region).getCases()) {
 				SwitchRegion.CaseInfo newCase = new SwitchRegion.CaseInfo(new ArrayList<>(), caseInfo.getContainer());
 				for (Object key : caseInfo.getKeys()) {
@@ -253,15 +273,19 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 						}
 						newCase.getKeys().addAll(strings);
 					} else {
-						// last case. add all remaining strings
-						for (List<Object> strings : casesMap.values()) {
-							newCase.getKeys().addAll(strings);
-						}
-						casesMap.clear();
 						newCase.getKeys().add(SwitchRegion.DEFAULT_CASE_KEY);
+						defaultCase = newCase;
 					}
 				}
 				newCases.add(newCase);
+			}
+			if (defaultCase != null) {
+				int defaultKeyPos = defaultCase.getKeys().indexOf(SwitchRegion.DEFAULT_CASE_KEY);
+				for (List<Object> strings : casesMap.values()) {
+					defaultCase.getKeys().addAll(defaultKeyPos, strings);
+					defaultKeyPos += strings.size();
+				}
+				casesMap.clear();
 			}
 			if (!casesMap.isEmpty()) {
 				data.getMth().addWarnComment("switch over string: strings are not added: " + casesMap.values());
@@ -314,7 +338,7 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 		BlockUtils.replaceInsn(mth, newHeader, swInsn, newSwInsn);
 		keptInsns.add(newSwInsn);
 
-		SwitchRegion replaceRegion = new SwitchRegion(part1Parent, newHeader);
+		SwitchRegion replaceRegion = new SwitchRegion(part1Parent, newHeader, (SwitchInsn) newSwInsn);
 		for (SwitchRegion.CaseInfo caseInfo : data.getNewCases()) {
 			IContainer container = caseInfo.getContainer();
 			RegionUtils.visitBlocks(mth, container, b -> keptInsns.addAll(b.getInstructions()));
@@ -352,7 +376,11 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 				}
 			}
 			InsnRemover.removeAllMarked(mth);
-			InsnRemover.remove(mth, data.getHashcodeInvokeInsn());
+			InsnNode hashcodeInvokeInsn = data.getHashcodeInvokeInsn();
+			if (hashcodeInvokeInsn.contains(AFlag.WRAPPED)
+					|| BlockUtils.getBlockByInsn(mth, hashcodeInvokeInsn) != null) {
+				InsnRemover.remove(mth, hashcodeInvokeInsn);
+			}
 		} catch (StackOverflowError | Exception e) {
 			mth.addWarnComment("Failed to clean up code after switch over string restore", e);
 		}
@@ -360,29 +388,88 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 	}
 
 	private static @Nullable Integer extractConstNumber(SwitchData switchData, @Nullable InsnNode numInsn) {
-		if (numInsn == null || numInsn.getArgsCount() != 1) {
+		if (numInsn == null) {
 			return null;
 		}
-		Object constVal = InsnUtils.getConstValueByArg(switchData.getMth().root(), numInsn.getArg(0));
-		if (constVal instanceof LiteralArg) {
-			RegisterArg numArg = switchData.getNumArg();
-			if (numArg != null && numArg.sameCodeVar(numInsn.getResult())) {
-				return (int) ((LiteralArg) constVal).getLiteral();
+		RegisterArg numArg = switchData.getNumArg();
+		RegisterArg result = numInsn.getResult();
+		if (numArg == null || result == null || !numArg.sameCodeVar(result)) {
+			return null;
+		}
+		Object constVal = numInsn.getArgsCount() == 1
+				? InsnUtils.getConstValueByArg(switchData.getMth().root(), numInsn.getArg(0))
+				: InsnUtils.getConstValueByInsn(switchData.getMth().root(), numInsn);
+		Integer intValue = unwrapIntKey(constVal);
+		if (intValue == null && numInsn.getArgsCount() == 1) {
+			intValue = resolveConstNumber(switchData, numInsn.getArg(0));
+		}
+		return intValue;
+	}
+
+	private static @Nullable Integer resolveConstNumber(SwitchData switchData, InsnArg startArg) {
+		List<InsnArg> pending = new ArrayList<>();
+		pending.add(startArg);
+		Set<SSAVar> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+		Integer result = null;
+		for (int pos = 0; pos < pending.size(); pos++) {
+			InsnArg arg = pending.get(pos);
+			if (arg.isLiteral()) {
+				Integer value = unwrapIntKey(arg);
+				if (value == null || (result != null && !result.equals(value))) {
+					return null;
+				}
+				result = value;
+				continue;
+			}
+			InsnNode assignInsn;
+			if (arg.isRegister()) {
+				SSAVar ssaVar = ((RegisterArg) arg).getSVar();
+				if (ssaVar == null || !visited.add(ssaVar)) {
+					continue;
+				}
+				assignInsn = ssaVar.getAssignInsn();
+			} else if (arg.isInsnWrap()) {
+				assignInsn = ((InsnWrapArg) arg).getWrapInsn();
+			} else {
+				return null;
+			}
+			if (assignInsn == null) {
+				return null;
+			}
+			switch (assignInsn.getType()) {
+				case CONST:
+				case SGET:
+					Integer value = unwrapIntKey(InsnUtils.getConstValueByInsn(switchData.getMth().root(), assignInsn));
+					if (value == null || (result != null && !result.equals(value))) {
+						return null;
+					}
+					result = value;
+					break;
+
+				case MOVE:
+				case PHI:
+					for (InsnArg insnArg : assignInsn.getArguments()) {
+						pending.add(insnArg);
+					}
+					break;
+
+				default:
+					return null;
 			}
 		}
-		return null;
+		return result;
 	}
 
 	private static Integer unwrapIntKey(Object key) {
 		if (key instanceof Integer) {
 			return (Integer) key;
 		}
+		if (key instanceof LiteralArg) {
+			return (int) ((LiteralArg) key).getLiteral();
+		}
 		if (key instanceof FieldNode) {
 			EncodedValue encodedValue = ((FieldNode) key).get(JadxAttrType.CONSTANT_VALUE);
-			if (encodedValue != null && encodedValue.getType() == EncodedType.ENCODED_INT) {
-				return (Integer) encodedValue.getValue();
-			}
-			return null;
+			return unwrapIntKey(EncodedValueUtils.convertToConstValue(encodedValue));
 		}
 		return null;
 	}

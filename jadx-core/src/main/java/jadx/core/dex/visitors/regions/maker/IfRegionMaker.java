@@ -2,6 +2,7 @@ package jadx.core.dex.visitors.regions.maker;
 
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -18,6 +19,7 @@ import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.BlockNode;
@@ -183,7 +185,7 @@ final class IfRegionMaker {
 		}
 
 		// select 'then', 'else' and 'exit' blocks
-		if (thenBlock.contains(AFlag.RETURN) && elseBlock.contains(AFlag.RETURN)) {
+		if (isBranchReturn(thenBlock) && isBranchReturn(elseBlock)) {
 			info.setOutBlock(null);
 			return info;
 		}
@@ -192,7 +194,27 @@ final class IfRegionMaker {
 
 		boolean badThen = isBadBranchBlock(info, thenBlock);
 		boolean badElse = isBadBranchBlock(info, elseBlock);
+		IfInfo inheritedExitIf = restructureInheritedExit(info, thenBlock, elseBlock, badThen, badElse);
+		if (inheritedExitIf != null) {
+			return inheritedExitIf;
+		}
 		if (badThen && badElse) {
+			IfInfo scopeExitIf = restructureDirectScopeExit(info, thenBlock, elseBlock);
+			if (scopeExitIf != null) {
+				return scopeExitIf;
+			}
+			if (isLinearTerminalPath(thenBlock) && isLinearTerminalPath(elseBlock)) {
+				info.setOutBlock(null);
+				return info;
+			}
+			IfInfo sharedOutIf = restructureSharedOut(info, thenBlock, elseBlock);
+			if (sharedOutIf != null) {
+				return sharedOutIf;
+			}
+			IfInfo sharedReturnIf = restructureSharedReturn(info, thenBlock, elseBlock);
+			if (sharedReturnIf != null) {
+				return sharedReturnIf;
+			}
 			if (Consts.DEBUG_RESTRUCTURE) {
 				LOG.debug("Stop processing blocks after 'if': {}, method: {}", info.getMergedBlocks(), mth);
 			}
@@ -225,6 +247,289 @@ final class IfRegionMaker {
 			info.setOutBlock(null);
 		}
 		return info;
+	}
+
+	private @Nullable IfInfo restructureInheritedExit(
+			IfInfo info, BlockNode thenBlock, BlockNode elseBlock, boolean badThen, boolean badElse) {
+		BlockNode localOut = info.getOutBlock();
+		if (localOut == null) {
+			return null;
+		}
+		BlockNode nestedBranch;
+		BlockNode terminalBranch;
+		if (badElse && elseBlock == localOut && isAcyclicTerminalSubgraph(elseBlock)) {
+			nestedBranch = thenBlock;
+			terminalBranch = elseBlock;
+		} else if (badThen && thenBlock == localOut && isAcyclicTerminalSubgraph(thenBlock)) {
+			nestedBranch = elseBlock;
+			terminalBranch = thenBlock;
+		} else {
+			return null;
+		}
+		for (BlockNode exit : regionMaker.getStack().getExits()) {
+			if (exit != localOut
+					&& BlockUtils.isPathExists(nestedBranch, exit)
+					&& !BlockUtils.isPathExists(terminalBranch, exit)) {
+				info.setOutBlock(exit);
+				return info;
+			}
+		}
+		return null;
+	}
+
+	private @Nullable IfInfo restructureDirectScopeExit(IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		for (BlockNode exit : regionMaker.getStack().getExits()) {
+			if (exit == info.getOutBlock()) {
+				// This is the local join selected for this if. Prefer an inherited scope exit;
+				// otherwise the shared terminal branch is incorrectly emitted after an empty if.
+				continue;
+			}
+			if (thenBlock == exit && isAcyclicTerminalSubgraph(elseBlock)) {
+				IfInfo inverted = IfInfo.invert(info);
+				IfInfo result = new IfInfo(inverted, elseBlock, null);
+				result.setOutBlock(exit);
+				return result;
+			}
+			if (elseBlock == exit && isAcyclicTerminalSubgraph(thenBlock)) {
+				IfInfo result = new IfInfo(info, thenBlock, null);
+				result.setOutBlock(exit);
+				return result;
+			}
+		}
+		return null;
+	}
+
+	private static boolean isLinearTerminalPath(BlockNode startBlock) {
+		BlockNode block = startBlock;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != null && visited.size() < 8 && visited.add(block)) {
+			if (block.contains(AFlag.LOOP_START) || block.contains(AFlag.LOOP_END)) {
+				return false;
+			}
+			if (BlockUtils.containsExitInsn(block)) {
+				return true;
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return false;
+			}
+			block = successors.get(0);
+		}
+		return false;
+	}
+
+	private static boolean isAcyclicTerminalSubgraph(BlockNode startBlock) {
+		return isAcyclicTerminalSubgraph(startBlock, new HashSet<>(), new HashSet<>());
+	}
+
+	private static boolean isAcyclicTerminalSubgraph(BlockNode block, Set<BlockNode> visiting, Set<BlockNode> terminal) {
+		if (terminal.contains(block)) {
+			return true;
+		}
+		if (visiting.size() >= 12
+				|| block.contains(AFlag.LOOP_START)
+				|| block.contains(AFlag.LOOP_END)
+				|| !visiting.add(block)) {
+			return false;
+		}
+		if (BlockUtils.containsExitInsn(block)) {
+			visiting.remove(block);
+			terminal.add(block);
+			return true;
+		}
+		List<BlockNode> successors = block.getCleanSuccessors();
+		if (successors.isEmpty()) {
+			visiting.remove(block);
+			return false;
+		}
+		for (BlockNode successor : successors) {
+			if (!isAcyclicTerminalSubgraph(successor, visiting, terminal)) {
+				visiting.remove(block);
+				return false;
+			}
+		}
+		visiting.remove(block);
+		terminal.add(block);
+		return true;
+	}
+
+	/**
+	 * Both branches can have external predecessors in a state machine: the return block is shared by
+	 * several suspension checks and the other branch is also a resume target. This is still a regular
+	 * early-return condition and can be represented without traversing the shared continuation as a
+	 * branch.
+	 */
+	private @Nullable IfInfo restructureSharedReturn(IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		boolean allowTerminalSubgraph = isSuspendLambdaMethod() && isBooleanCondition(info);
+		boolean thenReturn = isBranchReturn(thenBlock)
+				|| isLinearTerminalPath(thenBlock)
+				|| allowTerminalSubgraph && isAcyclicTerminalSubgraph(thenBlock);
+		boolean elseReturn = isBranchReturn(elseBlock)
+				|| isLinearTerminalPath(elseBlock)
+				|| allowTerminalSubgraph && isAcyclicTerminalSubgraph(elseBlock);
+		if (thenReturn == elseReturn) {
+			return null;
+		}
+		if (elseReturn) {
+			info = IfInfo.invert(info);
+			BlockNode tmp = thenBlock;
+			thenBlock = elseBlock;
+			elseBlock = tmp;
+		}
+		IfInfo result = new IfInfo(info, thenBlock, null);
+		result.setOutBlock(elseBlock);
+		return result;
+	}
+
+	private static boolean isBooleanCondition(IfInfo info) {
+		InsnNode lastInsn = BlockUtils.getLastInsn(info.getFirstIfBlock());
+		return lastInsn instanceof IfNode
+				&& lastInsn.getArgsCount() != 0
+				&& ArgType.BOOLEAN.equals(lastInsn.getArg(0).getType());
+	}
+
+	private static @Nullable IfInfo restructureSharedOut(IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		BlockNode outBlock = info.getOutBlock();
+		boolean exceptionJoin = isExceptionJoin(info);
+		if (outBlock == null) {
+			if (isSharedOutPath(thenBlock, elseBlock, exceptionJoin)) {
+				outBlock = elseBlock;
+			} else if (isSharedOutPath(elseBlock, thenBlock, exceptionJoin)) {
+				outBlock = thenBlock;
+			} else {
+				return null;
+			}
+		}
+		if (thenBlock == outBlock && isSharedOutPath(elseBlock, outBlock, exceptionJoin)) {
+			info = IfInfo.invert(info);
+			BlockNode tmp = thenBlock;
+			thenBlock = elseBlock;
+			elseBlock = tmp;
+		}
+		if (elseBlock != outBlock || !isSharedOutPath(thenBlock, outBlock, exceptionJoin)) {
+			return null;
+		}
+		IfInfo result = new IfInfo(info, thenBlock, null);
+		result.setOutBlock(outBlock);
+		return result;
+	}
+
+	private static boolean isExceptionJoin(IfInfo info) {
+		for (BlockNode block : info.getMergedBlocks()) {
+			for (BlockNode predecessor : block.getPredecessors()) {
+				if (BlockUtils.isExceptionHandlerPath(predecessor)) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static boolean isSharedOutPath(BlockNode startBlock, BlockNode outBlock, boolean allowSideEffects) {
+		return allowSideEffects ? isLinearPath(startBlock, outBlock) : isLinearReadOnlyPath(startBlock, outBlock);
+	}
+
+	private static boolean isLinearPath(BlockNode startBlock, BlockNode outBlock) {
+		BlockNode block = startBlock;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != outBlock && block != null && visited.size() < 8 && visited.add(block)) {
+			if (block.contains(AFlag.LOOP_START) || block.contains(AFlag.LOOP_END)) {
+				return false;
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return false;
+			}
+			block = successors.get(0);
+		}
+		return block == outBlock;
+	}
+
+	private static boolean isLinearReadOnlyPath(BlockNode startBlock, BlockNode outBlock) {
+		BlockNode block = startBlock;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != outBlock && block != null && visited.size() < 8 && visited.add(block)) {
+			if (block.contains(AFlag.LOOP_START) || block.contains(AFlag.LOOP_END)) {
+				return false;
+			}
+			for (InsnNode insn : block.getInstructions()) {
+				if (!isReadOnlyInsn(insn)) {
+					return false;
+				}
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return false;
+			}
+			block = successors.get(0);
+		}
+		return block == outBlock;
+	}
+
+	private static boolean isReadOnlyInsn(InsnNode insn) {
+		Boolean invalid = insn.visitInsns(innerInsn -> isReadOnlyInsnType(innerInsn) ? null : Boolean.TRUE);
+		return invalid == null;
+	}
+
+	private static boolean isReadOnlyInsnType(InsnNode insn) {
+		if (insn.contains(AFlag.DONT_GENERATE)) {
+			return true;
+		}
+		switch (insn.getType()) {
+			case CONST:
+			case CONST_STR:
+			case CONST_CLASS:
+			case ARITH:
+			case NEG:
+			case NOT:
+			case MOVE:
+			case MOVE_MULTI:
+			case CAST:
+			case CHECK_CAST:
+			case INSTANCE_OF:
+			case ARRAY_LENGTH:
+			case AGET:
+			case IGET:
+			case SGET:
+			case PHI:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	private boolean isBranchReturn(BlockNode block) {
+		return block.contains(AFlag.RETURN) || isSuspendLambdaMethod() && isReturnPath(block);
+	}
+
+	private boolean isSuspendLambdaMethod() {
+		if (!mth.getName().equals("invokeSuspend")) {
+			return false;
+		}
+		ArgType superClass = mth.getParentClass().getSuperClass();
+		return superClass != null
+				&& "kotlin.coroutines.jvm.internal.SuspendLambda".equals(superClass.getObject());
+	}
+
+	private static boolean isReturnPath(@Nullable BlockNode startBlock) {
+		BlockNode block = startBlock;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != null && visited.add(block)) {
+			if (block.contains(AFlag.RETURN)) {
+				return true;
+			}
+			for (InsnNode insn : block.getInstructions()) {
+				if (!insn.contains(AFlag.DONT_GENERATE)) {
+					return false;
+				}
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return false;
+			}
+			block = successors.get(0);
+		}
+		return false;
 	}
 
 	static @Nullable BlockNode findOutBlock(MethodNode mth, BlockNode thenBlock, BlockNode elseBlock) {
@@ -504,7 +809,6 @@ final class IfRegionMaker {
 				nextThen.getCondition(), nextElse.getCondition());
 		IfInfo result = new IfInfo(currentIf.getMth(), newCondition, nextThen.getThenBlock(), nextThen.getElseBlock());
 		result.merge(currentIf, nextThen, nextElse);
-		confirmMerge(result);
 		return result;
 	}
 
@@ -686,8 +990,26 @@ final class IfRegionMaker {
 			if (res == null) {
 				return false;
 			}
+			boolean nextEntersTry = next.getSuccessors().stream()
+					.anyMatch(successor -> successor.contains(AFlag.EXC_TOP_SPLITTER));
+			if (nextEntersTry) {
+				// Forced inline can lose a self-overwriting assignment at a try boundary.
+				InsnArg overwrittenInput = insn.visitArgs(arg -> arg.isRegister()
+						&& ((RegisterArg) arg).getRegNum() == res.getRegNum() ? arg : null);
+				if (overwrittenInput != null) {
+					return false;
+				}
+			}
 			List<RegisterArg> useList = res.getSVar().getUseList();
 			int useCount = useList.size();
+			boolean usedInPhi = useList.stream()
+					.map(RegisterArg::getParentInsn)
+					.anyMatch(useInsn -> useInsn.getType() == InsnType.PHI);
+			if (nextEntersTry && usedInPhi) {
+				// Keep the assignment as a statement: its value flows through a join after
+				// the following try/catch region and can't be represented only in the condition.
+				return false;
+			}
 			if (useCount == 0) {
 				// TODO?
 				return false;

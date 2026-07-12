@@ -40,8 +40,9 @@ public class InsnNode extends LineAttrNode {
 		this.insnType = type;
 		this.arguments = args;
 		this.offset = -1;
-		for (InsnArg arg : args) {
-			attachArg(arg);
+		int argsCount = args.size();
+		for (int i = 0; i < argsCount; i++) {
+			attachArg(args.get(i));
 		}
 	}
 
@@ -196,7 +197,9 @@ public class InsnNode extends LineAttrNode {
 	}
 
 	public void getRegisterArgs(Collection<RegisterArg> collection) {
-		for (InsnArg arg : this.getArguments()) {
+		int argsCount = getArgsCount();
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = getArg(i);
 			if (arg.isRegister()) {
 				collection.add((RegisterArg) arg);
 			} else if (arg.isInsnWrap()) {
@@ -299,7 +302,9 @@ public class InsnNode extends LineAttrNode {
 	 */
 	public void visitInsns(Consumer<InsnNode> visitor) {
 		visitor.accept(this);
-		for (InsnArg arg : this.getArguments()) {
+		int argsCount = getArgsCount();
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = getArg(i);
 			if (arg.isInsnWrap()) {
 				((InsnWrapArg) arg).getWrapInsn().visitInsns(visitor);
 			}
@@ -316,7 +321,9 @@ public class InsnNode extends LineAttrNode {
 		if (result != null) {
 			return result;
 		}
-		for (InsnArg arg : this.getArguments()) {
+		int argsCount = getArgsCount();
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = getArg(i);
 			if (arg.isInsnWrap()) {
 				InsnNode innerInsn = ((InsnWrapArg) arg).getWrapInsn();
 				R res = innerInsn.visitInsns(visitor);

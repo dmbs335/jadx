@@ -20,6 +20,8 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.CodeFeaturesAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
+import jadx.core.dex.instructions.IfNode;
+import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.LiteralArg;
@@ -54,6 +56,10 @@ public class BlockProcessor extends AbstractVisitor {
 		removeUnreachableBlocks(mth);
 
 		computeDominators(mth);
+		if (FixMultiEntryLoops.hasMultiEntryLoops(mth) && simplifyConstantIfs(mth)) {
+			removeUnreachableBlocks(mth);
+			computeDominators(mth);
+		}
 		if (independentBlockTreeMod(mth)) {
 			checkForUnreachableBlocks(mth);
 			computeDominators(mth);
@@ -93,6 +99,88 @@ public class BlockProcessor extends AbstractVisitor {
 		PostDominatorTree.compute(mth);
 
 		updateCleanSuccessors(mth);
+	}
+
+	/**
+	 * Remove an IF branch if both operands resolve to literal assignments on the same straight-line path.
+	 * This runs before SSA and only follows single-predecessor/single-successor edges.
+	 */
+	private static boolean simplifyConstantIfs(MethodNode mth) {
+		boolean changed = false;
+		for (BlockNode block : mth.getBasicBlocks()) {
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn == null || lastInsn.getType() != InsnType.IF) {
+				continue;
+			}
+			IfNode ifInsn = (IfNode) lastInsn;
+			Long first = resolveLiteralInBlock(block, ifInsn.getArg(0), lastInsn);
+			Long second = resolveLiteralInBlock(block, ifInsn.getArg(1), lastInsn);
+			if (first == null || second == null) {
+				continue;
+			}
+			boolean condition = evaluate(ifInsn.getOp(), first, second);
+			BlockNode liveBranch = condition ? ifInsn.getThenBlock() : ifInsn.getElseBlock();
+			BlockNode deadBranch = condition ? ifInsn.getElseBlock() : ifInsn.getThenBlock();
+			if (liveBranch == deadBranch) {
+				continue;
+			}
+			block.getInstructions().remove(block.getInstructions().size() - 1);
+			BlockSplitter.removeConnection(block, deadBranch);
+			mth.addDebugComment("Simplified constant IF in block: " + block);
+			changed = true;
+		}
+		return changed;
+	}
+
+	private static @Nullable Long resolveLiteralInBlock(BlockNode block, InsnArg arg, InsnNode beforeInsn) {
+		if (arg.isLiteral()) {
+			return ((LiteralArg) arg).getLiteral();
+		}
+		if (!arg.isRegister()) {
+			return null;
+		}
+		int regNum = ((RegisterArg) arg).getRegNum();
+		return resolveRegisterLiteral(block, regNum, block.getInstructions().indexOf(beforeInsn), 0);
+	}
+
+	private static @Nullable Long resolveRegisterLiteral(BlockNode block, int regNum, int end, int depth) {
+		List<InsnNode> insns = block.getInstructions();
+		for (int i = end - 1; i >= 0; i--) {
+			InsnNode insn = insns.get(i);
+			RegisterArg result = insn.getResult();
+			if (result != null && result.getRegNum() == regNum) {
+				if (insn.getType() == InsnType.CONST && insn.getArgsCount() == 1 && insn.getArg(0).isLiteral()) {
+					return ((LiteralArg) insn.getArg(0)).getLiteral();
+				}
+				return null;
+			}
+		}
+		if (depth < 4 && block.getPredecessors().size() == 1) {
+			BlockNode predecessor = block.getPredecessors().get(0);
+			if (predecessor.getSuccessors().size() == 1) {
+				return resolveRegisterLiteral(predecessor, regNum, predecessor.getInstructions().size(), depth + 1);
+			}
+		}
+		return null;
+	}
+
+	private static boolean evaluate(IfOp op, long first, long second) {
+		switch (op) {
+			case EQ:
+				return first == second;
+			case NE:
+				return first != second;
+			case LT:
+				return first < second;
+			case LE:
+				return first <= second;
+			case GT:
+				return first > second;
+			case GE:
+				return first >= second;
+			default:
+				throw new JadxRuntimeException("Unexpected IF operation: " + op);
+		}
 	}
 
 	/**

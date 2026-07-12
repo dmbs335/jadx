@@ -114,7 +114,7 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 				}
 			}
 		} catch (JadxOverflowException e) {
-			throw e;
+			LOG.debug("Type update limit reached for immutable var {} in method: {}", ssaVar, mth, e);
 		} catch (Exception e) {
 			mth.addWarnComment("Failed to set immutable type for var: " + ssaVar, e);
 		}
@@ -124,7 +124,7 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 		try {
 			calculateFromBounds(mth, ssaVar);
 		} catch (JadxOverflowException e) {
-			throw e;
+			LOG.debug("Type update limit reached for var {} in method: {}", ssaVar, mth, e);
 		} catch (Exception e) {
 			mth.addWarnComment("Failed to calculate best type for var: " + ssaVar, e);
 		}

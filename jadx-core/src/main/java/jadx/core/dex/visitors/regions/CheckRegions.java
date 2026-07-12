@@ -20,6 +20,7 @@ import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.loops.LoopRegion;
 import jadx.core.dex.visitors.AbstractVisitor;
+import jadx.core.utils.BlockUtils;
 import jadx.core.utils.exceptions.CodegenException;
 import jadx.core.utils.exceptions.JadxException;
 
@@ -63,7 +64,8 @@ public class CheckRegions extends AbstractVisitor {
 						&& !block.getInstructions().isEmpty()
 						&& !block.contains(AFlag.ADDED_TO_REGION)
 						&& !block.contains(AFlag.DONT_GENERATE)
-						&& !block.contains(AFlag.REMOVE)) {
+						&& !block.contains(AFlag.REMOVE)
+						&& !isGeneratedSyntheticDuplicate(block, blocksInRegions)) {
 					String blockCode = getBlockInsnStr(mth, block).replace("*/", "*\\/");
 					mth.addWarn("Code restructure failed: missing block: " + block + ", code lost:" + blockCode);
 				}
@@ -84,6 +86,11 @@ public class CheckRegions extends AbstractVisitor {
 				return true;
 			}
 		});
+	}
+
+	static boolean isGeneratedSyntheticDuplicate(BlockNode block, Set<BlockNode> blocksInRegions) {
+		return block.contains(AFlag.SYNTHETIC)
+				&& blocksInRegions.stream().anyMatch(generated -> BlockUtils.isDuplicateBlockPath(block, generated));
 	}
 
 	private static String getBlockInsnStr(MethodNode mth, IBlock block) {

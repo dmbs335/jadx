@@ -1,8 +1,8 @@
 package jadx.core.dex.visitors;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -94,35 +94,44 @@ public class PrepareForCodeGen extends AbstractVisitor {
 	}
 
 	private static void removeInstructions(BlockNode block) {
-		Iterator<InsnNode> it = block.getInstructions().iterator();
-		while (it.hasNext()) {
-			InsnNode insn = it.next();
+		List<InsnNode> insns = block.getInstructions();
+		int index = 0;
+		while (index < insns.size()) {
+			InsnNode insn = insns.get(index);
+			boolean remove = false;
 			switch (insn.getType()) {
 				case NOP:
 				case MONITOR_ENTER:
 				case MONITOR_EXIT:
 				case MOVE_EXCEPTION:
-					it.remove();
+					remove = true;
 					break;
 
 				case CONSTRUCTOR:
 					ConstructorInsn co = (ConstructorInsn) insn;
 					if (co.isSelf()) {
-						it.remove();
+						remove = true;
 					}
 					break;
 
 				case MOVE:
 					// remove redundant moves: unused result and same args names (a = a;)
 					RegisterArg result = insn.getResult();
-					if (result.getSVar().getUseCount() == 0
+					if (result != null
+							&& result.getSVar() != null
+							&& result.getSVar().getUseCount() == 0
 							&& result.isNameEquals(insn.getArg(0))) {
-						it.remove();
+						remove = true;
 					}
 					break;
 
 				default:
 					break;
+			}
+			if (remove) {
+				insns.remove(index);
+			} else {
+				index++;
 			}
 		}
 	}
@@ -146,12 +155,17 @@ public class PrepareForCodeGen extends AbstractVisitor {
 	 * Add explicit type for non int constants
 	 */
 	private static void checkConstUsage(BlockNode block) {
-		for (InsnNode blockInsn : block.getInstructions()) {
+		List<InsnNode> insns = block.getInstructions();
+		int insnsCount = insns.size();
+		for (int i = 0; i < insnsCount; i++) {
+			InsnNode blockInsn = insns.get(i);
 			blockInsn.visitInsns(insn -> {
 				if (forbidExplicitType(insn.getType())) {
 					return;
 				}
-				for (InsnArg arg : insn.getArguments()) {
+				int argsCount = insn.getArgsCount();
+				for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+					InsnArg arg = insn.getArg(argIndex);
 					if (arg.isLiteral() && arg.getType() != ArgType.INT) {
 						arg.add(AFlag.EXPLICIT_PRIMITIVE_TYPE);
 					}
@@ -175,8 +189,10 @@ public class PrepareForCodeGen extends AbstractVisitor {
 	}
 
 	private static void removeParenthesis(BlockNode block) {
-		for (InsnNode insn : block.getInstructions()) {
-			removeParenthesis(insn);
+		List<InsnNode> insns = block.getInstructions();
+		int insnsCount = insns.size();
+		for (int i = 0; i < insnsCount; i++) {
+			removeParenthesis(insns.get(i));
 		}
 	}
 
@@ -204,7 +220,9 @@ public class PrepareForCodeGen extends AbstractVisitor {
 			if (insn.getType() == InsnType.TERNARY) {
 				removeParenthesis(((TernaryInsn) insn).getCondition());
 			}
-			for (InsnArg arg : insn.getArguments()) {
+			int argsCount = insn.getArgsCount();
+			for (int i = 0; i < argsCount; i++) {
+				InsnArg arg = insn.getArg(i);
 				if (arg.isInsnWrap()) {
 					InsnNode wrapInsn = ((InsnWrapArg) arg).getWrapInsn();
 					removeParenthesis(wrapInsn);
@@ -279,16 +297,105 @@ public class PrepareForCodeGen extends AbstractVisitor {
 			ctrInsn.getRegisterArgs(regArgs);
 			regArgs.remove(mth.getThisArg());
 			mth.getArgRegs().forEach(regArgs::remove);
+			if (!regArgs.isEmpty() && inlineConstConstructorArgs(mth, ctrInsn, regArgs)) {
+				regArgs.clear();
+				ctrInsn.getRegisterArgs(regArgs);
+				regArgs.remove(mth.getThisArg());
+				mth.getArgRegs().forEach(regArgs::remove);
+			}
 			if (!regArgs.isEmpty()) {
 				mth.addWarnComment("Illegal instructions before constructor call");
 				return;
 			}
-			mth.addWarnComment("'" + callType + "' call moved to the top of the method (can break code semantics)");
+			if (!isSafeKotlinContinuationConstructorMove(mth, ctrInsn, blockByInsn)) {
+				mth.addWarnComment("'" + callType + "' call moved to the top of the method (can break code semantics)");
+			}
 		}
 
 		// move confirmed
 		InsnList.remove(blockByInsn, ctrInsn);
 		mth.getRegion().getSubBlocks().add(0, new InsnContainer(ctrInsn));
+	}
+
+	private static boolean inlineConstConstructorArgs(MethodNode mth, ConstructorInsn ctrInsn, Set<RegisterArg> regArgs) {
+		Set<InsnNode> assignInsns = new HashSet<>();
+		for (RegisterArg regArg : regArgs) {
+			if (regArg.getSVar() == null) {
+				return false;
+			}
+			InsnNode assignInsn = regArg.getSVar().getAssignInsn();
+			if (assignInsn == null
+					|| assignInsn.getType() != InsnType.CONST
+					|| regArg.getSVar().getUseList().stream().anyMatch(use -> use.getParentInsn() != ctrInsn)) {
+				return false;
+			}
+			assignInsns.add(assignInsn);
+		}
+		for (RegisterArg regArg : regArgs) {
+			InsnArg constArg = regArg.getSVar().getAssignInsn().getArg(0);
+			for (RegisterArg use : new ArrayList<>(regArg.getSVar().getUseList())) {
+				ctrInsn.replaceArg(use, constArg.duplicate());
+			}
+		}
+		for (InsnNode assignInsn : assignInsns) {
+			BlockNode assignBlock = BlockUtils.getBlockByInsn(mth, assignInsn);
+			if (assignBlock != null) {
+				InsnList.remove(assignBlock, assignInsn);
+			}
+		}
+		return true;
+	}
+
+	private static boolean isSafeKotlinContinuationConstructorMove(MethodNode mth, ConstructorInsn ctrInsn, BlockNode block) {
+		if (!ctrInsn.isSuper() || !isKotlinContinuationClass(mth.getParentClass().getSuperClass())) {
+			return false;
+		}
+		if (BlockUtils.followEmptyPath(mth.getEnterBlock()) != block) {
+			return false;
+		}
+		RegisterArg thisArg = mth.getThisArg();
+		for (InsnNode insn : block.getInstructions()) {
+			if (insn == ctrInsn) {
+				return true;
+			}
+			if (insn.contains(AFlag.DONT_GENERATE)) {
+				continue;
+			}
+			if (insn.getType() != InsnType.IPUT
+					|| !isSameRegister(insn.getArg(1), thisArg)
+					|| !isMethodArgument(mth, insn.getArg(0))) {
+				return false;
+			}
+		}
+		return false;
+	}
+
+	private static boolean isKotlinContinuationClass(@Nullable ArgType superClass) {
+		if (superClass == null || !superClass.isObject()) {
+			return false;
+		}
+		switch (superClass.getObject()) {
+			case "kotlin.coroutines.jvm.internal.BaseContinuationImpl":
+			case "kotlin.coroutines.jvm.internal.ContinuationImpl":
+			case "kotlin.coroutines.jvm.internal.RestrictedContinuationImpl":
+			case "kotlin.coroutines.jvm.internal.SuspendLambda":
+			case "kotlin.coroutines.jvm.internal.RestrictedSuspendLambda":
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	private static boolean isSameRegister(InsnArg arg, @Nullable RegisterArg expected) {
+		return expected != null && arg.isRegister() && ((RegisterArg) arg).sameCodeVar(expected);
+	}
+
+	private static boolean isMethodArgument(MethodNode mth, InsnArg arg) {
+		if (!arg.isRegister()) {
+			return false;
+		}
+		RegisterArg registerArg = (RegisterArg) arg;
+		return mth.getArgRegs().stream().anyMatch(methodArg -> registerArg.sameCodeVar(methodArg));
 	}
 
 	private @Nullable ConstructorInsn searchConstructorCall(MethodNode mth) {

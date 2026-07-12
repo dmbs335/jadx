@@ -88,7 +88,7 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 	// Unresolved methods that use this method
 	private List<MethodInfo> unresolvedUsed = Collections.emptyList();
 	// Methods that this method uses
-	private Set<MethodNode> methodsUsed = new HashSet<>();
+	private Set<MethodNode> methodsUsed = Collections.emptySet();
 	// True if this method contains a self call
 	private boolean callsSelf = false;
 
@@ -730,12 +730,15 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 
 	public void addUsed(MethodNode used) {
 		if (used != null) {
-			this.methodsUsed.add(used);
+			if (methodsUsed.isEmpty()) {
+				methodsUsed = new HashSet<>();
+			}
+			methodsUsed.add(used);
 		}
 	}
 
 	public void setUsed(List<MethodNode> methodsUsed) {
-		this.methodsUsed = new HashSet<>(methodsUsed);
+		this.methodsUsed = methodsUsed.isEmpty() ? Collections.emptySet() : new HashSet<>(methodsUsed);
 	}
 
 	public Set<MethodNode> getUsed() {
@@ -762,7 +765,13 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 	// Remove any methods from the list of used methods (calees) if this method (caller) has been
 	// removed from the calee's list of callers
 	private void removeInvalidMethodsUsed() {
+		if (methodsUsed.isEmpty()) {
+			return;
+		}
 		methodsUsed.removeIf(methodUsed -> !methodUsed.getUseIn().contains(this));
+		if (methodsUsed.isEmpty()) {
+			methodsUsed = Collections.emptySet();
+		}
 	}
 
 	public JavaMethod getJavaNode() {

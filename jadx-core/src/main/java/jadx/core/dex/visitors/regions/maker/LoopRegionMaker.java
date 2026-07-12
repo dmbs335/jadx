@@ -587,7 +587,7 @@ final class LoopRegionMaker {
 			}
 		}
 
-		Region body = regionMaker.makeRegion(loopStart);
+		Region body = regionMaker.makeRegionAfterRemovingLoop(loopStart);
 		BlockNode loopEnd = loop.getEnd();
 		if (!RegionUtils.isRegionContainsBlock(body, loopEnd)
 				&& !loopEnd.contains(AType.EXC_HANDLER)

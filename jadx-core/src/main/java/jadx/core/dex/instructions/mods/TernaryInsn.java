@@ -3,6 +3,7 @@ package jadx.core.dex.instructions.mods;
 import java.util.Collection;
 import java.util.function.Consumer;
 
+import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -96,7 +97,7 @@ public final class TernaryInsn extends InsnNode {
 		super.rebindArgs();
 		for (RegisterArg reg : condition.getRegisterArgs()) {
 			InsnNode parentInsn = reg.getParentInsn();
-			if (parentInsn != null) {
+			if (parentInsn != null && !parentInsn.contains(AFlag.REMOVE)) {
 				parentInsn.rebindArgs();
 			}
 		}

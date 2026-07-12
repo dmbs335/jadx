@@ -43,12 +43,15 @@ final class ArgsInfo {
 		if (insn.getType() == InsnType.TERNARY) {
 			args.addAll(((TernaryInsn) insn).getCondition().getRegisterArgs());
 		}
-		for (InsnArg arg : insn.getArguments()) {
+		int argsCount = insn.getArgsCount();
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = insn.getArg(i);
 			if (arg.isRegister()) {
 				args.add((RegisterArg) arg);
 			}
 		}
-		for (InsnArg arg : insn.getArguments()) {
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = insn.getArg(i);
 			if (arg.isInsnWrap()) {
 				addArgs(((InsnWrapArg) arg).getWrapInsn(), args);
 			}

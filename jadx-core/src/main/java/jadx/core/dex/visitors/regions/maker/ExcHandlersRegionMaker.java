@@ -50,7 +50,12 @@ public class ExcHandlersRegionMaker {
 				BlockNode handlerBlock = handler.getHandlerBlock();
 				if (handlerBlock != null) {
 					blocks.add(handlerBlock);
-					splitters.add(BlockUtils.getTopSplitterForHandler(handlerBlock));
+					BlockNode splitter = BlockUtils.findTopSplitterForHandler(handlerBlock);
+					if (splitter != null) {
+						splitters.add(splitter);
+					} else {
+						mth.addDebugComment("No top splitter for exception handler: " + handler);
+					}
 				} else {
 					mth.addDebugComment("No exception handler block: " + handler);
 				}

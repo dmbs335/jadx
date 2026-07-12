@@ -6,6 +6,7 @@ import java.util.List;
 
 import jadx.api.ICodeWriter;
 import jadx.core.codegen.RegionGen;
+import jadx.core.dex.instructions.SwitchInsn;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IBranchRegion;
 import jadx.core.dex.nodes.IContainer;
@@ -23,12 +24,14 @@ public final class SwitchRegion extends AbstractRegion implements IBranchRegion 
 	};
 
 	private final BlockNode header;
+	private final SwitchInsn insn;
 
 	private final List<CaseInfo> cases;
 
-	public SwitchRegion(IRegion parent, BlockNode header) {
+	public SwitchRegion(IRegion parent, BlockNode header, SwitchInsn insn) {
 		super(parent);
 		this.header = header;
+		this.insn = insn;
 		this.cases = new ArrayList<>();
 	}
 
@@ -58,6 +61,10 @@ public final class SwitchRegion extends AbstractRegion implements IBranchRegion 
 		return header;
 	}
 
+	public SwitchInsn getInsn() {
+		return insn;
+	}
+
 	public void addCase(List<Object> keysList, IContainer c) {
 		cases.add(new CaseInfo(keysList, c));
 	}
@@ -83,6 +90,19 @@ public final class SwitchRegion extends AbstractRegion implements IBranchRegion 
 	@Override
 	public List<IContainer> getBranches() {
 		return Collections.unmodifiableList(getCaseContainers());
+	}
+
+	@Override
+	public boolean replaceSubBlock(IContainer oldBlock, IContainer newBlock) {
+		for (int i = 0; i < cases.size(); i++) {
+			CaseInfo caseInfo = cases.get(i);
+			if (caseInfo.getContainer() == oldBlock) {
+				cases.set(i, new CaseInfo(caseInfo.getKeys(), newBlock));
+				updateParent(newBlock, this);
+				return true;
+			}
+		}
+		return false;
 	}
 
 	@Override

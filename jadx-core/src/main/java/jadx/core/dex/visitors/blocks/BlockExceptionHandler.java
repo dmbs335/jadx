@@ -498,6 +498,9 @@ public class BlockExceptionHandler {
 			@Nullable BlockNode bottomSplitterBlock) {
 		for (ExceptionHandler handler : tryCatchBlock.getHandlers()) {
 			BlockNode handlerBlock = handler.getHandlerBlock();
+			if (handlerBlock == null) {
+				continue;
+			}
 			BlockSplitter.connect(topSplitterBlock, handlerBlock);
 			if (bottomSplitterBlock != null) {
 				BlockSplitter.connect(bottomSplitterBlock, handlerBlock);

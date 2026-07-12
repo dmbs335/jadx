@@ -5,7 +5,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import jadx.core.dex.attributes.AType;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.Edge;
 import jadx.core.utils.BlockUtils;
@@ -47,7 +46,7 @@ public class LoopInfo {
 		for (BlockNode block : blocks) {
 			// exit: successor node not from this loop, (don't change to getCleanSuccessors)
 			for (BlockNode s : block.getSuccessors()) {
-				if (!blocks.contains(s) && !s.contains(AType.EXC_HANDLER)) {
+				if (!blocks.contains(s) && !BlockUtils.isExceptionHandlerPath(s)) {
 					nodes.add(block);
 				}
 			}

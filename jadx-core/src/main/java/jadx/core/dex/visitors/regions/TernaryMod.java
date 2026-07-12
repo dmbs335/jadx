@@ -107,7 +107,10 @@ public class TernaryMod extends AbstractRegionVisitor implements IRegionIterativ
 		if (thenResArg != null && elseResArg != null) {
 			PhiInsn thenPhi = thenResArg.getSVar().getOnlyOneUseInPhi();
 			PhiInsn elsePhi = elseResArg.getSVar().getOnlyOneUseInPhi();
-			if (thenPhi == null || thenPhi != elsePhi) {
+			if (thenPhi == null
+					|| thenPhi != elsePhi
+					|| thenResArg.getSVar().getUseCount() != 1
+					|| elseResArg.getSVar().getUseCount() != 1) {
 				return false;
 			}
 			if (!ifRegion.getParent().replaceSubBlock(ifRegion, header)) {
@@ -297,6 +300,10 @@ public class TernaryMod extends AbstractRegionVisitor implements IRegionIterativ
 		if (phiInsn == null || phiInsn.getArgsCount() != 2) {
 			return;
 		}
+		RegisterArg phiResult = phiInsn.getResult();
+		if (phiResult == null || phiResult.getSVar() == null) {
+			return;
+		}
 		RegisterArg otherArg = null;
 		for (InsnArg arg : phiInsn.getArguments()) {
 			if (!resArg.sameRegAndSVar(arg)) {
@@ -312,7 +319,7 @@ public class TernaryMod extends AbstractRegionVisitor implements IRegionIterativ
 			// forcing ternary inline for constructors (will help in moving super call to the top) and enums
 			// skip code style checks
 		} else {
-			if (elseAssign != null && elseAssign.isConstInsn()) {
+			if (elseAssign != null && elseAssign.isConstInsn() && elseAssign.getResult() != null) {
 				if (!verifyLineHints(mth, insn, elseAssign)) {
 					return;
 				}
@@ -330,7 +337,7 @@ public class TernaryMod extends AbstractRegionVisitor implements IRegionIterativ
 			return;
 		}
 		InsnArg elseArg;
-		if (elseAssign != null && elseAssign.isConstInsn()) {
+		if (elseAssign != null && elseAssign.isConstInsn() && elseAssign.getResult() != null) {
 			// inline constant
 			elseArg = InsnArg.wrapInsnIntoArg(elseAssign.copyWithoutResult());
 			SSAVar elseVar = elseAssign.getResult().getSVar();
@@ -341,7 +348,7 @@ public class TernaryMod extends AbstractRegionVisitor implements IRegionIterativ
 			elseArg = otherArg.duplicate();
 		}
 		InsnArg thenArg = InsnArg.wrapInsnIntoArg(insn);
-		RegisterArg resultArg = phiInsn.getResult().duplicate();
+		RegisterArg resultArg = phiResult.duplicate();
 		TernaryInsn ternInsn = new TernaryInsn(ifRegion.getCondition(), resultArg, thenArg, elseArg);
 		ternInsn.simplifyCondition();
 

@@ -1,8 +1,12 @@
 package jadx.core.dex.visitors.regions.maker;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -14,10 +18,13 @@ import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.SwitchInsn;
 import jadx.core.dex.nodes.BlockNode;
+import jadx.core.dex.nodes.IContainer;
+import jadx.core.dex.nodes.IRegion;
 import jadx.core.dex.nodes.InsnContainer;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.Region;
+import jadx.core.dex.regions.conditions.IfRegion;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.blocks.BlockSet;
 import jadx.core.utils.exceptions.JadxOverflowException;
@@ -32,9 +39,14 @@ public class RegionMaker {
 	private final LoopRegionMaker loopMaker;
 
 	private final BlockSet processedBlocks;
+	private final Map<BlockNode, List<Set<BlockNode>>> activeRegionStates = new HashMap<>();
+	private final BlockSet recursiveRegionBlocks;
+	private final BlockSet traversalCycleBlocks;
 	private final int regionsLimit;
 
 	private int regionsCount;
+	private int duplicatedBlocksCount;
+	private @Nullable BlockNode firstDuplicatedBlock;
 
 	public RegionMaker(MethodNode mth) {
 		this.mth = mth;
@@ -42,11 +54,65 @@ public class RegionMaker {
 		this.ifMaker = new IfRegionMaker(mth, this);
 		this.loopMaker = new LoopRegionMaker(mth, this, ifMaker);
 		this.processedBlocks = BlockSet.empty(mth);
+		this.recursiveRegionBlocks = BlockSet.empty(mth);
+		this.traversalCycleBlocks = BlockSet.empty(mth);
 		this.regionsLimit = mth.getBasicBlocks().size() * 400;
 	}
 
 	public Region makeMthRegion() {
-		return makeRegion(mth.getEnterBlock());
+		Region region = makeRegion(mth.getEnterBlock());
+		restoreLinearSyntheticMoveBlocks(region);
+		if (duplicatedBlocksCount != 0) {
+			BlockNode firstBlock = Objects.requireNonNull(firstDuplicatedBlock);
+			mth.addWarnComment("Code duplicated in " + duplicatedBlocksCount
+					+ " blocks, first: " + firstBlock + ' ' + firstBlock.getAttributesString());
+		}
+		return region;
+	}
+
+	private void restoreLinearSyntheticMoveBlocks(Region rootRegion) {
+		for (BlockNode block : mth.getBasicBlocks()) {
+			if (!block.contains(AFlag.SYNTHETIC)
+					|| block.getPredecessors().size() != 1
+					|| block.getCleanSuccessors().size() != 1
+					|| block.getInstructions().isEmpty()
+					|| block.getInstructions().stream().anyMatch(insn -> insn.getType() != InsnType.MOVE)
+					|| containsContainer(rootRegion, block)) {
+				continue;
+			}
+			insertAfterPredecessor(rootRegion, block.getPredecessors().get(0), block);
+		}
+	}
+
+	private static boolean containsContainer(IRegion region, IContainer target) {
+		for (IContainer container : region.getSubBlocks()) {
+			if (container == target) {
+				return true;
+			}
+			if (container instanceof IRegion && containsContainer((IRegion) container, target)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static void insertAfterPredecessor(IRegion region, BlockNode predecessor, BlockNode block) {
+		List<IContainer> subBlocks = region.getSubBlocks();
+		if (region instanceof Region) {
+			for (int i = subBlocks.size() - 1; i >= 0; i--) {
+				IContainer container = subBlocks.get(i);
+				if (container == predecessor
+						|| container instanceof IfRegion
+								&& ((IfRegion) container).getConditionBlocks().contains(predecessor)) {
+					subBlocks.add(i + 1, block);
+				}
+			}
+		}
+		for (IContainer container : new ArrayList<>(subBlocks)) {
+			if (container instanceof IRegion) {
+				insertAfterPredecessor((IRegion) container, predecessor, block);
+			}
+		}
 	}
 
 	Region makeRegion(BlockNode startBlock) {
@@ -56,23 +122,61 @@ public class RegionMaker {
 			insertEdgeInsns(region, startBlock);
 			return region;
 		}
-		if (processedBlocks.addChecked(startBlock)) {
-			// Add block to multiple regions (duplicate the instructions in decompiled code)
-			// and allow processing to continue
-			if (!startBlock.contains(AFlag.DUPLICATED)) {
-				mth.addWarnComment("Code duplicated, block: " + startBlock + ' ' + startBlock.getAttributesString());
-				startBlock.add(AFlag.DUPLICATED);
+		Set<BlockNode> exits = new HashSet<>();
+		stack.getExits().forEach(exits::add);
+		List<Set<BlockNode>> activeStates = activeRegionStates.computeIfAbsent(startBlock, k -> new ArrayList<>());
+		if (activeStates.contains(exits)) {
+			if (!recursiveRegionBlocks.addChecked(startBlock)) {
+				mth.addWarnComment("Recursive region processing prevented at block: " + startBlock);
+			}
+			return region;
+		}
+		activeStates.add(exits);
+		try {
+			if (processedBlocks.addChecked(startBlock)) {
+				// Add block to multiple regions (duplicate the instructions in decompiled code)
+				// and allow processing to continue
+				if (!startBlock.contains(AFlag.DUPLICATED)) {
+					if (firstDuplicatedBlock == null) {
+						firstDuplicatedBlock = startBlock;
+					}
+					duplicatedBlocksCount++;
+					startBlock.add(AFlag.DUPLICATED);
+				}
+			}
+			BlockSet regionBlocks = BlockSet.empty(mth);
+			BlockNode next = startBlock;
+			while (next != null) {
+				if (regionBlocks.addChecked(next)) {
+					if (!traversalCycleBlocks.addChecked(next)) {
+						mth.addWarnComment("Region traversal cycle prevented at block: " + next);
+					}
+					break;
+				}
+				next = traverse(region, next);
+				regionsCount++;
+				if (regionsCount > regionsLimit) {
+					throw new JadxOverflowException("Regions count limit reached at block " + startBlock);
+				}
+			}
+			return region;
+		} finally {
+			activeStates.remove(exits);
+			if (activeStates.isEmpty()) {
+				activeRegionStates.remove(startBlock);
 			}
 		}
-		BlockNode next = startBlock;
-		while (next != null) {
-			next = traverse(region, next);
-			regionsCount++;
-			if (regionsCount > regionsLimit) {
-				throw new JadxOverflowException("Regions count limit reached at block " + startBlock);
+	}
+
+	Region makeRegionAfterRemovingLoop(BlockNode startBlock) {
+		List<Set<BlockNode>> outerStates = activeRegionStates.remove(startBlock);
+		try {
+			return makeRegion(startBlock);
+		} finally {
+			if (outerStates != null && !outerStates.isEmpty()) {
+				activeRegionStates.put(startBlock, outerStates);
 			}
 		}
-		return region;
 	}
 
 	/**

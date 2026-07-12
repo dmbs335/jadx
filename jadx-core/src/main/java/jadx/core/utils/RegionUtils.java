@@ -334,7 +334,9 @@ public class RegionUtils {
 		if (container instanceof IBlock) {
 			List<InsnNode> insnList = ((IBlock) container).getInstructions();
 			int count = 0;
-			for (InsnNode insn : insnList) {
+			int insnsCount = insnList.size();
+			for (int i = 0; i < insnsCount; i++) {
+				InsnNode insn = insnList.get(i);
 				if (insn.contains(AFlag.DONT_GENERATE)) {
 					continue;
 				}
@@ -345,8 +347,10 @@ public class RegionUtils {
 		if (container instanceof IRegion) {
 			IRegion region = (IRegion) container;
 			int count = 0;
-			for (IContainer block : region.getSubBlocks()) {
-				count += insnsCount(block);
+			List<IContainer> subBlocks = region.getSubBlocks();
+			int subBlocksCount = subBlocks.size();
+			for (int i = 0; i < subBlocksCount; i++) {
+				count += insnsCount(subBlocks.get(i));
 			}
 			return count;
 		}

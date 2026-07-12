@@ -2,11 +2,9 @@ package jadx.core.dex.attributes;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.EnumSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.function.Consumer;
 
 import jadx.api.plugins.input.data.annotations.IAnnotation;
@@ -25,6 +23,7 @@ import jadx.core.utils.exceptions.JadxRuntimeException;
  * ({@link IJadxAttrType})<br>
  */
 public class AttributeStorage {
+	private static final AFlag[] FLAGS = AFlag.values();
 
 	public static AttributeStorage fromList(List<IJadxAttribute> list) {
 		AttributeStorage storage = new AttributeStorage();
@@ -33,24 +32,23 @@ public class AttributeStorage {
 	}
 
 	static {
-		int flagsCount = AFlag.values().length;
+		int flagsCount = FLAGS.length;
 		if (flagsCount >= 64) {
-			throw new JadxRuntimeException("Try to reduce flags count to 64 for use one long in EnumSet, now " + flagsCount);
+			throw new JadxRuntimeException("Try to reduce flags count to 64 for use one long bit set, now " + flagsCount);
 		}
 	}
 
 	private static final Map<IJadxAttrType<?>, IJadxAttribute> EMPTY_ATTRIBUTES = Collections.emptyMap();
 
-	private final Set<AFlag> flags;
+	private long flags;
 	private Map<IJadxAttrType<?>, IJadxAttribute> attributes;
 
 	public AttributeStorage() {
-		flags = EnumSet.noneOf(AFlag.class);
 		attributes = EMPTY_ATTRIBUTES;
 	}
 
 	public void add(AFlag flag) {
-		flags.add(flag);
+		flags |= flagMask(flag);
 	}
 
 	public void add(IJadxAttribute attr) {
@@ -80,14 +78,14 @@ public class AttributeStorage {
 	}
 
 	public void addAll(AttributeStorage otherList) {
-		flags.addAll(otherList.flags);
+		flags |= otherList.flags;
 		if (!otherList.attributes.isEmpty()) {
 			writeAttributes(m -> m.putAll(otherList.attributes));
 		}
 	}
 
 	public boolean contains(AFlag flag) {
-		return flags.contains(flag);
+		return (flags & flagMask(flag)) != 0;
 	}
 
 	public <T extends IJadxAttribute> boolean contains(IJadxAttrType<T> type) {
@@ -113,11 +111,11 @@ public class AttributeStorage {
 	}
 
 	public void remove(AFlag flag) {
-		flags.remove(flag);
+		flags &= ~flagMask(flag);
 	}
 
 	public void clearFlags() {
-		flags.clear();
+		flags = 0;
 	}
 
 	public <T extends IJadxAttribute> void remove(IJadxAttrType<T> type) {
@@ -158,13 +156,15 @@ public class AttributeStorage {
 	}
 
 	public List<String> getAttributeStrings() {
-		int size = flags.size() + attributes.size();
+		int size = Long.bitCount(flags) + attributes.size();
 		if (size == 0) {
 			return Collections.emptyList();
 		}
 		List<String> list = new ArrayList<>(size);
-		for (AFlag a : flags) {
-			list.add(a.toString());
+		for (AFlag flag : FLAGS) {
+			if (contains(flag)) {
+				list.add(flag.toString());
+			}
 		}
 		for (IJadxAttribute a : attributes.values()) {
 			list.add(a.toAttrString());
@@ -173,7 +173,11 @@ public class AttributeStorage {
 	}
 
 	public boolean isEmpty() {
-		return flags.isEmpty() && attributes.isEmpty();
+		return flags == 0 && attributes.isEmpty();
+	}
+
+	private static long flagMask(AFlag flag) {
+		return 1L << flag.ordinal();
 	}
 
 	@Override

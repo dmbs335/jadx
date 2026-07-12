@@ -1,6 +1,7 @@
 package jadx.core.dex.visitors;
 
 import java.util.ArrayList;
+import java.util.ConcurrentModificationException;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -114,25 +115,48 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 			return;
 		}
 		try {
-			blocks: for (BlockNode block : mth.getBasicBlocks()) {
+			scanInstructions(mth, false);
+		} catch (ConcurrentModificationException e) {
+			try {
+				scanInstructions(mth, true);
+			} catch (Exception retryException) {
+				retryException.addSuppressed(e);
+				mth.addWarnComment("Failed to analyze thrown exceptions", retryException);
+			}
+		} catch (Exception e) {
+			mth.addWarnComment("Failed to analyze thrown exceptions", e);
+		}
+	}
+
+	private void scanInstructions(MethodNode mth, boolean snapshot) throws JadxException {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		if (snapshot) {
+			blocks = new ArrayList<>(blocks);
+		}
+		blocks: for (BlockNode block : blocks) {
 				// Skip e.g. throw instructions of synchronized regions
 				boolean skipExceptions = block.contains(AFlag.REMOVE) || block.contains(AFlag.DONT_GENERATE);
 				Set<String> excludedExceptions = new HashSet<>();
 				CatchAttr catchAttr = block.get(AType.EXC_CATCH);
 				if (catchAttr != null) {
-					for (ExceptionHandler handler : catchAttr.getHandlers()) {
+					List<ExceptionHandler> handlers = catchAttr.getHandlers();
+					if (snapshot) {
+						handlers = new ArrayList<>(handlers);
+					}
+					for (ExceptionHandler handler : handlers) {
 						if (handler.isCatchAll()) {
 							continue blocks;
 						}
 						excludedExceptions.add(handler.getArgType().toString());
 					}
 				}
-				for (InsnNode insn : block.getInstructions()) {
+				List<InsnNode> instructions = block.getInstructions();
+				if (snapshot) {
+					instructions = new ArrayList<>(instructions);
+				}
+				for (InsnNode insn : instructions) {
 					checkInsn(mth, insn, excludedExceptions, skipExceptions);
 				}
-			}
-		} catch (Exception e) {
-			mth.addWarnComment("Failed to analyze thrown exceptions", e);
 		}
 	}
 

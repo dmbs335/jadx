@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import jadx.api.JadxArgs;
+import jadx.core.dex.attributes.nodes.ClassTypeVarsAttr;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.RootNode;
 
@@ -46,5 +47,11 @@ class TypeUtilsTest {
 
 		ArgType expected = ArgType.generic("java.util.List", ArgType.wildcard(ArgType.OBJECT, ArgType.WildcardBound.SUPER));
 		assertThat(result).isEqualTo(expected);
+	}
+
+	@Test
+	public void testGetTypeVarsMapForNonObjectType() {
+		assertThat(ClassTypeVarsAttr.EMPTY.getTypeVarsMapFor(ArgType.INT)).isEmpty();
+		assertThat(ClassTypeVarsAttr.EMPTY.getTypeVarsMapFor(ArgType.UNKNOWN)).isEmpty();
 	}
 }

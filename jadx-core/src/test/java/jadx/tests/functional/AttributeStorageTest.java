@@ -4,6 +4,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import jadx.api.plugins.input.data.attributes.IJadxAttribute;
+import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.AttributeStorage;
 
@@ -29,6 +30,29 @@ public class AttributeStorageTest {
 		storage.add(SYNTHETIC);
 		storage.remove(SYNTHETIC);
 		assertThat(storage.contains(SYNTHETIC)).isFalse();
+	}
+
+	@Test
+	public void testAllFlags() {
+		for (AFlag flag : AFlag.values()) {
+			storage.add(flag);
+		}
+		for (AFlag flag : AFlag.values()) {
+			assertThat(storage.contains(flag)).isTrue();
+		}
+
+		storage.clearFlags();
+		assertThat(storage.isEmpty()).isTrue();
+	}
+
+	@Test
+	public void testCopyFlags() {
+		AttributeStorage other = new AttributeStorage();
+		other.add(SYNTHETIC);
+
+		storage.addAll(other);
+
+		assertThat(storage.contains(SYNTHETIC)).isTrue();
 	}
 
 	public static final AType<TestAttr> TEST = new AType<>();

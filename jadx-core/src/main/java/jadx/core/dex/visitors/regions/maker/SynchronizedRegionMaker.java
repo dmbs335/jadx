@@ -5,10 +5,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.instructions.ConstClassNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.ArgType;
@@ -68,6 +70,9 @@ public class SynchronizedRegionMaker {
 		} else if (exits.size() > 1) {
 			cacheSet.clear();
 			exit = traverseMonitorExitsCross(body, exits, cacheSet);
+			if (exit == null) {
+				exit = selectUniqueLoopContinuation(block, exits);
+			}
 		}
 
 		stack.push(synchRegion);
@@ -87,6 +92,34 @@ public class SynchronizedRegionMaker {
 		synchRegion.getSubBlocks().add(regionMaker.makeRegion(body));
 		stack.pop();
 		return exit;
+	}
+
+	private @Nullable BlockNode selectUniqueLoopContinuation(BlockNode syncBlock, Set<BlockNode> exits) {
+		if (!ArgType.VOID.equals(mth.getReturnType())) {
+			return null;
+		}
+		List<LoopInfo> loops = mth.getAllLoopsForBlock(syncBlock);
+		if (loops.isEmpty()) {
+			return null;
+		}
+		LoopInfo innerLoop = loops.get(0);
+		for (LoopInfo loop : loops) {
+			if (loop.getLoopBlocks().size() < innerLoop.getLoopBlocks().size()) {
+				innerLoop = loop;
+			}
+		}
+		BlockNode continuation = null;
+		for (BlockNode exitBlock : exits) {
+			BlockNode next = getNextBlock(exitBlock);
+			if (next == null || !innerLoop.getLoopBlocks().contains(next)) {
+				continue;
+			}
+			if (continuation != null && continuation != next) {
+				return null;
+			}
+			continuation = next;
+		}
+		return continuation;
 	}
 
 	/**
@@ -167,7 +200,9 @@ public class SynchronizedRegionMaker {
 				InsnNode constInsn = syncArg.unwrap();
 				if (constInsn.getType() == InsnType.CONST_CLASS) {
 					ArgType clsType = ((ConstClassNode) constInsn).getClsType();
-					if (clsType.equals(mth.getParentClass().getType())) {
+					ArgType parentType = mth.getParentClass().getType();
+					if (clsType.equals(parentType)
+							|| clsType.isObject() && parentType.isObject() && clsType.getObject().equals(parentType.getObject())) {
 						return true;
 					}
 				}

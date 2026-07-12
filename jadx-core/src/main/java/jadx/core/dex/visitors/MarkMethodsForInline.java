@@ -16,6 +16,7 @@ import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
+import jadx.core.dex.instructions.mods.TernaryInsn;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.visitors.fixaccessmodifiers.FixAccessModifiers;
@@ -130,6 +131,13 @@ public class MarkMethodsForInline extends AbstractVisitor {
 	}
 
 	private static @Nullable MethodInlineAttr addInlineAttr(MethodNode mth, InsnNode insn, boolean isCopy) {
+		Boolean containsTernary = insn.visitInsns(innerInsn -> innerInsn instanceof TernaryInsn ? Boolean.TRUE : null);
+		if (containsTernary != null) {
+			if (isCopy) {
+				unbindSsaVars(insn);
+			}
+			return null;
+		}
 		if (!fixVisibilityOfInlineCode(mth, insn)) {
 			if (isCopy) {
 				unbindSsaVars(insn);

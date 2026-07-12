@@ -1,6 +1,8 @@
 package jadx.core.dex.visitors.typeinference;
 
+import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.dex.visitors.JadxVisitor;
@@ -21,7 +23,7 @@ public final class FinishTypeInference extends AbstractVisitor {
 		}
 		mth.getSVars().forEach(var -> {
 			ArgType type = var.getTypeInfo().getType();
-			if (!type.isTypeKnown()) {
+			if (!type.isTypeKnown() && hasGeneratedUse(var)) {
 				mth.addWarnComment("Type inference failed for: " + var.getDetailedVarInfo(mth));
 			}
 			ArgType codeVarType = var.getCodeVar().getType();
@@ -29,6 +31,12 @@ public final class FinishTypeInference extends AbstractVisitor {
 				var.getCodeVar().setType(ArgType.UNKNOWN);
 			}
 		});
+	}
+
+	static boolean hasGeneratedUse(SSAVar var) {
+		return var.getUseList().stream()
+				.map(arg -> arg.getParentInsn())
+				.anyMatch(insn -> insn != null && !insn.contains(AFlag.DONT_GENERATE));
 	}
 
 	@Override

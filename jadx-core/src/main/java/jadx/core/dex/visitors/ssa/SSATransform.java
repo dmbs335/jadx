@@ -11,7 +11,9 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.PhiInsn;
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
@@ -35,6 +37,8 @@ import jadx.core.utils.exceptions.JadxRuntimeException;
 		runAfter = BlockProcessor.class
 )
 public class SSATransform extends AbstractVisitor {
+	private static final String KOTLIN_NULL_OUT_SPILLED_VAR =
+			"kotlin.coroutines.jvm.internal.SpillingKt.nullOutSpilledVariable(Ljava/lang/Object;)Ljava/lang/Object;";
 
 	@Override
 	public void visit(MethodNode mth) throws JadxException {
@@ -48,6 +52,7 @@ public class SSATransform extends AbstractVisitor {
 		if (!mth.getSVars().isEmpty()) {
 			return;
 		}
+		replaceKotlinSpillingArgs(mth);
 		LiveVarAnalysis la = new LiveVarAnalysis(mth);
 		la.runAnalysis();
 		int regsCount = mth.getRegsCount();
@@ -61,6 +66,18 @@ public class SSATransform extends AbstractVisitor {
 		markThisArgs(mth.getThisArg());
 		hidePhiInsns(mth);
 		removeUnusedInvokeResults(mth);
+	}
+
+	private static void replaceKotlinSpillingArgs(MethodNode mth) {
+		for (BlockNode block : mth.getBasicBlocks()) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.getType() == InsnType.INVOKE
+						&& insn.getArgsCount() == 1
+						&& ((InvokeNode) insn).getCallMth().getRawFullId().equals(KOTLIN_NULL_OUT_SPILLED_VAR)) {
+					insn.setArg(0, InsnArg.lit(0, ArgType.OBJECT));
+				}
+			}
+		}
 	}
 
 	private static void placePhi(MethodNode mth, int regNum, LiveVarAnalysis la) {
@@ -145,9 +162,14 @@ public class SSATransform extends AbstractVisitor {
 
 	private static void renameVarsInBlock(MethodNode mth, RenameState state) {
 		BlockNode block = state.getBlock();
-		for (InsnNode insn : block.getInstructions()) {
+		List<InsnNode> insns = block.getInstructions();
+		int insnsCount = insns.size();
+		for (int insnIndex = 0; insnIndex < insnsCount; insnIndex++) {
+			InsnNode insn = insns.get(insnIndex);
 			if (insn.getType() != InsnType.PHI) {
-				for (InsnArg arg : insn.getArguments()) {
+				int argsCount = insn.getArgsCount();
+				for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+					InsnArg arg = insn.getArg(argIndex);
 					if (!arg.isRegister()) {
 						continue;
 					}

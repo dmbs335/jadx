@@ -414,6 +414,9 @@ public class ModVisitor extends AbstractVisitor {
 		ArgType castType = (ArgType) insn.getIndex();
 		if (!ArgType.isCastNeeded(mth.root(), castArg.getType(), castType)) {
 			RegisterArg result = insn.getResult();
+			if (result.isTypeImmutable()) {
+				return;
+			}
 			result.setType(castArg.getType());
 
 			InsnNode move = new InsnNode(InsnType.MOVE, 1);
@@ -532,7 +535,9 @@ public class ModVisitor extends AbstractVisitor {
 	private static void anonymousCallArgMod(InsnArg arg) {
 		arg.add(AFlag.DONT_INLINE);
 		if (arg.isRegister()) {
-			((RegisterArg) arg).getSVar().getCodeVar().setFinal(true);
+			SSAVar sVar = ((RegisterArg) arg).getSVar();
+			InitCodeVariables.initCodeVar(sVar);
+			sVar.getCodeVar().setFinal(true);
 		}
 	}
 

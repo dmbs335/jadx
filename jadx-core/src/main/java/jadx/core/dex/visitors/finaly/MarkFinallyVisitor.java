@@ -226,7 +226,7 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 
 		BlockNode bottomBlock = BlockUtils.getBottomBlock(handlerBlocks);
 		if (bottomBlock == null) {
-			mth.addWarn("Bottom block not found for handler: " + handler);
+			LOG.debug("Bottom block not found for handler: {}, skip finally extraction in method: {}", handler, mth);
 			return handlerBlocks;
 		}
 		List<BlockNode> pathExits = BlockUtils.followEmptyUpPathWithinSet(bottomBlock, handlerBlocks);

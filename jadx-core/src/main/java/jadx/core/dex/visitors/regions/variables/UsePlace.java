@@ -37,7 +37,9 @@ public class UsePlace {
 
 	@Override
 	public int hashCode() {
-		return Objects.hash(region, block);
+		int result = 1;
+		result = 31 * result + Objects.hashCode(region);
+		return 31 * result + Objects.hashCode(block);
 	}
 
 	@Override

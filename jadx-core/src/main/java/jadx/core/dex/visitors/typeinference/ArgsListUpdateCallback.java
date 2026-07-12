@@ -1,6 +1,5 @@
 package jadx.core.dex.visitors.typeinference;
 
-import java.util.Iterator;
 import java.util.List;
 import java.util.function.Predicate;
 
@@ -19,7 +18,8 @@ import static jadx.core.dex.visitors.typeinference.TypeUpdateResult.SAME;
 public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCallback {
 	private final TypeUpdate typeUpdate;
 	private final TypeUpdateInfo updateInfo;
-	private final Iterator<T> argsIterator;
+	private final List<T> args;
+	private int argsIndex;
 	private final ArgType candidateType;
 	private final boolean direct;
 
@@ -34,7 +34,7 @@ public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCal
 			List<T> args, ArgType candidateType, boolean direct) {
 		this.typeUpdate = typeUpdate;
 		this.updateInfo = updateInfo;
-		this.argsIterator = args.iterator();
+		this.args = args;
 		this.candidateType = candidateType;
 		this.direct = direct;
 	}
@@ -101,17 +101,15 @@ public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCal
 	}
 
 	private @Nullable T getNextArg() {
-		Iterator<T> it = argsIterator;
 		Predicate<T> filter = argsFilter;
-		while (true) {
-			if (!it.hasNext()) {
-				return null;
-			}
-			T next = it.next();
+		int argsCount = args.size();
+		while (argsIndex < argsCount) {
+			T next = args.get(argsIndex++);
 			if (filter == null || filter.test(next)) {
 				return next;
 			}
 		}
+		return null;
 	}
 
 	@Override

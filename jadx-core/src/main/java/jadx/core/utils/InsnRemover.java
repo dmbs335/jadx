@@ -7,6 +7,8 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import jadx.core.Consts;
 import jadx.core.dex.attributes.AFlag;
@@ -32,6 +34,7 @@ import static jadx.core.utils.ListUtils.allMatch;
  * can be used while iterating over instructions list
  */
 public class InsnRemover {
+	private static final Logger LOG = LoggerFactory.getLogger(InsnRemover.class);
 
 	private final MethodNode mth;
 	private final List<InsnNode> toRemove;
@@ -126,7 +129,11 @@ public class InsnRemover {
 		if (mth != null) {
 			SSAVar ssaVar = r.getSVar();
 			if (ssaVar != null && ssaVar.getAssignInsn() == insn /* can be already reassigned */) {
-				removeSsaVar(mth, ssaVar);
+				try {
+					removeSsaVar(mth, ssaVar);
+				} catch (JadxRuntimeException e) {
+					LOG.debug("Keep SSA var from removed instruction because it is still in use: {}", ssaVar, e);
+				}
 			}
 		}
 		insn.setResult(null);

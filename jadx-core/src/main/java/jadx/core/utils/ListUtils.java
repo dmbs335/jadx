@@ -152,6 +152,15 @@ public class ListUtils {
 		return list;
 	}
 
+	/**
+	 * Replace an element in a new list without mutating the supplied list.
+	 * Useful for usage lists shared between parallel class-processing tasks.
+	 */
+	public static <T> List<T> safeReplaceCopy(List<T> list, T oldObj, T newObj) {
+		List<T> copy = list == null ? new ArrayList<>(1) : new ArrayList<>(list);
+		return safeReplace(copy, oldObj, newObj);
+	}
+
 	public static <T> void safeRemove(List<T> list, T obj) {
 		if (list != null && !list.isEmpty()) {
 			list.remove(obj);
