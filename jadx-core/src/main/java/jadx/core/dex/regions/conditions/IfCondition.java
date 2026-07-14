@@ -15,6 +15,7 @@ import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
+import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
@@ -201,6 +202,33 @@ public final class IfCondition extends AttrNode {
 			}
 		}
 		return cond;
+	}
+
+	public static boolean isUnsafeNotNullGuard(IfCondition guard, IfCondition dereference) {
+		if (!guard.isCompare() || !dereference.isCompare()) {
+			return false;
+		}
+		Compare guardCmp = guard.getCompare();
+		Compare dereferenceCmp = dereference.getCompare();
+		if (guardCmp.getOp() != IfOp.NE
+				|| dereferenceCmp.getOp() != IfOp.EQ
+				|| !(guardCmp.getA() instanceof RegisterArg)
+				|| !isNullLiteral(guardCmp.getB())
+				|| !isNullLiteral(dereferenceCmp.getB())
+				|| !(dereferenceCmp.getA() instanceof InsnWrapArg)) {
+			return false;
+		}
+		InsnNode wrappedInsn = ((InsnWrapArg) dereferenceCmp.getA()).getWrapInsn();
+		if (!(wrappedInsn instanceof InvokeNode)) {
+			return false;
+		}
+		InsnArg instanceArg = ((InvokeNode) wrappedInsn).getInstanceArg();
+		return instanceArg instanceof RegisterArg
+				&& ((RegisterArg) instanceArg).getSVar() == ((RegisterArg) guardCmp.getA()).getSVar();
+	}
+
+	private static boolean isNullLiteral(InsnArg arg) {
+		return arg.isZeroLiteral() && arg.getType().isObject();
 	}
 
 	private static IfCondition simplifyCmpOp(Compare c) {

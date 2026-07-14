@@ -15,6 +15,7 @@ import jadx.core.dex.attributes.nodes.ExcSplitCrossAttr;
 import jadx.core.dex.attributes.nodes.FieldReplaceAttr;
 import jadx.core.dex.attributes.nodes.ForceReturnAttr;
 import jadx.core.dex.attributes.nodes.GenericInfoAttr;
+import jadx.core.dex.attributes.nodes.InitAtDeclareVarsAttr;
 import jadx.core.dex.attributes.nodes.InlinedAttr;
 import jadx.core.dex.attributes.nodes.JadxCommentsAttr;
 import jadx.core.dex.attributes.nodes.JadxError;
@@ -81,6 +82,7 @@ public final class AType<T extends IJadxAttribute> implements IJadxAttrType<T> {
 	public static final AType<AttrList<TryCatchBlockAttr>> TRY_BLOCKS_LIST = new AType<>();
 	public static final AType<CodeFeaturesAttr> METHOD_CODE_FEATURES = new AType<>();
 	public static final AType<MethodThrowsAttr> METHOD_THROWS = new AType<>();
+	public static final AType<InitAtDeclareVarsAttr> INIT_AT_DECLARE_VARS = new AType<>();
 
 	// region
 	public static final AType<DeclareVariablesAttr> DECLARE_VARIABLES = new AType<>();

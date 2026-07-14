@@ -17,12 +17,17 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
+import jadx.core.dex.attributes.nodes.PhiListAttr;
+import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.instructions.IfNode;
+import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.PhiInsn;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.BlockNode;
+import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
 import jadx.core.dex.nodes.InsnContainer;
 import jadx.core.dex.nodes.InsnNode;
@@ -63,6 +68,10 @@ final class IfRegionMaker {
 			// block already included in other 'if' region
 			return ifnode.getThenBlock();
 		}
+		BlockNode normalizedOut = processSharedTerminalDiscriminator(currentRegion, block, stack);
+		if (normalizedOut != null) {
+			return normalizedOut;
+		}
 		IfInfo currentIf = makeIfInfo(mth, block);
 		if (currentIf == null) {
 			return null;
@@ -70,16 +79,11 @@ final class IfRegionMaker {
 		IfInfo mergedIf = mergeNestedIfNodes(currentIf);
 		if (mergedIf != null) {
 			currentIf = mergedIf;
-		} else {
-			// invert simple condition (compiler often do it)
-			// ensure that we only ever invert once, because if multiple regions contain this block
-			// we'll change the block after it's already been included in a region, which can cause
-			// other regions containing the block to believe the condition has been flipped when it
-			// has not, or vice versa.
-			if (!block.contains(AFlag.DONT_INVERT)) {
-				currentIf = IfInfo.invert(currentIf);
-				block.add(AFlag.DONT_INVERT);
-			}
+		} else if (!block.contains(AFlag.DONT_INVERT)) {
+			// Compiler often emits a jump over the then branch. Mutate the CFG condition only
+			// once because shared continuations can revisit the same IF block.
+			currentIf = IfInfo.invert(currentIf);
+			block.add(AFlag.DONT_INVERT);
 		}
 		IfInfo modifiedIf = restructureIf(block, currentIf);
 		if (modifiedIf != null) {
@@ -110,13 +114,15 @@ final class IfRegionMaker {
 			// empty then block, not normal, but maybe correct
 			ifRegion.setThenRegion(new Region(ifRegion));
 		} else {
-			ifRegion.setThenRegion(regionMaker.makeRegion(thenBlock));
+			IContainer edgeBranch = makeDirectEdgeBranch(ifRegion, currentIf, thenBlock);
+			ifRegion.setThenRegion(edgeBranch != null ? edgeBranch : regionMaker.makeRegion(thenBlock));
 		}
 		BlockNode elseBlock = currentIf.getElseBlock();
 		if (elseBlock == null || stack.containsExit(elseBlock)) {
 			ifRegion.setElseRegion(null);
 		} else {
-			ifRegion.setElseRegion(regionMaker.makeRegion(elseBlock));
+			IContainer edgeBranch = makeDirectEdgeBranch(ifRegion, currentIf, elseBlock);
+			ifRegion.setElseRegion(edgeBranch != null ? edgeBranch : regionMaker.makeRegion(elseBlock));
 		}
 
 		// insert edge insns in new 'else' branch
@@ -143,6 +149,306 @@ final class IfRegionMaker {
 
 		stack.pop();
 		return outBlock;
+	}
+
+	private static @Nullable IContainer makeDirectEdgeBranch(
+			IfRegion ifRegion, IfInfo currentIf, BlockNode branchBlock) {
+		if (!branchBlock.contains(AFlag.SYNTHETIC)
+				|| !branchBlock.getInstructions().isEmpty()) {
+			return null;
+		}
+		List<InsnNode> instructions = new ArrayList<>();
+		for (EdgeInsnAttr edgeInsnAttr : branchBlock.getAll(AType.EDGE_INSN)) {
+			if (edgeInsnAttr.getEnd() == branchBlock
+					&& currentIf.getMergedBlocks().contains(followEmptyPath(edgeInsnAttr.getStart(), true))
+					&& edgeInsnAttr.getInsn().getType() == InsnType.BREAK) {
+				instructions.add(edgeInsnAttr.getInsn());
+			}
+		}
+		if (instructions.isEmpty()) {
+			return null;
+		}
+		Region edgeRegion = new Region(ifRegion);
+		edgeRegion.add(new InsnContainer(instructions));
+		return edgeRegion;
+	}
+
+	private @Nullable BlockNode processSharedTerminalDiscriminator(
+			IRegion currentRegion, BlockNode block, RegionStack stack) {
+		SharedTerminalDiscriminator normalized = buildSharedTerminalDiscriminator(block);
+		if (normalized == null) {
+			return null;
+		}
+		confirmMerge(normalized.unsupportedInfo);
+
+		IfRegion invalidRegion = new IfRegion(currentRegion);
+		invalidRegion.updateCondition(normalized.invalidInfo);
+		currentRegion.getSubBlocks().add(invalidRegion);
+		stack.push(invalidRegion);
+		invalidRegion.setThenRegion(regionMaker.makeRegion(normalized.throwBlock));
+		invalidRegion.setElseRegion(null);
+		stack.pop();
+
+		IfRegion unsupportedRegion = new IfRegion(currentRegion);
+		unsupportedRegion.updateCondition(normalized.unsupportedInfo);
+		currentRegion.getSubBlocks().add(unsupportedRegion);
+		stack.push(unsupportedRegion);
+		stack.addExit(normalized.continuationBlock);
+		unsupportedRegion.setThenRegion(regionMaker.makeRegion(normalized.terminalBlock));
+		unsupportedRegion.setElseRegion(null);
+		stack.pop();
+		return normalized.continuationBlock;
+	}
+
+	private @Nullable SharedTerminalDiscriminator buildSharedTerminalDiscriminator(BlockNode firstBlock) {
+		if (firstBlock.contains(AType.LOOP) || mth.getLoopForBlock(firstBlock) != null) {
+			return null;
+		}
+		for (BlockNode successor : firstBlock.getCleanSuccessors()) {
+			if (isPathExists(successor, firstBlock)) {
+				return null;
+			}
+		}
+		IfNode firstInsn = getIfInsn(firstBlock);
+		BlockNode secondBlock = firstInsn == null ? null : findLinearIfBlock(firstInsn.getElseBlock());
+		IfNode secondInsn = secondBlock == null ? null : getIfInsn(secondBlock);
+		BlockNode thirdBlock = secondInsn == null ? null : findLinearIfBlock(secondInsn.getElseBlock());
+		IfNode thirdInsn = thirdBlock == null ? null : getIfInsn(thirdBlock);
+		BlockNode lastBlock = thirdInsn == null ? null : findLinearIfBlock(thirdInsn.getElseBlock());
+		IfNode lastInsn = lastBlock == null ? null : getIfInsn(lastBlock);
+		RegisterArg discriminator = firstInsn == null || secondInsn == null || thirdInsn == null || lastInsn == null
+				? null
+				: findSharedDiscriminator(firstInsn, secondInsn, thirdInsn, lastInsn);
+		if (discriminator == null
+				|| discriminator.getSVar().getAssignInsn() == null
+				|| discriminator.getSVar().getAssignInsn().getType() != InsnType.AGET) {
+			return null;
+		}
+		IfInfo first = makeIfInfo(mth, firstBlock);
+		if (first == null) {
+			return null;
+		}
+		IfInfo second = makeLinearIfInfo(first.getElseBlock());
+		IfInfo third = second == null ? null : makeLinearIfInfo(second.getElseBlock());
+		IfInfo last = third == null ? null : makeLinearIfInfo(third.getElseBlock());
+		if (second == null || third == null || last == null) {
+			return null;
+		}
+
+		BlockNode throwBlock;
+		BlockNode terminalBlock;
+		IfCondition validLastCondition;
+		if (isLinearThrowPath(last.getThenBlock())) {
+			throwBlock = last.getThenBlock();
+			terminalBlock = last.getElseBlock();
+			validLastCondition = notCopy(last.getCondition());
+		} else if (isLinearThrowPath(last.getElseBlock())) {
+			throwBlock = last.getElseBlock();
+			terminalBlock = last.getThenBlock();
+			validLastCondition = copyCondition(last.getCondition());
+		} else {
+			return null;
+		}
+		if (terminalBlock == null || isLinearThrowPath(terminalBlock)) {
+			return null;
+		}
+
+		IfInfo firstGuard = makeSharedTerminalGuard(first.getThenBlock(), terminalBlock);
+		IfInfo secondGuard = makeSharedTerminalGuard(second.getThenBlock(), terminalBlock);
+		IfInfo thirdGuard = makeSharedTerminalGuard(third.getThenBlock(), terminalBlock);
+		if (firstGuard == null || secondGuard == null || thirdGuard == null) {
+			return null;
+		}
+		BlockNode continuationBlock = getOtherBranch(firstGuard, terminalBlock);
+		if (continuationBlock == null
+				|| getOtherBranch(secondGuard, terminalBlock) != continuationBlock
+				|| getOtherBranch(thirdGuard, terminalBlock) != continuationBlock) {
+			return null;
+		}
+
+		IfCondition firstCond = first.getCondition();
+		IfCondition secondCond = second.getCondition();
+		IfCondition thirdCond = third.getCondition();
+		IfCondition invalidCondition = and(
+				and(notCopy(firstCond), notCopy(secondCond)),
+				and(notCopy(thirdCond), notCopy(validLastCondition)));
+
+		IfCondition firstUnsupported = and(copyCondition(firstCond), guardToTerminal(firstGuard, terminalBlock));
+		IfCondition secondUnsupported = and(
+				and(notCopy(firstCond), copyCondition(secondCond)),
+				guardToTerminal(secondGuard, terminalBlock));
+		IfCondition thirdUnsupported = and(
+				and(and(notCopy(firstCond), notCopy(secondCond)), copyCondition(thirdCond)),
+				guardToTerminal(thirdGuard, terminalBlock));
+		IfCondition lastTerminal = and(
+				and(notCopy(firstCond), notCopy(secondCond)),
+				and(notCopy(thirdCond), copyCondition(validLastCondition)));
+		IfCondition unsupportedCondition = or(
+				or(firstUnsupported, secondUnsupported),
+				or(thirdUnsupported, lastTerminal));
+
+		IfInfo invalidInfo = new IfInfo(mth, invalidCondition, throwBlock, null);
+		invalidInfo.merge(first, second, third, last);
+		IfInfo unsupportedInfo = new IfInfo(mth, unsupportedCondition, terminalBlock, null);
+		unsupportedInfo.setOutBlock(continuationBlock);
+		unsupportedInfo.merge(first, second, third, last, firstGuard, secondGuard, thirdGuard);
+		return new SharedTerminalDiscriminator(
+				invalidInfo, unsupportedInfo, throwBlock, terminalBlock, continuationBlock);
+	}
+
+	private static @Nullable BlockNode findLinearIfBlock(BlockNode start) {
+		BlockNode block = start;
+		for (int i = 0; i < 3 && block != null; i++) {
+			if (getIfInsn(block) != null) {
+				return block;
+			}
+			if (block.getInstructions().stream()
+					.anyMatch(insn -> insn.getType() != InsnType.CONST && insn.getType() != InsnType.MOVE)
+					|| block.getCleanSuccessors().size() != 1) {
+				return null;
+			}
+			block = block.getCleanSuccessors().get(0);
+		}
+		return null;
+	}
+
+	private static @Nullable RegisterArg findSharedDiscriminator(IfNode... ifNodes) {
+		for (InsnArg arg : ifNodes[0].getArguments()) {
+			if (!(arg instanceof RegisterArg) || ((RegisterArg) arg).getSVar() == null) {
+				continue;
+			}
+			boolean shared = true;
+			for (int i = 1; i < ifNodes.length && shared; i++) {
+				shared = false;
+				for (InsnArg other : ifNodes[i].getArguments()) {
+					if (other instanceof RegisterArg
+							&& ((RegisterArg) other).getSVar() == ((RegisterArg) arg).getSVar()) {
+						shared = true;
+						break;
+					}
+				}
+			}
+			if (shared) {
+				return (RegisterArg) arg;
+			}
+		}
+		return null;
+	}
+
+	private @Nullable IfInfo makeLinearIfInfo(BlockNode start) {
+		BlockNode block = start;
+		for (int i = 0; i < 3 && block != null; i++) {
+			IfInfo info = makeIfInfo(mth, block);
+			if (info != null) {
+				return info;
+			}
+			if (block.getInstructions().stream()
+					.anyMatch(insn -> insn.getType() != InsnType.CONST && insn.getType() != InsnType.MOVE)
+					|| block.getCleanSuccessors().size() != 1) {
+				return null;
+			}
+			block = block.getCleanSuccessors().get(0);
+		}
+		return null;
+	}
+
+	private @Nullable IfInfo makeSharedTerminalGuard(BlockNode start, BlockNode terminalBlock) {
+		IfInfo guard = makeIfInfo(mth, start);
+		if (guard == null) {
+			return null;
+		}
+		IfInfo merged = mergeNestedIfNodes(guard);
+		if (merged != null) {
+			guard = merged;
+		}
+		return getOtherBranch(guard, terminalBlock) != null ? guard : null;
+	}
+
+	private static @Nullable BlockNode getOtherBranch(IfInfo info, BlockNode branch) {
+		if (isEqualPaths(info.getThenBlock(), branch)) {
+			return info.getElseBlock();
+		}
+		if (isEqualPaths(info.getElseBlock(), branch)) {
+			return info.getThenBlock();
+		}
+		return null;
+	}
+
+	private static IfCondition guardToTerminal(IfInfo guard, BlockNode terminalBlock) {
+		return isEqualPaths(guard.getThenBlock(), terminalBlock)
+				? copyCondition(guard.getCondition())
+				: notCopy(guard.getCondition());
+	}
+
+	private static IfCondition notCopy(IfCondition condition) {
+		return IfCondition.not(copyCondition(condition));
+	}
+
+	private static IfCondition copyCondition(IfCondition condition) {
+		switch (condition.getMode()) {
+			case COMPARE:
+				IfNode source = condition.getCompare().getInsn();
+				return IfCondition.fromIfNode(new IfNode(source.getOp(), -1,
+						source.getArg(0).duplicate(), source.getArg(1).duplicate()));
+			case NOT:
+				return IfCondition.not(copyCondition(condition.first()));
+			case TERNARY:
+				return IfCondition.ternary(
+						copyCondition(condition.first()),
+						copyCondition(condition.second()),
+						copyCondition(condition.third()));
+			case AND:
+			case OR:
+				List<IfCondition> args = condition.getArgs();
+				IfCondition result = copyCondition(args.get(0));
+				for (int i = 1; i < args.size(); i++) {
+					result = IfCondition.merge(condition.getMode(), result, copyCondition(args.get(i)));
+				}
+				return result;
+			default:
+				throw new JadxRuntimeException("Unexpected condition mode: " + condition.getMode());
+		}
+	}
+
+	private static IfCondition and(IfCondition first, IfCondition second) {
+		return IfCondition.merge(IfCondition.Mode.AND, first, second);
+	}
+
+	private static IfCondition or(IfCondition first, IfCondition second) {
+		return IfCondition.merge(IfCondition.Mode.OR, first, second);
+	}
+
+	private static boolean isLinearThrowPath(BlockNode start) {
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != null && visited.size() < 8 && visited.add(block)) {
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null && lastInsn.getType() == InsnType.THROW) {
+				return true;
+			}
+			if (block.getCleanSuccessors().size() != 1) {
+				return false;
+			}
+			block = block.getCleanSuccessors().get(0);
+		}
+		return false;
+	}
+
+	private static final class SharedTerminalDiscriminator {
+		private final IfInfo invalidInfo;
+		private final IfInfo unsupportedInfo;
+		private final BlockNode throwBlock;
+		private final BlockNode terminalBlock;
+		private final BlockNode continuationBlock;
+
+		private SharedTerminalDiscriminator(IfInfo invalidInfo, IfInfo unsupportedInfo,
+				BlockNode throwBlock, BlockNode terminalBlock, BlockNode continuationBlock) {
+			this.invalidInfo = invalidInfo;
+			this.unsupportedInfo = unsupportedInfo;
+			this.throwBlock = throwBlock;
+			this.terminalBlock = terminalBlock;
+			this.continuationBlock = continuationBlock;
+		}
 	}
 
 	@NotNull
@@ -189,16 +495,49 @@ final class IfRegionMaker {
 			info.setOutBlock(null);
 			return info;
 		}
+		IfInfo coroutineSuspendIf = restructureCoroutineSuspendReturn(info, thenBlock, elseBlock);
+		if (coroutineSuspendIf != null) {
+			return coroutineSuspendIf;
+		}
+		BlockNode structuralOut = findOutBlock(mth, thenBlock, elseBlock);
+		IfInfo directTerminalIf = isCoroutineMethod() || isSuspendLambdaMethod() || structuralOut == null
+				? restructureAcyclicTerminalBranch(info, thenBlock, elseBlock)
+				: null;
+		if (directTerminalIf != null) {
+			return directTerminalIf;
+		}
 		// init outblock, which will be used in isBadBranchBlock to compare with branch block
-		info.setOutBlock(findOutBlock(mth, thenBlock, elseBlock));
+		info.setOutBlock(structuralOut);
+		BlockNode sharedContinuation = findSharedContinuationPastTerminal(
+				info.getOutBlock(), thenBlock, elseBlock);
+		if (sharedContinuation != null) {
+			IfInfo terminalBranch = restructureTerminalBeforeSharedContinuation(
+					info, thenBlock, elseBlock, sharedContinuation);
+			if (terminalBranch != null) {
+				return terminalBranch;
+			}
+			info.setOutBlock(sharedContinuation);
+		}
+		BlockNode coroutineOut = findDeeperCoroutinePhiJoin(block, info.getOutBlock(), thenBlock, elseBlock);
+		if (coroutineOut != null) {
+			info.setOutBlock(coroutineOut);
+		}
 
 		boolean badThen = isBadBranchBlock(info, thenBlock);
 		boolean badElse = isBadBranchBlock(info, elseBlock);
+		IfInfo loopContinueIf = restructureSyntheticLoopContinuation(info, thenBlock, elseBlock);
+		if (loopContinueIf != null) {
+			return loopContinueIf;
+		}
 		IfInfo inheritedExitIf = restructureInheritedExit(info, thenBlock, elseBlock, badThen, badElse);
 		if (inheritedExitIf != null) {
 			return inheritedExitIf;
 		}
 		if (badThen && badElse) {
+			IfInfo phiAwareIf = restructurePhiAwareBranch(info, thenBlock, elseBlock);
+			if (phiAwareIf != null) {
+				return phiAwareIf;
+			}
 			IfInfo scopeExitIf = restructureDirectScopeExit(info, thenBlock, elseBlock);
 			if (scopeExitIf != null) {
 				return scopeExitIf;
@@ -247,6 +586,279 @@ final class IfRegionMaker {
 			info.setOutBlock(null);
 		}
 		return info;
+	}
+
+	private static @Nullable IfInfo restructureAcyclicTerminalBranch(
+			IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		boolean thenTerminal = isAcyclicTerminalSubgraph(thenBlock);
+		boolean elseTerminal = isAcyclicTerminalSubgraph(elseBlock);
+		if (thenTerminal == elseTerminal) {
+			return null;
+		}
+		if (elseTerminal) {
+			info = IfInfo.invert(info);
+			BlockNode tmp = thenBlock;
+			thenBlock = elseBlock;
+			elseBlock = tmp;
+		}
+		IfInfo result = new IfInfo(info, thenBlock, null);
+		result.setOutBlock(elseBlock);
+		return result;
+	}
+
+	private static @Nullable IfNode getIfInsn(BlockNode block) {
+		InsnNode lastInsn = BlockUtils.getLastInsn(block);
+		return lastInsn instanceof IfNode ? (IfNode) lastInsn : null;
+	}
+
+	private @Nullable BlockNode findSharedContinuationPastTerminal(
+			@Nullable BlockNode currentOut, BlockNode thenBlock, BlockNode elseBlock) {
+		if (currentOut == null || !isAcyclicTerminalSubgraph(currentOut)) {
+			return null;
+		}
+		BlockNode best = null;
+		for (BlockNode candidate : mth.getBasicBlocks()) {
+			if (candidate == currentOut
+					|| candidate.getPredecessors().size() < 2
+					|| BlockUtils.isExceptionHandlerPath(candidate)
+					|| isAcyclicTerminalSubgraph(candidate)
+					|| isPathExists(currentOut, candidate)
+					|| !isPathExists(thenBlock, candidate)
+					|| !isPathExists(elseBlock, candidate)) {
+				continue;
+			}
+			if (best == null || isPathExists(candidate, best)) {
+				best = candidate;
+			}
+		}
+		return best;
+	}
+
+	private static @Nullable IfInfo restructureTerminalBeforeSharedContinuation(
+			IfInfo info, BlockNode thenBlock, BlockNode elseBlock, BlockNode sharedContinuation) {
+		boolean thenTerminal = isAcyclicTerminalSubgraph(thenBlock);
+		boolean elseTerminal = isAcyclicTerminalSubgraph(elseBlock);
+		if (thenTerminal == elseTerminal) {
+			return null;
+		}
+		if (elseTerminal) {
+			info = IfInfo.invert(info);
+			BlockNode tmp = thenBlock;
+			thenBlock = elseBlock;
+			elseBlock = tmp;
+		}
+		IfInfo result = new IfInfo(info, thenBlock, null);
+		result.setOutBlock(sharedContinuation);
+		return result;
+	}
+
+	private @Nullable IfInfo restructureCoroutineSuspendReturn(
+			IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		boolean thenSuspendReturn = isComparedValueReturn(info, thenBlock);
+		boolean elseSuspendReturn = isComparedValueReturn(info, elseBlock);
+		if (thenSuspendReturn == elseSuspendReturn) {
+			return null;
+		}
+		BlockNode returnBlock = thenSuspendReturn ? thenBlock : elseBlock;
+		BlockNode continuation = thenSuspendReturn ? elseBlock : thenBlock;
+		IfInfo condition = thenSuspendReturn ? info : IfInfo.invert(info);
+		IfInfo result = new IfInfo(condition, returnBlock, null);
+		result.setOutBlock(continuation);
+		return result;
+	}
+
+	private boolean isComparedValueReturn(IfInfo info, BlockNode block) {
+		if (!isCoroutineMethod() || !block.isReturnBlock()) {
+			return false;
+		}
+		InsnNode returnInsn = BlockUtils.getLastInsn(block);
+		if (returnInsn == null || returnInsn.getArgsCount() != 1 || !(returnInsn.getArg(0) instanceof RegisterArg)) {
+			return false;
+		}
+		RegisterArg returnArg = (RegisterArg) returnInsn.getArg(0);
+		if (returnArg.getSVar() == null) {
+			return false;
+		}
+		for (BlockNode conditionBlock : info.getMergedBlocks()) {
+			InsnNode conditionInsn = BlockUtils.getLastInsn(conditionBlock);
+			if (!(conditionInsn instanceof IfNode)) {
+				continue;
+			}
+			for (InsnArg arg : conditionInsn.getArguments()) {
+				if (arg instanceof RegisterArg && ((RegisterArg) arg).getSVar() == returnArg.getSVar()) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private boolean isCoroutineMethod() {
+		return mth.getMethodInfo().getArgumentsTypes().stream()
+				.anyMatch(type -> type.toString().startsWith("kotlin.coroutines.Continuation"));
+	}
+
+	private @Nullable BlockNode findDeeperCoroutinePhiJoin(
+			BlockNode ifBlock, @Nullable BlockNode currentOut, BlockNode thenBlock, BlockNode elseBlock) {
+		if (currentOut == null
+				|| currentOut.get(AType.PHI_LIST) == null
+				|| !isCoroutineLabelIf(ifBlock)) {
+			return null;
+		}
+		BlockNode best = currentOut;
+		for (BlockNode candidate : mth.getBasicBlocks()) {
+			PhiListAttr phiList = candidate.get(AType.PHI_LIST);
+			if (candidate == currentOut
+					|| phiList == null
+					|| phiList.getList().isEmpty()
+					|| BlockUtils.isExceptionHandlerPath(candidate)
+					|| !isPathExists(currentOut, candidate)
+					|| !isPathExists(thenBlock, candidate)
+					|| !isPathExists(elseBlock, candidate)) {
+				continue;
+			}
+			if (best == currentOut || isPathExists(best, candidate)) {
+				best = candidate;
+			}
+		}
+		return best == currentOut ? null : best;
+	}
+
+	private static boolean isCoroutineLabelIf(BlockNode block) {
+		InsnNode lastInsn = BlockUtils.getLastInsn(block);
+		if (!(lastInsn instanceof IfNode)) {
+			return false;
+		}
+		for (InsnArg arg : lastInsn.getArguments()) {
+			if (!(arg instanceof RegisterArg)) {
+				continue;
+			}
+			RegisterArg registerArg = (RegisterArg) arg;
+			if (registerArg.getSVar() == null) {
+				continue;
+			}
+			InsnNode assignInsn = registerArg.getSVar().getAssignInsn();
+			if (assignInsn instanceof IndexInsnNode
+					&& assignInsn.getType() == InsnType.IGET
+					&& ((IndexInsnNode) assignInsn).getIndex() instanceof FieldInfo
+					&& ((FieldInfo) ((IndexInsnNode) assignInsn).getIndex()).getName().equals("label")) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private @Nullable IfInfo restructurePhiAwareBranch(
+			IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		if (isPhiNeutralLoopContinuation(info, thenBlock)
+				&& regionMaker.getStack().containsExit(elseBlock)) {
+			addContinueEdges(info, thenBlock);
+			IfInfo result = new IfInfo(info, thenBlock, null);
+			result.setOutBlock(elseBlock);
+			return result;
+		}
+		if (isPhiNeutralLoopContinuation(info, elseBlock)
+				&& regionMaker.getStack().containsExit(thenBlock)) {
+			addContinueEdges(info, elseBlock);
+			IfInfo inverted = IfInfo.invert(info);
+			IfInfo result = new IfInfo(inverted, elseBlock, null);
+			result.setOutBlock(thenBlock);
+			return result;
+		}
+		return null;
+	}
+
+	private @Nullable IfInfo restructureSyntheticLoopContinuation(
+			IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		boolean thenContinuation = isSyntheticLoopContinuation(thenBlock);
+		boolean elseContinuation = isSyntheticLoopContinuation(elseBlock);
+		if (thenContinuation == elseContinuation) {
+			return null;
+		}
+		BlockNode continuation = thenContinuation ? thenBlock : elseBlock;
+		BlockNode out = thenContinuation ? elseBlock : thenBlock;
+		addContinueEdges(info, continuation);
+		IfInfo condition = thenContinuation ? info : IfInfo.invert(info);
+		IfInfo result = new IfInfo(condition, continuation, null);
+		result.setOutBlock(out);
+		return result;
+	}
+
+	private static boolean isSyntheticLoopContinuation(BlockNode start) {
+		if (start.getInstructions().stream().anyMatch(insn -> insn.getType() != InsnType.MOVE)) {
+			return false;
+		}
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != null && visited.size() < 8 && visited.add(block)) {
+			if (block.contains(AFlag.LOOP_END)) {
+				return true;
+			}
+			if (block.getInstructions().stream().anyMatch(insn -> insn.getType() != InsnType.MOVE)
+					|| block.getSuccessors().size() != 1) {
+				return false;
+			}
+			block = block.getSuccessors().get(0);
+		}
+		return false;
+	}
+
+	private static boolean isPhiNeutralLoopContinuation(IfInfo info, BlockNode start) {
+		if (!isPhiNeutralJoin(info, start)) {
+			return false;
+		}
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != null && visited.size() < 12 && visited.add(block)) {
+			if (block.contains(AFlag.LOOP_END)) {
+				return true;
+			}
+			for (InsnNode insn : block.getInstructions()) {
+				if (!isReadOnlyInsn(insn)) {
+					return false;
+				}
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return false;
+			}
+			block = successors.get(0);
+		}
+		return false;
+	}
+
+	private static void addContinueEdges(IfInfo info, BlockNode continuation) {
+		for (BlockNode pred : continuation.getPredecessors()) {
+			if (info.getMergedBlocks().contains(pred)) {
+				EdgeInsnAttr.addEdgeInsn(pred, continuation, new InsnNode(InsnType.CONTINUE, 0));
+			}
+		}
+	}
+
+	private static boolean isPhiNeutralJoin(IfInfo info, BlockNode join) {
+		PhiListAttr phiList = join.get(AType.PHI_LIST);
+		if (phiList == null || phiList.getList().isEmpty()) {
+			return false;
+		}
+		List<BlockNode> mergedPreds = join.getPredecessors().stream()
+				.filter(info.getMergedBlocks()::contains)
+				.toList();
+		if (mergedPreds.size() < 2) {
+			return false;
+		}
+		for (PhiInsn phi : phiList.getList()) {
+			RegisterArg firstArg = phi.getArgByBlock(mergedPreds.get(0));
+			if (firstArg == null) {
+				return false;
+			}
+			for (int i = 1; i < mergedPreds.size(); i++) {
+				RegisterArg arg = phi.getArgByBlock(mergedPreds.get(i));
+				if (arg == null || arg.getSVar() != firstArg.getSVar()) {
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	private @Nullable IfInfo restructureInheritedExit(
@@ -508,7 +1120,7 @@ final class IfRegionMaker {
 		}
 		ArgType superClass = mth.getParentClass().getSuperClass();
 		return superClass != null
-				&& "kotlin.coroutines.jvm.internal.SuspendLambda".equals(superClass.getObject());
+				&& superClass.getObject().endsWith("SuspendLambda");
 	}
 
 	private static boolean isReturnPath(@Nullable BlockNode startBlock) {
@@ -558,7 +1170,14 @@ final class IfRegionMaker {
 		// Attempt one: there's a unique block in the intersection of dom frontiers, and no path from
 		// then->else or else->then
 		if (oneBlock != null) {
-			return oneBlock;
+			if (mth.getLoopsCount() != 0
+					|| isCommonPostDominator(mth, thenBlock, elseBlock, oneBlock)) {
+				return oneBlock;
+			}
+			BlockNode deeperOut = findCommonPostDominator(mth, thenBlock, elseBlock);
+			if (deeperOut != null) {
+				return deeperOut;
+			}
 		}
 
 		BitSet union = newBlocksBitSet(mth);
@@ -581,6 +1200,68 @@ final class IfRegionMaker {
 
 		// Attempt three: fallback to path cross again
 		return getPathCross(mth, thenBlock, elseBlock);
+	}
+
+	static boolean isCommonPostDominator(
+			MethodNode mth, BlockNode thenBlock, BlockNode elseBlock, BlockNode candidate) {
+		// A branch starting at the join passes through it by definition. A terminal path in the
+		// opposite branch must not push a normal continuation to a later, unrelated join.
+		if (candidate == thenBlock || candidate == elseBlock) {
+			return true;
+		}
+		return !hasTerminalPathAvoiding(mth, thenBlock, candidate)
+				&& !hasTerminalPathAvoiding(mth, elseBlock, candidate);
+	}
+
+	private static boolean hasTerminalPathAvoiding(MethodNode mth, BlockNode start, BlockNode excluded) {
+		if (start == excluded) {
+			return false;
+		}
+		BitSet visited = newBlocksBitSet(mth);
+		List<BlockNode> stack = new ArrayList<>();
+		stack.add(start);
+		while (!stack.isEmpty()) {
+			BlockNode block = stack.remove(stack.size() - 1);
+			if (block == excluded || visited.get(block.getPos())) {
+				continue;
+			}
+			visited.set(block.getPos());
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (block == mth.getExitBlock() || successors.isEmpty()) {
+				return true;
+			}
+			stack.addAll(successors);
+		}
+		return false;
+	}
+
+	private static @Nullable BlockNode findCommonPostDominator(
+			MethodNode mth, BlockNode thenBlock, BlockNode elseBlock) {
+		List<BlockNode> common = new ArrayList<>();
+		for (BlockNode candidate : mth.getBasicBlocks()) {
+			if (candidate == mth.getExitBlock()
+					|| candidate.getPredecessors().size() < 2
+					|| !isPathExists(thenBlock, candidate)
+					|| !isPathExists(elseBlock, candidate)) {
+				continue;
+			}
+			if (isCommonPostDominator(mth, thenBlock, elseBlock, candidate)) {
+				common.add(candidate);
+			}
+		}
+		for (BlockNode candidate : common) {
+			boolean first = true;
+			for (BlockNode other : common) {
+				if (candidate != other && !isPathExists(candidate, other)) {
+					first = false;
+					break;
+				}
+			}
+			if (first) {
+				return candidate;
+			}
+		}
+		return null;
 	}
 
 	static boolean isCandidateForOutBlock(MethodNode mth, BlockNode thenBlock, BlockNode elseBlock, BlockNode candidate) {
@@ -706,6 +1387,13 @@ final class IfRegionMaker {
 		if (curThen == curElse) {
 			return null;
 		}
+		IfInfo diamondMerge = mergeBooleanDiamondBranch(currentIf, curThen, true);
+		if (diamondMerge == null) {
+			diamondMerge = mergeBooleanDiamondBranch(currentIf, curElse, false);
+		}
+		if (diamondMerge != null) {
+			return searchNestedIf(diamondMerge);
+		}
 		if (BlockUtils.isFollowBackEdge(curThen)
 				|| BlockUtils.isFollowBackEdge(curElse)) {
 			return null;
@@ -779,6 +1467,132 @@ final class IfRegionMaker {
 		IfInfo result = mergeIfInfo(currentIf, nextIf, followThenBranch);
 		// search next nested if block
 		return searchNestedIf(result);
+	}
+
+	private static @Nullable IfInfo mergeBooleanDiamondBranch(
+			IfInfo currentIf, BlockNode branch, boolean followThenBranch) {
+		InsnNode branchInsn = BlockUtils.getLastInsn(branch);
+		if (!(branchInsn instanceof IfNode)) {
+			return null;
+		}
+		BlockNode join = getBooleanDiamondJoin((IfNode) branchInsn);
+		if (join == null) {
+			return null;
+		}
+		IfInfo nextIf = makeBooleanDiamondIfInfo(currentIf.getMth(), (IfNode) branchInsn, join);
+		if (nextIf == null) {
+			return null;
+		}
+		if (isInversionNeeded(currentIf, nextIf)) {
+			nextIf = IfInfo.invert(nextIf);
+		}
+		if (!canMerge(currentIf, nextIf, followThenBranch)) {
+			return null;
+		}
+		nextIf.getMergedBlocks().add(branch);
+		nextIf.getMergedBlocks().add(((IfNode) branchInsn).getThenBlock());
+		nextIf.getMergedBlocks().add(((IfNode) branchInsn).getElseBlock());
+		return mergeIfInfo(currentIf, nextIf, followThenBranch);
+	}
+
+	private static @Nullable IfInfo makeBooleanDiamondIfInfo(MethodNode mth, IfNode diamondIf, BlockNode join) {
+		InsnNode joinInsn = BlockUtils.getLastInsn(join);
+		if (!(joinInsn instanceof IfNode)) {
+			return null;
+		}
+		PhiListAttr phiList = join.get(AType.PHI_LIST);
+		if (phiList == null) {
+			return null;
+		}
+		InsnNode thenConst = getSingleGeneratedInsn(diamondIf.getThenBlock());
+		InsnNode elseConst = getSingleGeneratedInsn(diamondIf.getElseBlock());
+		if (thenConst == null || elseConst == null) {
+			return null;
+		}
+		PhiInsn conditionPhi = null;
+		for (PhiInsn phi : phiList.getList()) {
+			RegisterArg result = phi.getResult();
+			if (result != null && ((IfNode) joinInsn).containsVar(result)) {
+				conditionPhi = phi;
+				break;
+			}
+		}
+		if (conditionPhi == null) {
+			return null;
+		}
+		RegisterArg thenArg = conditionPhi.getArgByBlock(diamondIf.getThenBlock());
+		RegisterArg elseArg = conditionPhi.getArgByBlock(diamondIf.getElseBlock());
+		if (thenArg == null || elseArg == null) {
+			return null;
+		}
+		IfCondition thenCondition = replacePhiInCondition((IfNode) joinInsn, conditionPhi, thenConst.getArg(0));
+		IfCondition elseCondition = replacePhiInCondition((IfNode) joinInsn, conditionPhi, elseConst.getArg(0));
+		if (thenCondition == null || elseCondition == null) {
+			return null;
+		}
+		IfCondition condition = IfCondition.ternary(
+				IfCondition.fromIfNode(diamondIf), thenCondition, elseCondition);
+		IfInfo info = new IfInfo(mth, condition,
+				((IfNode) joinInsn).getThenBlock(), ((IfNode) joinInsn).getElseBlock());
+		info.getMergedBlocks().add(join);
+		return info;
+	}
+
+	private static @Nullable IfCondition replacePhiInCondition(
+			IfNode joinIf, PhiInsn phi, InsnArg replacement) {
+		RegisterArg phiResult = phi.getResult();
+		InsnArg first = replacePhiArg(joinIf.getArg(0), phiResult, replacement);
+		InsnArg second = replacePhiArg(joinIf.getArg(1), phiResult, replacement);
+		if (first == null && second == null) {
+			return null;
+		}
+		IfNode copy = new IfNode(joinIf.getOp(), -1,
+				first != null ? first : joinIf.getArg(0).duplicate(),
+				second != null ? second : joinIf.getArg(1).duplicate());
+		return IfCondition.fromIfNode(copy);
+	}
+
+	private static @Nullable InsnArg replacePhiArg(
+			InsnArg arg, RegisterArg phiResult, InsnArg replacement) {
+		return arg instanceof RegisterArg
+				&& ((RegisterArg) arg).getSVar() == phiResult.getSVar()
+						? replacement.duplicate()
+						: null;
+	}
+
+	private static @Nullable BlockNode getBooleanDiamondJoin(IfNode ifNode) {
+		BlockNode thenBlock = ifNode.getThenBlock();
+		BlockNode elseBlock = ifNode.getElseBlock();
+		if (thenBlock == null || elseBlock == null
+				|| thenBlock.getCleanSuccessors().size() != 1
+				|| elseBlock.getCleanSuccessors().size() != 1) {
+			return null;
+		}
+		BlockNode join = thenBlock.getCleanSuccessors().get(0);
+		if (join != elseBlock.getCleanSuccessors().get(0)
+				|| !(BlockUtils.getLastInsn(join) instanceof IfNode)) {
+			return null;
+		}
+		InsnNode thenConst = getSingleGeneratedInsn(thenBlock);
+		InsnNode elseConst = getSingleGeneratedInsn(elseBlock);
+		if (thenConst == null || elseConst == null
+				|| thenConst.getType() != InsnType.CONST
+				|| elseConst.getType() != InsnType.CONST
+				|| thenConst.getResult() == null
+				|| elseConst.getResult() == null
+				|| thenConst.getResult().getRegNum() != elseConst.getResult().getRegNum()
+				|| thenConst.getArgsCount() != 1
+				|| elseConst.getArgsCount() != 1
+				|| !(thenConst.getArg(0).isTrue() && elseConst.getArg(0).isFalse()
+						|| thenConst.getArg(0).isFalse() && elseConst.getArg(0).isTrue())) {
+			return null;
+		}
+		return join;
+	}
+
+	private static @Nullable InsnNode getSingleGeneratedInsn(BlockNode block) {
+		List<InsnNode> insns = block.getInstructions();
+		return insns.size() == 1 ? insns.get(0) : null;
 	}
 
 	private static IfInfo checkForTernaryInCondition(IfInfo currentIf) {

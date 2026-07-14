@@ -14,6 +14,7 @@ import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.attributes.nodes.LoopLabelAttr;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.Edge;
 import jadx.core.dex.nodes.IRegion;
@@ -533,6 +534,7 @@ final class LoopRegionMaker {
 		stack.push(loopRegion);
 
 		BlockNode out = null;
+		boolean sharedReturnBreaks = false;
 		// insert 'break' for exits
 		List<Edge> exitEdges = loop.getExitEdges();
 		if (exitEdges.size() == 1) {
@@ -572,9 +574,10 @@ final class LoopRegionMaker {
 				}
 			}
 
+			sharedReturnBreaks = insertSharedReturnBreaks(loop, out);
 			// Add breaks
 			stack.addExit(out);
-			if (out != null && out != mth.getExitBlock()) {
+			if (!sharedReturnBreaks && out != null && out != mth.getExitBlock()) {
 				// Add a break on every incoming edge where the predecessor is reachable from the loop
 				for (BlockNode predecessor : out.getPredecessors()) {
 					for (Edge exitEdge : loop.getExitEdges()) {
@@ -603,6 +606,32 @@ final class LoopRegionMaker {
 		stack.pop();
 		loopStart.addAttr(AType.LOOP, loop);
 		return out;
+	}
+
+	private boolean insertSharedReturnBreaks(LoopInfo loop, BlockNode out) {
+		if (out == null || !out.isReturnBlock()) {
+			return false;
+		}
+		List<Edge> exitEdges = loop.getExitEdges();
+		if (exitEdges.size() < 2) {
+			return false;
+		}
+		for (Edge exitEdge : exitEdges) {
+			BlockNode bridge = exitEdge.getTarget();
+			if (!bridge.contains(AFlag.SYNTHETIC)
+					|| !bridge.getInstructions().isEmpty()
+					|| !ListUtils.isSingleElement(bridge.getPredecessors(), exitEdge.getSource())
+					|| BlockUtils.followEmptyPath(bridge) != out) {
+				return false;
+			}
+		}
+		for (Edge exitEdge : exitEdges) {
+			InsnNode breakInsn = new InsnNode(InsnType.BREAK, 0);
+			breakInsn.addAttr(AType.LOOP, loop);
+			EdgeInsnAttr.addEdgeInsn(exitEdge, breakInsn);
+			addBreakLabel(exitEdge.getSource(), out, breakInsn);
+		}
+		return true;
 	}
 
 	private boolean inExceptionHandlerBlocks(BlockNode loopEnd) {
@@ -744,8 +773,14 @@ final class LoopRegionMaker {
 		}
 		Set<BlockNode> loopExitNodes = loop.getExitNodes();
 		for (BlockNode pred : predecessors) {
-			if (canInsertContinue(pred, predecessors, loopEnd, loopExitNodes)) {
+			boolean nestedStateReset = isStateResetBridge(pred);
+			if (nestedStateReset || canInsertContinue(pred, predecessors, loopEnd, loopExitNodes)) {
 				InsnNode cont = new InsnNode(InsnType.CONTINUE, 0);
+				if (nestedStateReset) {
+					LoopLabelAttr labelAttr = new LoopLabelAttr(loop);
+					cont.addAttr(labelAttr);
+					loop.getStart().addAttr(labelAttr);
+				}
 				pred.getInstructions().add(cont);
 			}
 		}
@@ -762,7 +797,7 @@ final class LoopRegionMaker {
 			return false;
 		}
 		BlockNode codePred = preds.get(0);
-		if (codePred.contains(AFlag.ADDED_TO_REGION)) {
+		if (codePred.contains(AFlag.ADDED_TO_REGION) && !isStateResetBridge(pred)) {
 			return false;
 		}
 		if (loopEnd.isDominator(codePred)
@@ -789,6 +824,17 @@ final class LoopRegionMaker {
 			}
 		}
 		return gotoExit;
+	}
+
+	private static boolean isStateResetBridge(BlockNode block) {
+		if (!block.contains(AFlag.SYNTHETIC) || block.getInstructions().size() != 1) {
+			return false;
+		}
+		InsnNode insn = block.getInstructions().get(0);
+		return insn.getType() == InsnType.CONST
+				&& insn.getArgsCount() == 1
+				&& insn.getArg(0).isLiteral()
+				&& ((LiteralArg) insn.getArg(0)).getLiteral() == 0;
 	}
 
 	private static boolean isDominatedOnBlocks(BlockNode dom, List<BlockNode> blocks) {

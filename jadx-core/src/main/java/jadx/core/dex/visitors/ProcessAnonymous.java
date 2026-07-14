@@ -34,6 +34,7 @@ import jadx.core.utils.exceptions.JadxException;
 )
 @SuppressWarnings("BooleanMethodIsAlwaysInverted")
 public class ProcessAnonymous extends AbstractVisitor {
+	private static final String KOTLIN_METADATA_ANNOTATION = "Lkotlin/Metadata;";
 
 	private boolean inlineAnonymousClasses;
 
@@ -247,6 +248,11 @@ public class ProcessAnonymous extends AbstractVisitor {
 			// exclude usage inside inner classes
 			return null;
 		}
+		if (hasConcreteTypeDeclaration(ctrUseCls, cls)) {
+			// The hidden class type escapes through a field or method declaration.
+			// Keep it as a named inner class so assignments can retain the concrete type.
+			return null;
+		}
 		if (!checkMethodsUsage(cls, ctr, ctrUseMth)) {
 			return null;
 		}
@@ -258,6 +264,27 @@ public class ProcessAnonymous extends AbstractVisitor {
 			}
 		}
 		return InlineType.CONSTRUCTOR;
+	}
+
+	private static boolean hasConcreteTypeDeclaration(ClassNode constructorUseCls, ClassNode anonymousCls) {
+		ArgType anonymousType = anonymousCls.getClassInfo().getType();
+		for (FieldNode field : constructorUseCls.getFields()) {
+			if (containsType(field.getType(), anonymousType)) {
+				return true;
+			}
+		}
+		for (MethodNode useMth : anonymousCls.getUseInMth()) {
+			if (useMth.getParentClass().getAnnotation(KOTLIN_METADATA_ANNOTATION) != null
+					&& (containsType(useMth.getReturnType(), anonymousType)
+					|| useMth.getArgTypes().stream().anyMatch(type -> containsType(type, anonymousType)))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean containsType(ArgType type, ArgType expectedType) {
+		return type.visitTypes(candidate -> candidate.equals(expectedType) ? Boolean.TRUE : null) != null;
 	}
 
 	private static boolean checkMethodsUsage(ClassNode cls, MethodNode ctr, MethodNode ctrUseMth) {

@@ -17,6 +17,8 @@ public class TestCoroutineInlineEmit extends SmaliTest {
 				.doesNotContain("Method not decompiled")
 				.doesNotContain("Code restructure failed")
 				.doesNotContain("Recursive region processing prevented")
+				.doesNotContain("?? r1")
+				.doesNotContain("?? r2")
 				.doesNotContain("JADX ERROR");
 	}
 }

@@ -176,10 +176,10 @@ public class TypeUtils {
 		if (typeVars != null) {
 			typeVarsMap = mergeTypeMaps(typeVarsMap, typeVars.getTypeVarsMapFor(genericSourceType));
 		}
-		typeVarsMap = mergeTypeMaps(typeVarsMap, getTypeVariablesMapping(instanceType));
+		typeVarsMap = mergeTypeMapping(typeVarsMap, getTypeVariablesMapping(instanceType));
 		ArgType outerType = instanceType.getOuterType();
 		while (outerType != null) {
-			typeVarsMap = mergeTypeMaps(typeVarsMap, getTypeVariablesMapping(outerType));
+			typeVarsMap = mergeTypeMapping(typeVarsMap, getTypeVariablesMapping(outerType));
 			outerType = outerType.getOuterType();
 		}
 		return replaceTypeVariablesUsingMap(typeWithGeneric, typeVarsMap);
@@ -206,6 +206,14 @@ public class TypeUtils {
 		return map;
 	}
 
+	private static Map<ArgType, ArgType> mergeTypeMapping(
+			Map<ArgType, ArgType> base, Map<ArgType, ArgType> typeMapping) {
+		if (!base.isEmpty() && !typeMapping.isEmpty() && typeMapping.size() <= 3) {
+			typeMapping = new HashMap<>(typeMapping);
+		}
+		return mergeTypeMaps(base, typeMapping);
+	}
+
 	public Map<ArgType, ArgType> getTypeVariablesMapping(ArgType clsType) {
 		if (!clsType.isGeneric()) {
 			return Collections.emptyMap();
@@ -222,17 +230,49 @@ public class TypeUtils {
 		if (genericParamsCount != typeParameters.size()) {
 			return Collections.emptyMap();
 		}
+		if (genericParamsCount == 1) {
+			ArgType typeVar = normalizeTypeVar(typeParameters.get(0));
+			return Collections.singletonMap(typeVar, actualTypes.get(0));
+		}
+		if (genericParamsCount == 2) {
+			ArgType first = normalizeTypeVar(typeParameters.get(0));
+			ArgType second = normalizeTypeVar(typeParameters.get(1));
+			ArgType firstActual = actualTypes.get(0);
+			ArgType secondActual = actualTypes.get(1);
+			if (!first.equals(second) && firstActual != null && secondActual != null) {
+				return Map.of(first, firstActual, second, secondActual);
+			}
+		}
+		if (genericParamsCount == 3) {
+			ArgType first = normalizeTypeVar(typeParameters.get(0));
+			ArgType second = normalizeTypeVar(typeParameters.get(1));
+			ArgType third = normalizeTypeVar(typeParameters.get(2));
+			ArgType firstActual = actualTypes.get(0);
+			ArgType secondActual = actualTypes.get(1);
+			ArgType thirdActual = actualTypes.get(2);
+			if (!first.equals(second) && !first.equals(third) && !second.equals(third)
+					&& firstActual != null && secondActual != null && thirdActual != null) {
+				return Map.of(
+						first, firstActual,
+						second, secondActual,
+						third, thirdActual);
+			}
+		}
 		Map<ArgType, ArgType> replaceMap = new HashMap<>(genericParamsCount);
 		for (int i = 0; i < genericParamsCount; i++) {
 			ArgType actualType = actualTypes.get(i);
-			ArgType typeVar = typeParameters.get(i);
-			if (typeVar.getExtendTypes() != null) {
-				// force short form (only type var name)
-				typeVar = ArgType.genericType(typeVar.getObject());
-			}
+			ArgType typeVar = normalizeTypeVar(typeParameters.get(i));
 			replaceMap.put(typeVar, actualType);
 		}
 		return replaceMap;
+	}
+
+	private static ArgType normalizeTypeVar(ArgType typeVar) {
+		if (notEmpty(typeVar.getExtendTypes())) {
+			// force short form (only type var name)
+			return ArgType.genericType(typeVar.getObject());
+		}
+		return typeVar;
 	}
 
 	public Map<ArgType, ArgType> getTypeVarMappingForInvoke(BaseInvokeNode invokeInsn) {

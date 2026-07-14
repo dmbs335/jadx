@@ -42,13 +42,15 @@ public class DepthRegionTraversal {
 	public static void traverseIterative(MethodNode mth, IRegionIterativeVisitor visitor) {
 		boolean repeat;
 		int k = 0;
-		int limit = ITERATIVE_LIMIT_MULTIPLIER * mth.getBasicBlocks().size();
+		int regionsCount = countRegions(mth.getRegion());
+		int limit = calcIterativeLimit(mth, regionsCount);
 		do {
 			repeat = traverseIterativeStepInternal(mth, visitor, mth.getRegion());
 			if (k++ > limit) {
 				throw new JadxRuntimeException("Iterative traversal limit reached: "
 						+ "limit: " + limit + ", visitor: " + visitor.getClass().getName()
-						+ ", blocks count: " + mth.getBasicBlocks().size());
+						+ ", blocks count: " + mth.getBasicBlocks().size()
+						+ ", regions count: " + regionsCount);
 			}
 		} while (repeat);
 	}
@@ -56,7 +58,8 @@ public class DepthRegionTraversal {
 	public static void traverseIncludingExcHandlers(MethodNode mth, IRegionIterativeVisitor visitor) {
 		boolean repeat;
 		int k = 0;
-		int limit = ITERATIVE_LIMIT_MULTIPLIER * mth.getBasicBlocks().size();
+		int regionsCount = countRegions(mth.getRegion());
+		int limit = calcIterativeLimit(mth, regionsCount);
 		do {
 			repeat = traverseIterativeStepInternal(mth, visitor, mth.getRegion());
 			if (!repeat) {
@@ -70,9 +73,34 @@ public class DepthRegionTraversal {
 			if (k++ > limit) {
 				throw new JadxRuntimeException("Iterative traversal limit reached: "
 						+ "limit: " + limit + ", visitor: " + visitor.getClass().getName()
-						+ ", blocks count: " + mth.getBasicBlocks().size());
+						+ ", blocks count: " + mth.getBasicBlocks().size()
+						+ ", regions count: " + regionsCount);
 			}
 		} while (repeat);
+	}
+
+	private static int calcIterativeLimit(MethodNode mth, int regionsCount) {
+		return calcIterativeLimit(mth.getBasicBlocks().size(), regionsCount);
+	}
+
+	static int calcIterativeLimit(int blocksCount, int regionsCount) {
+		return Math.max(ITERATIVE_LIMIT_MULTIPLIER * blocksCount, regionsCount * 2);
+	}
+
+	private static int countRegions(IRegion startRegion) {
+		int count = 0;
+		List<IRegion> stack = new ArrayList<>();
+		stack.add(startRegion);
+		while (!stack.isEmpty()) {
+			IRegion region = ListUtils.removeLast(stack);
+			count++;
+			for (IContainer subBlock : region.getSubBlocks()) {
+				if (subBlock instanceof IRegion) {
+					stack.add((IRegion) subBlock);
+				}
+			}
+		}
+		return count;
 	}
 
 	private static final IContainer LEAVE_REGION_MARK = new InsnContainer(Collections.emptyList());

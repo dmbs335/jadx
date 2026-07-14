@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.DeclareVariablesAttr;
+import jadx.core.dex.attributes.nodes.InitAtDeclareVarsAttr;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.CodeVar;
@@ -213,6 +214,7 @@ public class ProcessVariables extends AbstractVisitor {
 
 	private List<CodeVar> collectCodeVars(MethodNode mth) {
 		Map<CodeVar, List<SSAVar>> codeVars = new LinkedHashMap<>();
+		InitAtDeclareVarsAttr initVars = mth.get(AType.INIT_AT_DECLARE_VARS);
 		for (SSAVar ssaVar : mth.getSVars()) {
 			if (ssaVar.getCodeVar().isThis()) {
 				continue;
@@ -235,6 +237,9 @@ public class ProcessVariables extends AbstractVisitor {
 				}
 			}
 			codeVar.setSsaVars(list);
+			if (initVars != null && list.stream().anyMatch(s -> initVars.contains(s.getRegNum()))) {
+				codeVar.setInitAtDeclaration(true);
+			}
 		}
 		return new ArrayList<>(codeVars.keySet());
 	}

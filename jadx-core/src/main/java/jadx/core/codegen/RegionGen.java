@@ -71,6 +71,9 @@ public class RegionGen extends InsnGen {
 			for (CodeVar v : declVars.getVars()) {
 				code.startLine();
 				declareVar(code, v);
+				if (v.isInitAtDeclaration()) {
+					code.add(" = ").add(TypeGen.literalToString(0, v.getType(), mth, fallback));
+				}
 				code.add(';');
 				CodeGenUtils.addCodeComments(code, mth, v.getAnySsaVar().getAssign());
 			}

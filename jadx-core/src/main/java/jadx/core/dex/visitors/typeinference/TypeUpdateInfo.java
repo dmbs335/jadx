@@ -1,6 +1,7 @@
 package jadx.core.dex.visitors.typeinference;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,7 +21,7 @@ import jadx.core.utils.exceptions.JadxRuntimeException;
 public class TypeUpdateInfo {
 	private final MethodNode mth;
 	private final TypeUpdateFlags flags;
-	private final Map<InsnArg, TypeUpdateEntry> updateMap = new IdentityHashMap<>();
+	private @Nullable Map<InsnArg, TypeUpdateEntry> updateMap;
 	private final List<TypeUpdateRequest> queue = new ArrayList<>();
 	private final List<TypeUpdateRequest> callbackQueue = new ArrayList<>();
 	private final int updatesLimitCount;
@@ -51,7 +52,12 @@ public class TypeUpdateInfo {
 	}
 
 	public void requestUpdate(InsnArg arg, ArgType changeType) {
-		TypeUpdateEntry prev = updateMap.put(arg, new TypeUpdateEntry(updateSeq++, arg, changeType));
+		Map<InsnArg, TypeUpdateEntry> map = updateMap;
+		if (map == null) {
+			map = new IdentityHashMap<>();
+			updateMap = map;
+		}
+		TypeUpdateEntry prev = map.put(arg, new TypeUpdateEntry(updateSeq++, arg, changeType));
 		if (prev != null) {
 			throw new JadxRuntimeException("Unexpected type update override for arg: " + arg
 					+ " types: prev=" + prev.getType() + ", new=" + changeType
@@ -68,24 +74,34 @@ public class TypeUpdateInfo {
 	}
 
 	public void rollbackUpdate(InsnArg arg) {
-		TypeUpdateEntry removed = updateMap.remove(arg);
+		Map<InsnArg, TypeUpdateEntry> map = updateMap;
+		if (map == null) {
+			return;
+		}
+		TypeUpdateEntry removed = map.remove(arg);
 		if (removed != null) {
 			int seq = removed.getSeq();
-			updateMap.values().removeIf(upd -> upd.getSeq() > seq);
+			map.values().removeIf(upd -> upd.getSeq() > seq);
 		}
 	}
 
 	public void applyUpdates() {
-		updateMap.values().stream().sorted()
+		Map<InsnArg, TypeUpdateEntry> map = updateMap;
+		if (map == null) {
+			return;
+		}
+		map.values().stream().sorted()
 				.forEach(upd -> upd.getArg().setType(upd.getType()));
 	}
 
 	public boolean isProcessed(InsnArg arg) {
-		return updateMap.containsKey(arg);
+		Map<InsnArg, TypeUpdateEntry> map = updateMap;
+		return map != null && map.containsKey(arg);
 	}
 
 	public boolean hasUpdateWithType(InsnArg arg, ArgType type) {
-		TypeUpdateEntry updateEntry = updateMap.get(arg);
+		Map<InsnArg, TypeUpdateEntry> map = updateMap;
+		TypeUpdateEntry updateEntry = map == null ? null : map.get(arg);
 		if (updateEntry != null) {
 			return updateEntry.getType().equals(type);
 		}
@@ -93,7 +109,8 @@ public class TypeUpdateInfo {
 	}
 
 	public ArgType getType(InsnArg arg) {
-		TypeUpdateEntry updateEntry = updateMap.get(arg);
+		Map<InsnArg, TypeUpdateEntry> map = updateMap;
+		TypeUpdateEntry updateEntry = map == null ? null : map.get(arg);
 		if (updateEntry != null) {
 			return updateEntry.getType();
 		}
@@ -105,11 +122,16 @@ public class TypeUpdateInfo {
 	}
 
 	public boolean isEmpty() {
-		return updateMap.isEmpty();
+		Map<InsnArg, TypeUpdateEntry> map = updateMap;
+		return map == null || map.isEmpty();
 	}
 
 	public List<TypeUpdateEntry> getSortedUpdates() {
-		return updateMap.values().stream().sorted().collect(Collectors.toList());
+		Map<InsnArg, TypeUpdateEntry> map = updateMap;
+		if (map == null) {
+			return Collections.emptyList();
+		}
+		return map.values().stream().sorted().collect(Collectors.toList());
 	}
 
 	public TypeUpdateFlags getFlags() {

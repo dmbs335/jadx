@@ -95,7 +95,7 @@ public class SwitchBreakVisitor extends AbstractVisitor {
 					return;
 				}
 				InsnNode lastInsn = last.getInsn();
-				if (lastInsn.getType() == InsnType.BREAK) {
+				if (lastInsn.getType() == InsnType.BREAK && isBreakBlock(last.getBlock())) {
 					IBlock block = last.getBlock();
 					IContainer parent = RegionUtils.getBlockContainer(branch, block);
 					forBreakRemove.add(new BlockParentContainer(parent, block));

@@ -54,7 +54,7 @@ public class ConditionGen extends InsnGen {
 		stack.push(condition);
 		switch (condition.getMode()) {
 			case COMPARE:
-				addCompare(code, stack, condition.getCompare());
+				addCompare(code, stack, condition.getCompare(), condition.getCompare().getOp());
 				break;
 
 			case TERNARY:
@@ -98,8 +98,7 @@ public class ConditionGen extends InsnGen {
 		}
 	}
 
-	private void addCompare(ICodeWriter code, CondStack stack, Compare compare) throws CodegenException {
-		IfOp op = compare.getOp();
+	private void addCompare(ICodeWriter code, CondStack stack, Compare compare, IfOp op) throws CodegenException {
 		InsnArg firstArg = compare.getA();
 		InsnArg secondArg = compare.getB();
 		if (firstArg.getType().equals(ArgType.BOOLEAN)
@@ -147,12 +146,19 @@ public class ConditionGen extends InsnGen {
 	private void addAndOr(ICodeWriter code, CondStack stack, IfCondition condition) throws CodegenException {
 		String mode = condition.getMode() == Mode.AND ? " && " : " || ";
 		Iterator<IfCondition> it = condition.getArgs().iterator();
+		IfCondition current = it.next();
 		while (it.hasNext()) {
-			wrap(code, stack, it.next());
-			if (it.hasNext()) {
-				code.add(mode);
+			IfCondition next = it.next();
+			if (condition.getMode() == Mode.OR && IfCondition.isUnsafeNotNullGuard(current, next)) {
+				Compare compare = current.getCompare();
+				addCompare(code, stack, compare, compare.getOp().invert());
+			} else {
+				wrap(code, stack, current);
 			}
+			code.add(mode);
+			current = next;
 		}
+		wrap(code, stack, current);
 	}
 
 	private boolean isWrapNeeded(IfCondition condition) {

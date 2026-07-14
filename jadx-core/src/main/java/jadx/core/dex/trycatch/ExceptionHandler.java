@@ -2,12 +2,12 @@ package jadx.core.dex.trycatch;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import org.jetbrains.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import jadx.core.Consts;
 import jadx.core.dex.attributes.AFlag;
@@ -18,12 +18,12 @@ import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IRegion;
 import jadx.core.dex.nodes.MethodNode;
+import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnUtils;
+import jadx.core.utils.ListUtils;
 import jadx.core.utils.Utils;
 
 public class ExceptionHandler {
-
-	private static final Logger LOG = LoggerFactory.getLogger(ExceptionHandler.class);
 
 	private final List<ClassInfo> catchTypes = new ArrayList<>(1);
 	private final int handlerOffset;
@@ -161,37 +161,56 @@ public class ExceptionHandler {
 	@Nullable
 	public BlockNode getBottomSplitter() {
 		TryCatchBlockAttr handlerTryBlock = getTryBlock();
-		// TODO: Implement support for finding bottom splitter of catch with inner tries
-		if (handlerTryBlock.getInnerTryBlocks().size() > 1) {
-			LOG.warn("No support yet for finding bottom block of try body with multipe inner trys");
-			return null;
+		List<TryCatchBlockAttr> innerTryBlocks = handlerTryBlock.getInnerTryBlocks();
+		if (innerTryBlocks.size() < 2) {
+			TryCatchBlockAttr searchTryBody = innerTryBlocks.isEmpty()
+					? handlerTryBlock
+					: innerTryBlocks.get(0);
+			return findBottomSplitter(searchTryBody);
 		}
-		TryCatchBlockAttr searchForTryBody;
-		if (handlerTryBlock.getInnerTryBlocks().isEmpty()) {
-			searchForTryBody = handlerTryBlock;
-		} else {
-			searchForTryBody = Utils.getOne(handlerTryBlock.getInnerTryBlocks());
-		}
+		return findBottomSplitter(innerTryBlocks);
+	}
 
-		BlockNode splitter = null;
+	@Nullable
+	private BlockNode findBottomSplitter(TryCatchBlockAttr searchTryBody) {
 		for (BlockNode handlerPredecessor : getHandlerBlock().getPredecessors()) {
 			if (!handlerPredecessor.contains(AFlag.EXC_BOTTOM_SPLITTER)) {
 				continue;
 			}
-
 			for (BlockNode splitterPredecessor : handlerPredecessor.getPredecessors()) {
-				TryCatchBlockAttr tryBody = splitterPredecessor.get(AType.TRY_BLOCK);
-				if (tryBody == searchForTryBody) {
-					splitter = handlerPredecessor;
-					break;
+				if (splitterPredecessor.get(AType.TRY_BLOCK) == searchTryBody) {
+					return handlerPredecessor;
 				}
 			}
+		}
+		return null;
+	}
 
-			if (splitter != null) {
-				break;
+	@Nullable
+	private BlockNode findBottomSplitter(List<TryCatchBlockAttr> searchTryBodies) {
+		// Every inner try bottom splitter is also connected to the outer handler.
+		// Select only the exit reached after all other candidates on the normal control-flow path.
+		Map<BlockNode, BlockNode> exitToSplitter = new LinkedHashMap<>();
+		for (BlockNode handlerPredecessor : getHandlerBlock().getPredecessors()) {
+			if (!handlerPredecessor.contains(AFlag.EXC_BOTTOM_SPLITTER)) {
+				continue;
+			}
+			for (BlockNode splitterPredecessor : handlerPredecessor.getPredecessors()) {
+				TryCatchBlockAttr tryBody = splitterPredecessor.get(AType.TRY_BLOCK);
+				if (searchTryBodies.contains(tryBody)) {
+					exitToSplitter.put(splitterPredecessor, handlerPredecessor);
+				}
 			}
 		}
-		return splitter;
+		if (exitToSplitter.isEmpty()) {
+			return null;
+		}
+		List<BlockNode> splitters = ListUtils.distinctList(new ArrayList<>(exitToSplitter.values()));
+		if (splitters.size() == 1) {
+			return splitters.get(0);
+		}
+		BlockNode bottomExit = BlockUtils.getBottomBlock(new ArrayList<>(exitToSplitter.keySet()), true);
+		return bottomExit == null ? null : exitToSplitter.get(bottomExit);
 	}
 
 	public void markForRemove() {

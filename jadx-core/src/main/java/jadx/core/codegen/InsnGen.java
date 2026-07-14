@@ -1,6 +1,7 @@
 package jadx.core.codegen;
 
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
@@ -299,6 +300,11 @@ public class InsnGen {
 					if (var == null || var.getUseCount() != 0 || insn.getType() != InsnType.CONSTRUCTOR) {
 						assignVar(code, insn);
 						code.add(" = ");
+						if (isGenericAssignCastNeeded(insn, resArg)) {
+							code.add('(');
+							useType(code, resArg.getSVar().getCodeVar().getType());
+							code.add(") ");
+						}
 					}
 				}
 				makeInsnBody(code, insn, EMPTY_FLAGS);
@@ -310,6 +316,48 @@ public class InsnGen {
 		} catch (Exception e) {
 			throw new CodegenException(mth, "Error generate insn: " + insn, e);
 		}
+	}
+
+	private static boolean isGenericAssignCastNeeded(InsnNode insn, RegisterArg result) {
+		if (result.getSVar() == null) {
+			return false;
+		}
+		ArgType codeVarType = result.getSVar().getCodeVar().getType();
+		if (codeVarType == null
+				|| !codeVarType.isGenericType()
+				|| !ArgType.OBJECT.equals(result.getInitType())) {
+			return false;
+		}
+		InvokeNode sourceInvoke = findSourceInvoke(insn, new HashSet<>());
+		return sourceInvoke == null
+				|| sourceInvoke.getInvokeType() == InvokeType.STATIC
+				|| sourceInvoke.getArgsCount() == 0
+				|| !sourceInvoke.getArg(0).getType().containsGeneric();
+	}
+
+	@Nullable
+	private static InvokeNode findSourceInvoke(InsnNode insn, Set<InsnNode> visited) {
+		if (!visited.add(insn)) {
+			return null;
+		}
+		if (insn instanceof InvokeNode) {
+			return (InvokeNode) insn;
+		}
+		for (InsnArg arg : insn.getArguments()) {
+			InsnNode assignInsn = null;
+			if (arg instanceof InsnWrapArg) {
+				assignInsn = ((InsnWrapArg) arg).getWrapInsn();
+			} else if (arg instanceof RegisterArg && ((RegisterArg) arg).getSVar() != null) {
+				assignInsn = ((RegisterArg) arg).getSVar().getAssignInsn();
+			}
+			if (assignInsn != null) {
+				InvokeNode sourceInvoke = findSourceInvoke(assignInsn, visited);
+				if (sourceInvoke != null) {
+					return sourceInvoke;
+				}
+			}
+		}
+		return null;
 	}
 
 	private void makeInsnBody(ICodeWriter code, InsnNode insn, Set<Flags> state) throws CodegenException {
@@ -331,7 +379,23 @@ public class InsnGen {
 				break;
 
 			case MOVE:
-				addArg(code, insn.getArg(0), false);
+				InsnArg moveArg = insn.getArg(0);
+				if (isBooleanToIntMove(insn, moveArg)) {
+					addArg(code, moveArg, false);
+					code.add(" ? 1 : 0");
+					break;
+				}
+				if (isIntToBooleanMove(insn, moveArg)) {
+					addArg(code, moveArg, false);
+					code.add(" != 0");
+					break;
+				}
+				if (isMoveCastNeeded(insn, moveArg)) {
+					code.add('(');
+					useType(code, insn.getResult().getSVar().getCodeVar().getType());
+					code.add(") ");
+				}
+				addArg(code, moveArg, false);
 				break;
 
 			case CHECK_CAST:
@@ -382,6 +446,10 @@ public class InsnGen {
 
 			case CONTINUE:
 				code.add("continue");
+				LoopLabelAttr continueLabelAttr = insn.get(AType.LOOP_LABEL);
+				if (continueLabelAttr != null) {
+					code.add(' ').add(mgen.getNameGen().getLoopLabel(continueLabelAttr));
+				}
 				break;
 
 			case THROW:
@@ -649,6 +717,47 @@ public class InsnGen {
 			default:
 				throw new CodegenException(mth, "Unknown instruction: " + insn.getType());
 		}
+	}
+
+	private static boolean isBooleanToIntMove(InsnNode insn, InsnArg moveArg) {
+		if (insn.getResult() == null
+				|| insn.getResult().getSVar() == null
+				|| !(moveArg instanceof RegisterArg)
+				|| ((RegisterArg) moveArg).getSVar() == null) {
+			return false;
+		}
+		ArgType resultType = insn.getResult().getSVar().getCodeVar().getType();
+		ArgType sourceType = ((RegisterArg) moveArg).getSVar().getCodeVar().getType();
+		return ArgType.INT.equals(resultType) && ArgType.BOOLEAN.equals(sourceType);
+	}
+
+	private static boolean isIntToBooleanMove(InsnNode insn, InsnArg moveArg) {
+		if (insn.getResult() == null
+				|| insn.getResult().getSVar() == null
+				|| !(moveArg instanceof RegisterArg)
+				|| ((RegisterArg) moveArg).getSVar() == null) {
+			return false;
+		}
+		ArgType resultType = insn.getResult().getSVar().getCodeVar().getType();
+		ArgType sourceType = ((RegisterArg) moveArg).getSVar().getCodeVar().getType();
+		return ArgType.BOOLEAN.equals(resultType) && ArgType.INT.equals(sourceType);
+	}
+
+	private boolean isMoveCastNeeded(InsnNode insn, InsnArg moveArg) {
+		if (insn.getResult() == null
+				|| insn.getResult().getSVar() == null
+				|| !(moveArg instanceof RegisterArg)
+				|| ((RegisterArg) moveArg).getSVar() == null) {
+			return false;
+		}
+		ArgType resultType = insn.getResult().getSVar().getCodeVar().getType();
+		ArgType sourceType = ((RegisterArg) moveArg).getSVar().getCodeVar().getType();
+		if (resultType == null || sourceType == null
+				|| !resultType.isTypeKnown() || !sourceType.isTypeKnown()
+				|| !resultType.isObject() || !sourceType.isObject()) {
+			return false;
+		}
+		return mth.root().getTypeCompare().compareTypes(resultType, sourceType).isNarrow();
 	}
 
 	/**

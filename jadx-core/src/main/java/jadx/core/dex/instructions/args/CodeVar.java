@@ -14,6 +14,7 @@ public class CodeVar {
 	private boolean isFinal;
 	private boolean isThis;
 	private boolean isDeclared;
+	private boolean initAtDeclaration;
 
 	private VarNode cachedVarNode; // set and used at codegen stage
 
@@ -94,6 +95,14 @@ public class CodeVar {
 		isDeclared = declared;
 	}
 
+	public boolean isInitAtDeclaration() {
+		return initAtDeclaration;
+	}
+
+	public void setInitAtDeclaration(boolean initAtDeclaration) {
+		this.initAtDeclaration = initAtDeclaration;
+	}
+
 	public VarNode getCachedVarNode() {
 		return cachedVarNode;
 	}
@@ -114,6 +123,9 @@ public class CodeVar {
 		}
 		if (other.isFinal()) {
 			setFinal(true);
+		}
+		if (other.isInitAtDeclaration()) {
+			setInitAtDeclaration(true);
 		}
 	}
 

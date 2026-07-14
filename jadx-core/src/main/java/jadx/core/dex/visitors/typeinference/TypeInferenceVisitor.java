@@ -297,6 +297,11 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 		if (insn == null) {
 			return null;
 		}
+		if (insn.getType() == InsnType.IPUT
+				&& insn.getArg(0) == regArg
+				&& regArg.getInitType().containsTypeVariable()) {
+			return new TypeBoundFieldPutUse(root, (IndexInsnNode) insn, regArg);
+		}
 		if (insn instanceof BaseInvokeNode) {
 			ITypeBound invokeUseBound = makeInvokeUseBound(regArg, (BaseInvokeNode) insn);
 			if (invokeUseBound != null) {

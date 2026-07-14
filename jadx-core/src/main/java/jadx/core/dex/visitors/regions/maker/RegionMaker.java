@@ -16,6 +16,7 @@ import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.SwitchInsn;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IContainer;
@@ -46,6 +47,7 @@ public class RegionMaker {
 
 	private int regionsCount;
 	private int duplicatedBlocksCount;
+	private boolean hasUnsafeDuplicatedBlocks;
 	private @Nullable BlockNode firstDuplicatedBlock;
 
 	public RegionMaker(MethodNode mth) {
@@ -62,7 +64,7 @@ public class RegionMaker {
 	public Region makeMthRegion() {
 		Region region = makeRegion(mth.getEnterBlock());
 		restoreLinearSyntheticMoveBlocks(region);
-		if (duplicatedBlocksCount != 0) {
+		if (duplicatedBlocksCount != 0 && hasUnsafeDuplicatedBlocks) {
 			BlockNode firstBlock = Objects.requireNonNull(firstDuplicatedBlock);
 			mth.addWarnComment("Code duplicated in " + duplicatedBlocksCount
 					+ " blocks, first: " + firstBlock + ' ' + firstBlock.getAttributesString());
@@ -141,6 +143,7 @@ public class RegionMaker {
 						firstDuplicatedBlock = startBlock;
 					}
 					duplicatedBlocksCount++;
+					hasUnsafeDuplicatedBlocks |= !isSafeLoopDuplication(startBlock);
 					startBlock.add(AFlag.DUPLICATED);
 				}
 			}
@@ -166,6 +169,57 @@ public class RegionMaker {
 				activeRegionStates.remove(startBlock);
 			}
 		}
+	}
+
+	private boolean isSafeLoopDuplication(BlockNode block) {
+		if (isSafeLocalAssignmentDuplication(block)) {
+			return true;
+		}
+		if (mth.getLoopForBlock(block) == null) {
+			return false;
+		}
+		for (InsnNode insn : block.getInstructions()) {
+			if (insn.contains(AFlag.DONT_GENERATE)) {
+				continue;
+			}
+			switch (insn.getType()) {
+				case MOVE:
+				case CONST:
+				case ARITH:
+				case IGET:
+				case SGET:
+				case CAST:
+				case CHECK_CAST:
+					break;
+				case INVOKE:
+					InvokeNode invoke = (InvokeNode) insn;
+					String declClass = invoke.getCallMth().getDeclClass().getFullName();
+					String name = invoke.getCallMth().getName();
+					if (!declClass.equals("java.lang.Math") || !(name.equals("min") || name.equals("max"))) {
+						return false;
+					}
+					break;
+				default:
+					return false;
+			}
+		}
+		return true;
+	}
+
+	static boolean isSafeLocalAssignmentDuplication(BlockNode block) {
+		List<InsnNode> insns = block.getInstructions();
+		if (insns.isEmpty()) {
+			return false;
+		}
+		for (InsnNode insn : insns) {
+			InsnType type = insn.getType();
+			if ((type != InsnType.CONST && type != InsnType.MOVE)
+					|| insn.getResult() == null
+					|| insn.getArgsCount() != 1) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	Region makeRegionAfterRemovingLoop(BlockNode startBlock) {

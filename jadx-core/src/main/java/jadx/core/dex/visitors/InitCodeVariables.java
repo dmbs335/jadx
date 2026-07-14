@@ -70,7 +70,6 @@ public class InitCodeVariables extends AbstractVisitor {
 		if (assignArg.contains(AFlag.METHOD_ARGUMENT) || assignArg.contains(AFlag.CUSTOM_DECLARE)) {
 			codeVar.setDeclared(true);
 		}
-
 		setCodeVar(ssaVar, codeVar);
 	}
 
