@@ -30,6 +30,7 @@ import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
+import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.mods.ConstructorInsn;
 import jadx.core.dex.instructions.mods.TernaryInsn;
@@ -45,6 +46,7 @@ import jadx.core.dex.visitors.regions.variables.ProcessVariables;
 import jadx.core.dex.visitors.shrink.CodeShrinkVisitor;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnList;
+import jadx.core.utils.InsnRemover;
 import jadx.core.utils.exceptions.JadxException;
 
 /**
@@ -84,6 +86,7 @@ public class PrepareForCodeGen extends AbstractVisitor {
 			}
 			removeInstructions(block);
 			checkInline(block);
+			collapseMarkedFloatIdentityConversions(mth, block);
 			removeParenthesis(block);
 			modifyArith(block);
 			checkConstUsage(block);
@@ -148,6 +151,91 @@ public class PrepareForCodeGen extends AbstractVisitor {
 				wrapInsn.copyAttributesFrom(insn);
 				list.set(i, wrapInsn);
 			}
+		}
+	}
+
+	/**
+	 * A late coroutine carrier repair can prove that the source of an earlier boolean-to-float
+	 * bridge is already a float. These marked synthetic ternaries are stale identity conversions;
+	 * collapse them after inlining so both standalone and wrapped copies are handled.
+	 */
+	private static void collapseMarkedFloatIdentityConversions(MethodNode mth, BlockNode block) {
+		List<InsnNode> insns = block.getInstructions();
+		for (int i = 0; i < insns.size(); i++) {
+			InsnNode insn = insns.get(i);
+			RegisterArg source = getMarkedFloatIdentitySource(insn);
+			if (source != null && insn.getResult() != null) {
+				unbindTernaryCondition(mth, (TernaryInsn) insn);
+				InsnNode move = new InsnNode(InsnType.MOVE, 1);
+				move.setResult(insn.getResult());
+				RegisterArg floatSource = source.duplicate();
+				floatSource.forceSetInitType(ArgType.FLOAT);
+				move.addArg(floatSource);
+				move.add(AFlag.SYNTHETIC);
+				BlockUtils.replaceInsn(mth, block, i, move);
+				continue;
+			}
+			collapseWrappedMarkedFloatIdentities(mth, insn);
+		}
+	}
+
+	private static void collapseWrappedMarkedFloatIdentities(MethodNode mth, InsnNode parent) {
+		int argsCount = parent.getArgsCount();
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = parent.getArg(i);
+			if (!arg.isInsnWrap()) {
+				continue;
+			}
+			InsnNode inner = ((InsnWrapArg) arg).getWrapInsn();
+			RegisterArg source = getMarkedFloatIdentitySource(inner);
+			if (source != null) {
+				unbindTernaryCondition(mth, (TernaryInsn) inner);
+				RegisterArg floatSource = source.duplicate();
+				floatSource.forceSetInitType(ArgType.FLOAT);
+				parent.replaceArg(arg, floatSource);
+			} else {
+				collapseWrappedMarkedFloatIdentities(mth, inner);
+			}
+		}
+	}
+
+	static RegisterArg getMarkedFloatIdentitySource(InsnNode insn) {
+		if (!(insn instanceof TernaryInsn) || !insn.contains(AFlag.SYNTHETIC)) {
+			return null;
+		}
+		TernaryInsn ternary = (TernaryInsn) insn;
+		IfCondition condition = ternary.getCondition();
+		if (!condition.isCompare()
+				|| !condition.getCompare().getInsn().contains(AType.BOOLEAN_NUMERIC_CONVERSION)
+				|| condition.getCompare().getOp() != jadx.core.dex.instructions.IfOp.EQ
+				|| !(ternary.getArg(0) instanceof LiteralArg)
+				|| !(ternary.getArg(1) instanceof LiteralArg)) {
+			return null;
+		}
+		LiteralArg one = (LiteralArg) ternary.getArg(0);
+		LiteralArg zero = (LiteralArg) ternary.getArg(1);
+		if (!ArgType.FLOAT.equals(one.getType()) || one.getLiteral() != Float.floatToIntBits(1.0f)
+				|| !ArgType.FLOAT.equals(zero.getType()) || zero.getLiteral() != 0) {
+			return null;
+		}
+		InsnArg first = condition.getCompare().getA();
+		InsnArg second = condition.getCompare().getB();
+		RegisterArg source;
+		if (first.isRegister() && second.isTrue()) {
+			source = (RegisterArg) first;
+		} else if (second.isRegister() && first.isTrue()) {
+			source = (RegisterArg) second;
+		} else {
+			return null;
+		}
+		return source.getSVar() != null && ArgType.FLOAT.equals(source.getSVar().getCodeVar().getType())
+				? source
+				: null;
+	}
+
+	private static void unbindTernaryCondition(MethodNode mth, TernaryInsn ternary) {
+		for (RegisterArg conditionArg : ternary.getCondition().getRegisterArgs()) {
+			InsnRemover.unbindArgUsage(mth, conditionArg);
 		}
 	}
 
@@ -303,11 +391,31 @@ public class PrepareForCodeGen extends AbstractVisitor {
 				regArgs.remove(mth.getThisArg());
 				mth.getArgRegs().forEach(regArgs::remove);
 			}
+			while (!regArgs.isEmpty() && inlinePureSingleUseConstructorArgs(mth, ctrInsn, regArgs)) {
+				regArgs.clear();
+				ctrInsn.getRegisterArgs(regArgs);
+				regArgs.remove(mth.getThisArg());
+				mth.getArgRegs().forEach(regArgs::remove);
+			}
+			if (!regArgs.isEmpty() && inlineOrderedSingleUseConstructorArgs(mth, ctrInsn, regArgs)) {
+				regArgs.clear();
+				ctrInsn.getRegisterArgs(regArgs);
+				regArgs.remove(mth.getThisArg());
+				mth.getArgRegs().forEach(regArgs::remove);
+			}
+			if (!regArgs.isEmpty() && inlinePureMultiUseConstructorAssignment(mth, ctrInsn, regArgs)) {
+				regArgs.clear();
+				ctrInsn.getRegisterArgs(regArgs);
+				regArgs.remove(mth.getThisArg());
+				mth.getArgRegs().forEach(regArgs::remove);
+				regArgs.removeIf(reg -> isInlineAssignmentInConstructor(ctrInsn, reg));
+			}
 			if (!regArgs.isEmpty()) {
 				mth.addWarnComment("Illegal instructions before constructor call");
 				return;
 			}
-			if (!isSafeKotlinContinuationConstructorMove(mth, ctrInsn, blockByInsn)) {
+			boolean firstInsnAfterInlining = BlockUtils.isFirstInsn(mth, ctrInsn);
+			if (!firstInsnAfterInlining && !isSafeKotlinContinuationConstructorMove(mth, ctrInsn, blockByInsn)) {
 				mth.addWarnComment("'" + callType + "' call moved to the top of the method (can break code semantics)");
 			}
 		}
@@ -325,8 +433,8 @@ public class PrepareForCodeGen extends AbstractVisitor {
 			}
 			InsnNode assignInsn = regArg.getSVar().getAssignInsn();
 			if (assignInsn == null
-					|| assignInsn.getType() != InsnType.CONST
-					|| regArg.getSVar().getUseList().stream().anyMatch(use -> use.getParentInsn() != ctrInsn)) {
+					|| !isLiteralAssign(assignInsn)
+					|| regArg.getSVar().getUseList().stream().anyMatch(use -> !isConstructorArgUse(ctrInsn, use))) {
 				return false;
 			}
 			assignInsns.add(assignInsn);
@@ -344,6 +452,201 @@ public class PrepareForCodeGen extends AbstractVisitor {
 			}
 		}
 		return true;
+	}
+
+	private static boolean isLiteralAssign(InsnNode assignInsn) {
+		InsnType type = assignInsn.getType();
+		return (type == InsnType.CONST || type == InsnType.MOVE)
+				&& assignInsn.getArgsCount() == 1
+				&& assignInsn.getArg(0).isLiteral();
+	}
+
+	private static boolean isConstructorArgUse(ConstructorInsn ctrInsn, RegisterArg use) {
+		return ctrInsn.visitArgs(arg -> arg == use ? Boolean.TRUE : null) != null;
+	}
+
+	private static boolean inlinePureSingleUseConstructorArgs(MethodNode mth, ConstructorInsn ctrInsn, Set<RegisterArg> regArgs) {
+		Map<RegisterArg, BlockNode> inlineBlocks = new java.util.HashMap<>();
+		for (RegisterArg regArg : regArgs) {
+			if (regArg.getSVar() == null || regArg.getSVar().getUseCount() != 1) {
+				return false;
+			}
+			InsnNode assignInsn = regArg.getSVar().getAssignInsn();
+			RegisterArg use = regArg.getSVar().getUseList().get(0);
+			if (assignInsn == null
+					|| !isPureConstructorExpression(assignInsn)
+					|| !isConstructorArgUse(ctrInsn, use)) {
+				return false;
+			}
+			BlockNode assignBlock = BlockUtils.getBlockByInsn(mth, assignInsn);
+			if (assignBlock == null) {
+				return false;
+			}
+			inlineBlocks.put(regArg, assignBlock);
+		}
+		for (Map.Entry<RegisterArg, BlockNode> entry : inlineBlocks.entrySet()) {
+			RegisterArg regArg = entry.getKey();
+			InsnNode assignInsn = regArg.getSVar().getAssignInsn();
+			RegisterArg use = regArg.getSVar().getUseList().get(0);
+			if (use.wrapInstruction(mth, assignInsn, false) == null) {
+				return false;
+			}
+			InsnRemover.unbindResult(mth, assignInsn);
+			InsnRemover.removeWithoutUnbind(mth, entry.getValue(), assignInsn);
+		}
+		return true;
+	}
+
+	private static boolean isPureConstructorExpression(InsnNode assignInsn) {
+		InsnType type = assignInsn.getType();
+		if (type == InsnType.MOVE) {
+			return assignInsn.canReorder();
+		}
+		if (type != InsnType.TERNARY) {
+			return false;
+		}
+		return assignInsn.visitInsns(insn -> insn != assignInsn && !insn.canReorder() ? Boolean.FALSE : null) == null;
+	}
+
+	private static boolean inlineOrderedSingleUseConstructorArgs(
+			MethodNode mth, ConstructorInsn ctrInsn, Set<RegisterArg> regArgs) {
+		if (regArgs.isEmpty()) {
+			return false;
+		}
+		List<RegisterArg> orderedRegs = new ArrayList<>(regArgs.size());
+		ctrInsn.visitArgs(arg -> {
+			if (arg.isRegister() && regArgs.contains(arg)) {
+				orderedRegs.add((RegisterArg) arg);
+			}
+		});
+		if (orderedRegs.size() != regArgs.size()) {
+			return false;
+		}
+		Map<RegisterArg, BlockNode> assignBlocks = new java.util.LinkedHashMap<>();
+		Set<InsnNode> assignInsns = new HashSet<>();
+		for (RegisterArg regArg : orderedRegs) {
+			if (regArg.getSVar() == null || regArg.getSVar().getUseCount() != 1) {
+				return false;
+			}
+			InsnNode assignInsn = regArg.getSVar().getAssignInsn();
+			if (assignInsn == null
+					|| assignInsn.getType() != InsnType.TERNARY
+					|| !isConstructorArgUse(ctrInsn, regArg.getSVar().getUseList().get(0))) {
+				return false;
+			}
+			BlockNode assignBlock = BlockUtils.getBlockByInsn(mth, assignInsn);
+			if (assignBlock == null) {
+				return false;
+			}
+			assignBlocks.put(regArg, assignBlock);
+			assignInsns.add(assignInsn);
+		}
+		BlockNode ctrBlock = BlockUtils.getBlockByInsn(mth, ctrInsn);
+		if (ctrBlock == null || !isOrderedConstructorPath(orderedRegs, assignBlocks, assignInsns, ctrBlock, ctrInsn)) {
+			return false;
+		}
+		for (RegisterArg regArg : orderedRegs) {
+			InsnNode assignInsn = regArg.getSVar().getAssignInsn();
+			RegisterArg use = regArg.getSVar().getUseList().get(0);
+			if (use.wrapInstruction(mth, assignInsn, false) == null) {
+				return false;
+			}
+			InsnRemover.unbindResult(mth, assignInsn);
+			InsnRemover.removeWithoutUnbind(mth, assignBlocks.get(regArg), assignInsn);
+		}
+		return true;
+	}
+
+	private static boolean isOrderedConstructorPath(List<RegisterArg> orderedRegs, Map<RegisterArg, BlockNode> assignBlocks,
+			Set<InsnNode> assignInsns, BlockNode ctrBlock, ConstructorInsn ctrInsn) {
+		for (int i = 0; i < orderedRegs.size(); i++) {
+			RegisterArg reg = orderedRegs.get(i);
+			InsnNode fromInsn = reg.getSVar().getAssignInsn();
+			BlockNode fromBlock = assignBlocks.get(reg);
+			InsnNode toInsn;
+			BlockNode toBlock;
+			if (i + 1 < orderedRegs.size()) {
+				RegisterArg nextReg = orderedRegs.get(i + 1);
+				toInsn = nextReg.getSVar().getAssignInsn();
+				toBlock = assignBlocks.get(nextReg);
+			} else {
+				toInsn = ctrInsn;
+				toBlock = ctrBlock;
+			}
+			if (!BlockUtils.isPathExists(fromBlock, toBlock)
+					|| !canMoveAcrossSegment(fromBlock, fromInsn, toBlock, toInsn, assignInsns)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean canMoveAcrossSegment(BlockNode fromBlock, InsnNode fromInsn, BlockNode toBlock, InsnNode toInsn,
+			Set<InsnNode> movableInsns) {
+		Set<BlockNode> pathBlocks = BlockUtils.getAllPathsBlocks(fromBlock, toBlock);
+		for (BlockNode block : pathBlocks) {
+			List<InsnNode> insns = block.getInstructions();
+			int start = block == fromBlock ? insns.indexOf(fromInsn) + 1 : 0;
+			int end = block == toBlock ? insns.indexOf(toInsn) : insns.size();
+			if (start < 0 || end < 0) {
+				return false;
+			}
+			for (int i = start; i < end; i++) {
+				InsnNode insn = insns.get(i);
+				if (!movableInsns.contains(insn) && !insn.canReorder()) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private static boolean inlinePureMultiUseConstructorAssignment(
+			MethodNode mth, ConstructorInsn ctrInsn, Set<RegisterArg> regArgs) {
+		if (regArgs.size() != 1) {
+			return false;
+		}
+		RegisterArg regArg = regArgs.iterator().next();
+		if (regArg.getSVar() == null || regArg.getSVar().getUseCount() < 2) {
+			return false;
+		}
+		InsnNode assignInsn = regArg.getSVar().getAssignInsn();
+		if (assignInsn == null
+				|| assignInsn.getType() != InsnType.TERNARY
+				|| !isPureConstructorExpression(assignInsn)
+				|| regArg.getSVar().getUseList().stream().anyMatch(use -> !isConstructorArgUse(ctrInsn, use))) {
+			return false;
+		}
+		RegisterArg result = assignInsn.getResult();
+		if (result == null || mth.getArgRegs().stream().noneMatch(result::sameCodeVar)) {
+			return false;
+		}
+		BlockNode assignBlock = BlockUtils.getBlockByInsn(mth, assignInsn);
+		if (assignBlock == null) {
+			return false;
+		}
+		List<RegisterArg> uses = regArg.getSVar().getUseList();
+		RegisterArg firstUse = ctrInsn.visitArgs(arg -> uses.contains(arg) ? (RegisterArg) arg : null);
+		if (firstUse == null) {
+			return false;
+		}
+		assignInsn.add(AFlag.FORCE_ASSIGN_INLINE);
+		if (firstUse.wrapInstruction(mth, assignInsn) == null) {
+			assignInsn.remove(AFlag.FORCE_ASSIGN_INLINE);
+			return false;
+		}
+		InsnRemover.removeWithoutUnbind(mth, assignBlock, assignInsn);
+		return true;
+	}
+
+	private static boolean isInlineAssignmentInConstructor(ConstructorInsn ctrInsn, RegisterArg reg) {
+		if (reg.getSVar() == null) {
+			return false;
+		}
+		InsnNode assignInsn = reg.getSVar().getAssignInsn();
+		return assignInsn != null
+				&& assignInsn.contains(AFlag.FORCE_ASSIGN_INLINE)
+				&& ctrInsn.visitInsns(insn -> insn == assignInsn ? Boolean.TRUE : null) != null;
 	}
 
 	private static boolean isSafeKotlinContinuationConstructorMove(MethodNode mth, ConstructorInsn ctrInsn, BlockNode block) {

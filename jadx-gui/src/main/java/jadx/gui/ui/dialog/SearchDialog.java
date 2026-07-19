@@ -57,7 +57,6 @@ import jadx.core.dex.nodes.PackageNode;
 import jadx.core.utils.ListUtils;
 import jadx.core.utils.StringUtils;
 import jadx.core.utils.Utils;
-import jadx.gui.jobs.ITaskInfo;
 import jadx.gui.jobs.ITaskProgress;
 import jadx.gui.search.SearchSettings;
 import jadx.gui.search.SearchTask;
@@ -712,9 +711,10 @@ public class SearchDialog extends CommonSearchDialog {
 	private void stopSearchTask() {
 		UiUtils.notUiThreadGuard();
 		if (searchTask != null) {
-			searchTask.cancel();
-			searchTask.waitTask();
+			SearchTask task = searchTask;
 			searchTask = null;
+			task.cancel();
+			task.waitTask();
 		}
 	}
 
@@ -723,13 +723,16 @@ public class SearchDialog extends CommonSearchDialog {
 			if (searchTask == null) {
 				return;
 			}
-			searchTask.cancel();
-			searchTask.waitTask();
+			SearchTask task = searchTask;
+			task.cancel();
+			if (!task.waitTask() || searchTask != task) {
+				return;
+			}
 			UiUtils.uiRunAndWait(this::prepareForSearch);
 			if (all) {
-				searchTask.setResultsLimit(0);
+				task.setResultsLimit(0);
 			}
-			searchTask.fetchResults();
+			task.fetchResults();
 		});
 	}
 
@@ -795,9 +798,13 @@ public class SearchDialog extends CommonSearchDialog {
 		UiUtils.uiRun(() -> progressInfoLabel.setText(text));
 	}
 
-	private void searchFinished(ITaskInfo status, Boolean complete) {
+	private void searchFinished(SearchTask task, Boolean complete) {
 		UiUtils.uiThreadGuard();
-		LOG.debug("Search complete: {}, complete: {}", status, complete);
+		if (task != searchTask) {
+			LOG.debug("Ignore stale search task completion");
+			return;
+		}
+		LOG.debug("Search complete: {}, complete: {}", task.getTitle(), complete);
 		loadAllButton.setEnabled(!complete);
 		loadMoreButton.setEnabled(!complete);
 		stopBtn.setEnabled(false);

@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -146,6 +147,7 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 
 	public void updateTypeParameters(List<ArgType> typeParameters) {
 		this.typeParameters = typeParameters;
+		remove(AType.METHOD_TYPE_VARS);
 	}
 
 	@Override
@@ -760,6 +762,72 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 
 	public boolean callsSelf() {
 		return this.callsSelf;
+	}
+
+	void restoreUsageFrom(MethodNode source, Map<MethodNode, MethodNode> replacements) {
+		for (MethodNode caller : source.useIn) {
+			if (!replacements.containsKey(caller)) {
+				caller.replaceUsedMethod(source, this);
+			}
+		}
+		for (MethodNode callee : source.methodsUsed) {
+			if (!replacements.containsKey(callee)) {
+				callee.replaceUseInMethod(source, this);
+			}
+		}
+
+		this.useIn = remapMethods(source.useIn, replacements);
+		if (source.methodsUsed.isEmpty()) {
+			this.methodsUsed = Collections.emptySet();
+		} else {
+			this.methodsUsed = new HashSet<>(source.methodsUsed.size());
+			for (MethodNode callee : source.methodsUsed) {
+				this.methodsUsed.add(replacements.getOrDefault(callee, callee));
+			}
+		}
+		this.unresolvedUsed = source.unresolvedUsed;
+		this.callsSelf = source.callsSelf;
+
+		source.useIn = Collections.emptyList();
+		source.methodsUsed = Collections.emptySet();
+		source.unresolvedUsed = Collections.emptyList();
+	}
+
+	private static List<MethodNode> remapMethods(
+			List<MethodNode> source, Map<MethodNode, MethodNode> replacements) {
+		if (source.isEmpty() || replacements.isEmpty()) {
+			return source;
+		}
+		List<MethodNode> result = new ArrayList<>(source.size());
+		boolean changed = false;
+		for (MethodNode mth : source) {
+			MethodNode replacement = replacements.get(mth);
+			if (replacement == null) {
+				result.add(mth);
+			} else {
+				result.add(replacement);
+				changed = true;
+			}
+		}
+		return changed ? result : source;
+	}
+
+	private synchronized void replaceUsedMethod(MethodNode source, MethodNode replacement) {
+		if (methodsUsed.remove(source)) {
+			methodsUsed.add(replacement);
+		}
+	}
+
+	private synchronized void replaceUseInMethod(MethodNode source, MethodNode replacement) {
+		int count = useIn.size();
+		for (int i = 0; i < count; i++) {
+			if (useIn.get(i) == source) {
+				List<MethodNode> updated = new ArrayList<>(useIn);
+				updated.set(i, replacement);
+				useIn = updated;
+				return;
+			}
+		}
 	}
 
 	// Remove any methods from the list of used methods (calees) if this method (caller) has been

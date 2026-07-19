@@ -16,10 +16,13 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.InitAtDeclareVarsAttr;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
+import jadx.core.dex.instructions.IfNode;
+import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.PhiInsn;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -107,13 +110,31 @@ public class SSATransform extends AbstractVisitor {
 			}
 			int regsCount = mth.getRegsCount();
 			BitSet assignedInSources = collectAssignedRegs(sources, regsCount);
+			BitSet assignedInProtectedRange = null;
+			BitSet definitelyReferenceAtProtectedRange = null;
 			for (int regNum = 0; regNum < regsCount; regNum++) {
+				PhiInsn existingPhi = getPhiForReg(handlerBlock, regNum);
+				boolean definitionDominatesHandler = hasDefinitionDominating(mth, la, handlerBlock, regNum);
+				boolean recoverCoroutineHandlerPhi = mth.getName().equals("invokeSuspend")
+						&& (existingPhi != null || definitionDominatesHandler);
 				if (!la.isLive(handlerBlock, regNum)
-						|| hasPhiForReg(handlerBlock, regNum)
-						|| hasDefinitionDominating(mth, la, handlerBlock, regNum)) {
+						|| existingPhi != null && !recoverCoroutineHandlerPhi
+						|| existingPhi == null && definitionDominatesHandler && !recoverCoroutineHandlerPhi) {
 					continue;
 				}
-				boolean assignedInTry = assignedInSources.get(regNum);
+				if (recoverCoroutineHandlerPhi && assignedInProtectedRange == null) {
+					assignedInProtectedRange = collectAssignedInProtectedRange(mth, handler, sources, regsCount);
+				}
+				if (recoverCoroutineHandlerPhi && existingPhi == null) {
+					if (definitelyReferenceAtProtectedRange == null) {
+						definitelyReferenceAtProtectedRange = collectDefinitelyReferenceAtProtectedRange(
+								mth, handler, sources, regsCount);
+					}
+					if (!definitelyReferenceAtProtectedRange.get(regNum)) {
+						continue;
+					}
+				}
+				boolean assignedInTry = (recoverCoroutineHandlerPhi ? assignedInProtectedRange : assignedInSources).get(regNum);
 				boolean singleLiteral = false;
 				if (assignedInTry) {
 					if (singleLiteralRegs == null) {
@@ -121,15 +142,20 @@ public class SSATransform extends AbstractVisitor {
 					}
 					singleLiteral = singleLiteralRegs.get(regNum);
 				}
-				if (!hasSafeDefinitionForAllSources(la, sources, regNum, assignedInTry, singleLiteral)) {
+				if (!hasSafeDefinitionForAllSources(
+						mth, la, handler, sources, regNum, assignedInTry, singleLiteral,
+						recoverCoroutineHandlerPhi)) {
 					continue;
 				}
-				candidates.add(new ExceptionPhiCandidate(handlerBlock, regNum, sources));
+				candidates.add(new ExceptionPhiCandidate(handlerBlock, regNum, sources, existingPhi));
 			}
 		}
 		for (ExceptionPhiCandidate candidate : resolveExceptionPhiCandidates(mth, candidates)) {
-			PhiInsn phiInsn = addPhi(mth, candidate.getHandlerBlock(), candidate.getRegNum());
-			candidate.getHandlerBlock().getInstructions().add(0, phiInsn);
+			PhiInsn phiInsn = candidate.getExistingPhi();
+			if (phiInsn == null) {
+				phiInsn = addPhi(mth, candidate.getHandlerBlock(), candidate.getRegNum());
+				candidate.getHandlerBlock().getInstructions().add(0, phiInsn);
+			}
 			data.add(phiInsn, candidate.getSources());
 		}
 		return data;
@@ -230,16 +256,20 @@ public class SSATransform extends AbstractVisitor {
 	}
 
 	private static boolean hasPhiForReg(BlockNode block, int regNum) {
+		return getPhiForReg(block, regNum) != null;
+	}
+
+	private static PhiInsn getPhiForReg(BlockNode block, int regNum) {
 		PhiListAttr phiList = block.get(AType.PHI_LIST);
 		if (phiList == null) {
-			return false;
+			return null;
 		}
 		for (PhiInsn phiInsn : phiList.getList()) {
 			if (phiInsn.getResult().getRegNum() == regNum) {
-				return true;
+				return phiInsn;
 			}
 		}
-		return false;
+		return null;
 	}
 
 	private static boolean hasDefinitionDominating(MethodNode mth, LiveVarAnalysis la, BlockNode block, int regNum) {
@@ -256,15 +286,18 @@ public class SSATransform extends AbstractVisitor {
 	}
 
 	private static boolean hasSafeDefinitionForAllSources(
-			LiveVarAnalysis la, List<BlockNode> sources, int regNum,
-			boolean assignedInSources, boolean singleLiteral) {
+			MethodNode mth, LiveVarAnalysis la, ExceptionHandler handler, List<BlockNode> sources, int regNum,
+			boolean assignedInSources, boolean singleLiteral, boolean allowPreProtectedDefinition) {
 		boolean stableLiteral = !assignedInSources || singleLiteral;
 		if (!stableLiteral) {
 			return false;
 		}
 		BitSet assignBlocks = la.getAssignBlocks(regNum);
 		for (BlockNode source : sources) {
-			if (hasPhiForReg(source, regNum) || source.getDoms().intersects(assignBlocks)) {
+			if (hasPhiForReg(source, regNum)
+					|| source.getDoms().intersects(assignBlocks)
+					|| allowPreProtectedDefinition
+							&& hasDefinitionBeforeProtectedRange(mth, handler, source, regNum)) {
 				continue;
 			}
 			if (!la.isDefinedOnAllPaths(source, regNum)
@@ -289,6 +322,158 @@ public class SSATransform extends AbstractVisitor {
 			}
 		}
 		return assigned;
+	}
+
+	/**
+	 * Collect assignments which can change a value visible to an exception handler. A block is not
+	 * always split at the exact try boundary, so definitions before its first protected instruction
+	 * are safe while definitions at or after that point are not.
+	 */
+	private static BitSet collectAssignedInProtectedRange(
+			MethodNode mth, ExceptionHandler handler, List<BlockNode> blocks, int regsCount) {
+		BitSet assigned = new BitSet(regsCount);
+		for (BlockNode block : blocks) {
+			boolean protectedRangeStarted = false;
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.getType() == InsnType.PHI) {
+					continue;
+				}
+				if (isProtectedByHandler(mth, handler, insn)) {
+					protectedRangeStarted = true;
+				}
+				RegisterArg result = insn.getResult();
+				if (protectedRangeStarted && result != null) {
+					assigned.set(result.getRegNum());
+				}
+			}
+		}
+		return assigned;
+	}
+
+	/**
+	 * A dominating definition can belong to the coroutine state selector while the same dex register
+	 * contains an object on every real path into a protected range. Prove that object state with a
+	 * forward must-analysis before replacing the synthetic handler edge. Unknown or mixed states are
+	 * deliberately rejected.
+	 */
+	private static BitSet collectDefinitelyReferenceAtProtectedRange(
+			MethodNode mth, ExceptionHandler handler, List<BlockNode> sources, int regsCount) {
+		BitSet allRegs = new BitSet(regsCount);
+		allRegs.set(0, regsCount);
+		BitSet initial = new BitSet(regsCount);
+		RegisterArg thisArg = mth.getThisArg();
+		if (thisArg != null && isDefinitelyReference(thisArg.getInitType())) {
+			initial.set(thisArg.getRegNum());
+		}
+		for (RegisterArg arg : mth.getArgRegs()) {
+			if (isDefinitelyReference(arg.getInitType())) {
+				initial.set(arg.getRegNum());
+			}
+		}
+
+		BitSet[] endStates = new BitSet[mth.getBasicBlocks().size()];
+		for (BlockNode block : mth.getBasicBlocks()) {
+			endStates[block.getId()] = block == mth.getEnterBlock()
+					? (BitSet) initial.clone()
+					: (BitSet) allRegs.clone();
+		}
+		boolean changed;
+		int tries = 0;
+		do {
+			changed = false;
+			for (BlockNode block : mth.getBasicBlocks()) {
+				BitSet state;
+				if (block == mth.getEnterBlock()) {
+					state = (BitSet) initial.clone();
+				} else if (block.getPredecessors().isEmpty()) {
+					state = new BitSet(regsCount);
+				} else {
+					state = (BitSet) allRegs.clone();
+					for (BlockNode predecessor : block.getPredecessors()) {
+						state.and(endStates[predecessor.getId()]);
+					}
+				}
+				applyReferenceAssignments(state, block.getInstructions());
+				if (!state.equals(endStates[block.getId()])) {
+					endStates[block.getId()] = state;
+					changed = true;
+				}
+			}
+			if (tries++ > mth.getBasicBlocks().size() * 2) {
+				return new BitSet(regsCount);
+			}
+		} while (changed);
+
+		BitSet result = (BitSet) allRegs.clone();
+		for (BlockNode source : sources) {
+			BitSet state = getReferenceEntryState(source, endStates, allRegs, regsCount);
+			for (InsnNode insn : source.getInstructions()) {
+				if (insn.getType() == InsnType.PHI) {
+					continue;
+				}
+				if (isProtectedByHandler(mth, handler, insn)) {
+					break;
+				}
+				applyReferenceAssignment(state, insn);
+			}
+			result.and(state);
+		}
+		return result;
+	}
+
+	private static BitSet getReferenceEntryState(
+			BlockNode block, BitSet[] endStates, BitSet allRegs, int regsCount) {
+		if (block.getPredecessors().isEmpty()) {
+			return new BitSet(regsCount);
+		}
+		BitSet state = (BitSet) allRegs.clone();
+		for (BlockNode predecessor : block.getPredecessors()) {
+			state.and(endStates[predecessor.getId()]);
+		}
+		return state;
+	}
+
+	private static void applyReferenceAssignments(BitSet state, List<InsnNode> instructions) {
+		for (InsnNode insn : instructions) {
+			if (insn.getType() != InsnType.PHI) {
+				applyReferenceAssignment(state, insn);
+			}
+		}
+	}
+
+	private static void applyReferenceAssignment(BitSet state, InsnNode insn) {
+		RegisterArg result = insn.getResult();
+		if (result == null) {
+			return;
+		}
+		state.set(result.getRegNum(), isDefinitelyReference(result.getInitType()));
+	}
+
+	private static boolean isDefinitelyReference(ArgType type) {
+		return (type.canBeObject() || type.canBeArray()) && !type.canBeAnyNumber();
+	}
+
+	private static boolean hasDefinitionBeforeProtectedRange(
+			MethodNode mth, ExceptionHandler handler, BlockNode block, int regNum) {
+		boolean defined = false;
+		for (InsnNode insn : block.getInstructions()) {
+			if (insn.getType() == InsnType.PHI) {
+				continue;
+			}
+			if (isProtectedByHandler(mth, handler, insn)) {
+				return defined;
+			}
+			RegisterArg result = insn.getResult();
+			if (result != null && result.getRegNum() == regNum) {
+				defined = true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean isProtectedByHandler(MethodNode mth, ExceptionHandler handler, InsnNode insn) {
+		CatchAttr catchAttr = BlockUtils.getCatchAttrForInsn(mth, insn);
+		return catchAttr != null && catchAttr.getHandlers().contains(handler);
 	}
 
 	private static boolean startsWithLiteralAssign(BlockNode block, int regNum) {
@@ -577,11 +762,13 @@ public class SSATransform extends AbstractVisitor {
 		private final BlockNode handlerBlock;
 		private final int regNum;
 		private final List<BlockNode> sources;
+		private final PhiInsn existingPhi;
 
-		private ExceptionPhiCandidate(BlockNode handlerBlock, int regNum, List<BlockNode> sources) {
+		private ExceptionPhiCandidate(BlockNode handlerBlock, int regNum, List<BlockNode> sources, PhiInsn existingPhi) {
 			this.handlerBlock = handlerBlock;
 			this.regNum = regNum;
 			this.sources = sources;
+			this.existingPhi = existingPhi;
 		}
 
 		public BlockNode getHandlerBlock() {
@@ -594,6 +781,10 @@ public class SSATransform extends AbstractVisitor {
 
 		public List<BlockNode> getSources() {
 			return sources;
+		}
+
+		public PhiInsn getExistingPhi() {
+			return existingPhi;
 		}
 	}
 
@@ -847,6 +1038,11 @@ public class SSATransform extends AbstractVisitor {
 	}
 
 	private static boolean inlinePhiInsn(MethodNode mth, BlockNode block, PhiInsn phi, RegisterArg inlineArg) {
+		return inlinePhiInsn(mth, block, phi, inlineArg, false);
+	}
+
+	private static boolean inlinePhiInsn(
+			MethodNode mth, BlockNode block, PhiInsn phi, RegisterArg inlineArg, boolean duplicateArg) {
 		SSAVar resVar = phi.getResult().getSVar();
 		if (resVar == null) {
 			return false;
@@ -866,7 +1062,12 @@ public class SSATransform extends AbstractVisitor {
 				useArg.getSVar().removeUse(useArg);
 				inlineArg.getSVar().use(useArg);
 			} else {
-				if (!useInsn.replaceArg(useArg, inlineArg)) {
+				RegisterArg replacement = inlineArg;
+				if (duplicateArg) {
+					replacement = inlineArg.duplicate(useArg.getInitType());
+					replacement.copyAttributesFrom(useArg);
+				}
+				if (!useInsn.replaceArg(useArg, replacement)) {
 					return false;
 				}
 			}
@@ -880,6 +1081,293 @@ public class SSATransform extends AbstractVisitor {
 		}
 		InsnRemover.unbindInsn(mth, phi);
 		return true;
+	}
+
+	public static void inlineSameSourceMovePhis(MethodNode mth) {
+		boolean changed;
+		int tries = 0;
+		int maxTries = mth.getSVars().size() * 2;
+		do {
+			changed = false;
+			for (BlockNode block : mth.getBasicBlocks()) {
+				PhiListAttr phiList = block.get(AType.PHI_LIST);
+				if (phiList == null) {
+					continue;
+				}
+				Iterator<PhiInsn> iterator = phiList.getList().iterator();
+				while (iterator.hasNext()) {
+					if (inlineSameSourceMovePhi(mth, block, iterator.next())) {
+						iterator.remove();
+						changed = true;
+					}
+				}
+				if (phiList.getList().isEmpty()) {
+					block.remove(AType.PHI_LIST);
+				}
+			}
+			if (tries++ > maxTries) {
+				throw new JadxRuntimeException("Same-source move PHI inline limit reached");
+			}
+		} while (changed);
+	}
+
+	private static boolean inlineSameSourceMovePhi(MethodNode mth, BlockNode block, PhiInsn phi) {
+		if (isSameArgs(phi)) {
+			SSAVar directSource = phi.getArg(0).getSVar();
+			if (isEligibleStringConstructorArg(mth, directSource)
+					&& canInlinePhi(phi)
+					&& inlinePhiInsn(mth, block, phi, directSource.getAssign().duplicate(), true)) {
+				detachMethodArgCodeVar(directSource);
+				return true;
+			}
+			return false;
+		}
+		SSAVar sourceVar = getSameMoveSource(phi);
+		if (sourceVar == null
+				|| !isEligibleStringConstructorArg(mth, sourceVar)
+				|| !canInlinePhi(phi)) {
+			return false;
+		}
+		List<InsnNode> moveInsns = new ArrayList<>(phi.getArgsCount());
+		for (InsnArg arg : phi.getArguments()) {
+			moveInsns.add(((RegisterArg) arg).getAssignInsn());
+		}
+		if (!inlineSameSourceMoves(sourceVar, moveInsns)
+				|| !inlinePhiInsn(mth, block, phi, sourceVar.getAssign().duplicate(), true)) {
+			return false;
+		}
+		for (InsnNode moveInsn : moveInsns) {
+			RegisterArg moveResult = moveInsn.getResult();
+			if (moveResult != null && moveResult.getSVar().getUseCount() == 0) {
+				InsnRemover.remove(mth, moveInsn);
+			}
+		}
+		detachMethodArgCodeVar(sourceVar);
+		return true;
+	}
+
+	private static boolean isEligibleStringConstructorArg(MethodNode mth, SSAVar sourceVar) {
+		RegisterArg assign = sourceVar.getAssign();
+		return mth.isConstructor()
+				&& mth.getBasicBlocks().size() <= 64
+				&& !mth.getArgRegs().isEmpty()
+				&& mth.getArgRegs().get(0).getSVar() == sourceVar
+				&& assign.contains(AFlag.METHOD_ARGUMENT)
+				&& assign.getInitType().equals(ArgType.STRING);
+	}
+
+	private static boolean canInlinePhi(PhiInsn phi) {
+		if (phi.getResult() == null || phi.getResult().getSVar() == null) {
+			return false;
+		}
+		for (RegisterArg useArg : phi.getResult().getSVar().getUseList()) {
+			if (useArg.getParentInsn() == null) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static void detachMethodArgCodeVar(SSAVar sourceVar) {
+		CodeVar previous = sourceVar.getCodeVar();
+		CodeVar methodArgVar = new CodeVar();
+		methodArgVar.setName(previous.getName());
+		methodArgVar.setType(previous.getType());
+		methodArgVar.setDeclared(true);
+		methodArgVar.setFinal(previous.isFinal());
+		methodArgVar.setThis(previous.isThis());
+		methodArgVar.setInitAtDeclaration(previous.isInitAtDeclaration());
+		sourceVar.setCodeVar(methodArgVar);
+	}
+
+	private static SSAVar getSameMoveSource(PhiInsn phi) {
+		SSAVar sourceVar = null;
+		for (InsnArg arg : phi.getArguments()) {
+			InsnNode assignInsn = ((RegisterArg) arg).getAssignInsn();
+			if (assignInsn == null || assignInsn.getType() != InsnType.MOVE || !assignInsn.getArg(0).isRegister()) {
+				return null;
+			}
+			SSAVar moveSource = ((RegisterArg) assignInsn.getArg(0)).getSVar();
+			if (sourceVar == null) {
+				sourceVar = moveSource;
+			} else if (sourceVar != moveSource) {
+				return null;
+			}
+		}
+		return sourceVar;
+	}
+
+	private static boolean inlineSameSourceMoves(SSAVar sourceVar, List<InsnNode> moveInsns) {
+		for (InsnNode moveInsn : moveInsns) {
+			for (RegisterArg useArg : moveInsn.getResult().getSVar().getUseList()) {
+				if (useArg.getParentInsn() == null) {
+					return false;
+				}
+			}
+		}
+		for (InsnNode moveInsn : moveInsns) {
+			SSAVar moveVar = moveInsn.getResult().getSVar();
+			for (RegisterArg useArg : new ArrayList<>(moveVar.getUseList())) {
+				RegisterArg replacement = sourceVar.getAssign().duplicate(useArg.getInitType());
+				replacement.copyAttributesFrom(useArg);
+				if (!useArg.getParentInsn().replaceArg(useArg, replacement)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	/**
+	 * Remove a literal move feeding a PHI when the controlling equality edge already proves that the
+	 * destination register has that literal value. Dex optimizers sometimes emit this redundant
+	 * assignment in UTF-8 decoding helpers. Keeping it creates a needless SSA split which can make
+	 * region construction duplicate the shared decode tail.
+	 */
+	public static void inlineBranchProvenConstMovePhis(MethodNode mth) {
+		boolean changed;
+		int tries = 0;
+		int maxTries = mth.getSVars().size() * 2;
+		do {
+			changed = false;
+			for (BlockNode block : mth.getBasicBlocks()) {
+				PhiListAttr phiList = block.get(AType.PHI_LIST);
+				if (phiList == null) {
+					continue;
+				}
+				Iterator<PhiInsn> iterator = phiList.getList().iterator();
+				while (iterator.hasNext()) {
+					if (inlineBranchProvenConstMovePhi(mth, block, iterator.next())) {
+						iterator.remove();
+						changed = true;
+					}
+				}
+				if (phiList.getList().isEmpty()) {
+					block.remove(AType.PHI_LIST);
+				}
+			}
+			if (tries++ > maxTries) {
+				throw new JadxRuntimeException("Branch-proven constant move PHI inline limit reached");
+			}
+		} while (changed);
+	}
+
+	private static boolean inlineBranchProvenConstMovePhi(MethodNode mth, BlockNode phiBlock, PhiInsn phi) {
+		if (phi.getArgsCount() != 2 || !canInlinePhi(phi)) {
+			return false;
+		}
+		RegisterArg first = phi.getArg(0);
+		RegisterArg second = phi.getArg(1);
+		InsnNode firstAssign = first.getAssignInsn();
+		InsnNode secondAssign = second.getAssignInsn();
+		if (isLiteralMove(firstAssign)) {
+			return inlineBranchProvenConstMovePhi(mth, phiBlock, phi, first, firstAssign, second);
+		}
+		if (isLiteralMove(secondAssign)) {
+			return inlineBranchProvenConstMovePhi(mth, phiBlock, phi, second, secondAssign, first);
+		}
+		return false;
+	}
+
+	private static boolean inlineBranchProvenConstMovePhi(MethodNode mth, BlockNode phiBlock, PhiInsn phi,
+			RegisterArg movePhiArg, InsnNode moveInsn, RegisterArg directArg) {
+		RegisterArg moveResult = moveInsn.getResult();
+		if (moveResult == null
+				|| moveResult.getSVar().getUseCount() != 1
+				|| moveResult.getRegNum() != directArg.getRegNum()
+				|| phi.getResult().getRegNum() != directArg.getRegNum()) {
+			return false;
+		}
+		BlockNode moveBlock = phi.getBlockByArg(movePhiArg);
+		BlockNode directBlock = phi.getBlockByArg(directArg);
+		if (moveBlock == null
+				|| directBlock == null
+				|| BlockUtils.getBlockByInsn(mth, moveInsn) != moveBlock
+				|| BlockUtils.getLastInsn(directBlock) == null
+				|| !(BlockUtils.getLastInsn(directBlock) instanceof IfNode)) {
+			return false;
+		}
+		IfNode ifInsn = (IfNode) BlockUtils.getLastInsn(directBlock);
+		if (ifInsn.getOp() != IfOp.EQ && ifInsn.getOp() != IfOp.NE) {
+			return false;
+		}
+		LiteralArg moveLiteral = (LiteralArg) moveInsn.getArg(0);
+		if (!isSameRegisterAndLiteralCondition(ifInsn, directArg, moveLiteral)) {
+			return false;
+		}
+		BlockNode equalitySuccessor = ifInsn.getOp() == IfOp.EQ ? ifInsn.getThenBlock() : ifInsn.getElseBlock();
+		BlockNode inequalitySuccessor = ifInsn.getOp() == IfOp.EQ ? ifInsn.getElseBlock() : ifInsn.getThenBlock();
+		if (inequalitySuccessor != phiBlock
+				|| equalitySuccessor == phiBlock
+				|| !isUnmodifiedEqualityPath(equalitySuccessor, moveBlock, directArg.getRegNum(), moveInsn)) {
+			return false;
+		}
+		if (!inlinePhiInsn(mth, phiBlock, phi, directArg)) {
+			return false;
+		}
+		if (moveResult.getSVar().getUseCount() == 0) {
+			InsnRemover.remove(mth, moveInsn);
+		}
+		return true;
+	}
+
+	private static boolean isLiteralMove(InsnNode insn) {
+		return insn != null
+				&& insn.getType() == InsnType.MOVE
+				&& insn.getArgsCount() == 1
+				&& insn.getArg(0).isLiteral();
+	}
+
+	private static boolean isSameRegisterAndLiteralCondition(
+			IfNode ifInsn, RegisterArg directArg, LiteralArg moveLiteral) {
+		InsnArg first = ifInsn.getArg(0);
+		InsnArg second = ifInsn.getArg(1);
+		return isSameRegisterAndLiteral(first, second, directArg, moveLiteral)
+				|| isSameRegisterAndLiteral(second, first, directArg, moveLiteral);
+	}
+
+	private static boolean isSameRegisterAndLiteral(
+			InsnArg register, InsnArg literal, RegisterArg directArg, LiteralArg moveLiteral) {
+		return register.isRegister()
+				&& ((RegisterArg) register).getSVar() == directArg.getSVar()
+				&& literal.isLiteral()
+				&& ((LiteralArg) literal).getLiteral() == moveLiteral.getLiteral();
+	}
+
+	private static boolean isUnmodifiedEqualityPath(
+			BlockNode equalityStart, BlockNode moveBlock, int regNum, InsnNode moveInsn) {
+		if (equalityStart == null
+				|| (equalityStart != moveBlock && !moveBlock.getDoms().get(equalityStart.getPos()))) {
+			return false;
+		}
+		Set<BlockNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+		Deque<BlockNode> queue = new ArrayDeque<>();
+		queue.add(moveBlock);
+		boolean reachedEqualityStart = false;
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (!visited.add(block)) {
+				continue;
+			}
+			if (visited.size() > 16) {
+				return false;
+			}
+			for (InsnNode insn : block.getInstructions()) {
+				RegisterArg result = insn.getResult();
+				if (insn != moveInsn && result != null && result.getRegNum() == regNum) {
+					return false;
+				}
+			}
+			if (block == equalityStart) {
+				reachedEqualityStart = true;
+				continue;
+			}
+			if (!block.getDoms().get(equalityStart.getPos()) || block.getPredecessors().isEmpty()) {
+				return false;
+			}
+			queue.addAll(block.getPredecessors());
+		}
+		return reachedEqualityStart;
 	}
 
 	private static void markThisArgs(RegisterArg thisArg) {

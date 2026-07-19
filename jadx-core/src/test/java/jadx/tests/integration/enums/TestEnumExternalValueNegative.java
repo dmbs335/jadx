@@ -14,7 +14,7 @@ public class TestEnumExternalValueNegative extends SmaliTest {
 		allowWarnInCode();
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.containsOne("Enum visitor error")
-				.containsOne("Failed to restore enum class");
+				.containsOne("JADX INFO: Enum visitor error")
+				.containsOne("JADX WARN: Failed to restore enum class");
 	}
 }

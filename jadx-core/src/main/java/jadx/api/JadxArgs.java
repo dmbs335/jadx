@@ -57,6 +57,7 @@ public class JadxArgs implements Closeable {
 	public static final String DEFAULT_RES_DIR = "resources";
 
 	private List<File> inputFiles = new ArrayList<>(1);
+	private List<File> dependencyInputFiles = new ArrayList<>();
 
 	private File outDir;
 	private File outDirSrc;
@@ -255,6 +256,39 @@ public class JadxArgs implements Closeable {
 
 	public void setInputFiles(List<File> inputFiles) {
 		this.inputFiles = inputFiles;
+	}
+
+	/**
+	 * Standalone DEX inputs used for symbol resolution and dependency processing, but not saved as source or resources.
+	 */
+	public List<File> getDependencyInputFiles() {
+		return dependencyInputFiles;
+	}
+
+	public void setDependencyInputFiles(List<File> dependencyInputFiles) {
+		this.dependencyInputFiles = dependencyInputFiles;
+	}
+
+	public List<File> getAllInputFiles() {
+		if (dependencyInputFiles.isEmpty()) {
+			return inputFiles;
+		}
+		List<File> allInputFiles = new ArrayList<>(inputFiles.size() + dependencyInputFiles.size());
+		allInputFiles.addAll(inputFiles);
+		allInputFiles.addAll(dependencyInputFiles);
+		return allInputFiles;
+	}
+
+	public boolean isDependencyInputFile(String inputFileName) {
+		String normalizedInput = normalizedInputPath(Path.of(inputFileName));
+		return dependencyInputFiles.stream()
+				.map(File::toPath)
+				.map(JadxArgs::normalizedInputPath)
+				.anyMatch(normalizedInput::equals);
+	}
+
+	private static String normalizedInputPath(Path path) {
+		return path.toAbsolutePath().normalize().toString();
 	}
 
 	public File getOutDir() {
@@ -879,6 +913,7 @@ public class JadxArgs implements Closeable {
 	@Override
 	public String toString() {
 		return "JadxArgs{" + "inputFiles=" + inputFiles
+				+ ", dependencyInputFiles=" + dependencyInputFiles
 				+ ", outDir=" + outDir
 				+ ", outDirSrc=" + outDirSrc
 				+ ", outDirRes=" + outDirRes

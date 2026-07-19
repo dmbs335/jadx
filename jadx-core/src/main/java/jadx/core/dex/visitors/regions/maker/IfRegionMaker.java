@@ -12,6 +12,10 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import jadx.api.plugins.input.data.annotations.EncodedValue;
+import jadx.api.plugins.input.data.annotations.IAnnotation;
+import jadx.api.plugins.input.data.attributes.JadxAttrType;
+import jadx.api.plugins.input.data.attributes.types.AnnotationsAttr;
 import jadx.core.Consts;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
@@ -56,6 +60,7 @@ final class IfRegionMaker {
 	private static final Logger LOG = LoggerFactory.getLogger(IfRegionMaker.class);
 	private final MethodNode mth;
 	private final RegionMaker regionMaker;
+	private @Nullable Boolean coroutineSuspensionPoints;
 
 	IfRegionMaker(MethodNode mth, RegionMaker regionMaker) {
 		this.mth = mth;
@@ -500,7 +505,16 @@ final class IfRegionMaker {
 			return coroutineSuspendIf;
 		}
 		BlockNode structuralOut = findOutBlock(mth, thenBlock, elseBlock);
-		IfInfo directTerminalIf = isCoroutineMethod() || isSuspendLambdaMethod() || structuralOut == null
+		boolean directBranchJoin = isDirectBranchJoin(structuralOut, thenBlock, elseBlock);
+		boolean suspendLambda = isSuspendLambdaMethod();
+		// A suspend lambda without suspension points is often only a compiler-generated wrapper.
+		// In this case a branch start selected as the structural out is the shared tail, not a
+		// terminal branch. Keep real resume state machines on the coroutine-specific path below.
+		boolean preserveDirectBranchJoin = directBranchJoin
+				&& suspendLambda
+				&& !hasCoroutineSuspensionPoints();
+		IfInfo directTerminalIf = !preserveDirectBranchJoin
+				&& (isCoroutineMethod() || suspendLambda || structuralOut == null)
 				? restructureAcyclicTerminalBranch(info, thenBlock, elseBlock)
 				: null;
 		if (directTerminalIf != null) {
@@ -588,6 +602,36 @@ final class IfRegionMaker {
 		return info;
 	}
 
+	static boolean isDirectBranchJoin(
+			@Nullable BlockNode structuralOut, BlockNode thenBlock, BlockNode elseBlock) {
+		return structuralOut == thenBlock || structuralOut == elseBlock;
+	}
+
+	private boolean hasCoroutineSuspensionPoints() {
+		if (coroutineSuspensionPoints != null) {
+			return coroutineSuspensionPoints;
+		}
+		coroutineSuspensionPoints = detectCoroutineSuspensionPoints();
+		return coroutineSuspensionPoints;
+	}
+
+	private boolean detectCoroutineSuspensionPoints() {
+		AnnotationsAttr annotations = mth.getParentClass().get(JadxAttrType.ANNOTATION_LIST);
+		if (annotations == null) {
+			return false;
+		}
+		for (IAnnotation annotation : annotations.getAll()) {
+			if (!annotation.getAnnotationClass().equals("Lkotlin/coroutines/jvm/internal/DebugMetadata;")) {
+				continue;
+			}
+			EncodedValue lines = annotation.getValues().get("l");
+			return lines != null
+					&& lines.getValue() instanceof List
+					&& !((List<?>) lines.getValue()).isEmpty();
+		}
+		return false;
+	}
+
 	private static @Nullable IfInfo restructureAcyclicTerminalBranch(
 			IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
 		boolean thenTerminal = isAcyclicTerminalSubgraph(thenBlock);
@@ -616,6 +660,7 @@ final class IfRegionMaker {
 		if (currentOut == null || !isAcyclicTerminalSubgraph(currentOut)) {
 			return null;
 		}
+		boolean currentOutIsCommonPostDominator = isCommonPostDominator(mth, thenBlock, elseBlock, currentOut);
 		BlockNode best = null;
 		for (BlockNode candidate : mth.getBasicBlocks()) {
 			if (candidate == currentOut
@@ -630,6 +675,12 @@ final class IfRegionMaker {
 			if (best == null || isPathExists(candidate, best)) {
 				best = candidate;
 			}
+		}
+		// Don't move an already valid structural join back to a block bypassed by some branch paths.
+		if (currentOutIsCommonPostDominator
+				&& best != null
+				&& !isCommonPostDominator(mth, thenBlock, elseBlock, best)) {
+			return null;
 		}
 		return best;
 	}
@@ -1203,21 +1254,28 @@ final class IfRegionMaker {
 	}
 
 	static boolean isCommonPostDominator(
-			MethodNode mth, BlockNode thenBlock, BlockNode elseBlock, BlockNode candidate) {
+			BlockNode thenBlock, BlockNode elseBlock, BlockNode candidate) {
+		return isCommonPostDominator(null, thenBlock, elseBlock, candidate);
+	}
+
+	private static boolean isCommonPostDominator(
+			@Nullable MethodNode mth, BlockNode thenBlock, BlockNode elseBlock, BlockNode candidate) {
 		// A branch starting at the join passes through it by definition. A terminal path in the
 		// opposite branch must not push a normal continuation to a later, unrelated join.
 		if (candidate == thenBlock || candidate == elseBlock) {
 			return true;
 		}
-		return !hasTerminalPathAvoiding(mth, thenBlock, candidate)
-				&& !hasTerminalPathAvoiding(mth, elseBlock, candidate);
+		BlockNode exitBlock = mth == null ? null : mth.getExitBlock();
+		return !hasTerminalPathAvoiding(thenBlock, candidate, exitBlock)
+				&& !hasTerminalPathAvoiding(elseBlock, candidate, exitBlock);
 	}
 
-	private static boolean hasTerminalPathAvoiding(MethodNode mth, BlockNode start, BlockNode excluded) {
+	private static boolean hasTerminalPathAvoiding(
+			BlockNode start, BlockNode excluded, @Nullable BlockNode exitBlock) {
 		if (start == excluded) {
 			return false;
 		}
-		BitSet visited = newBlocksBitSet(mth);
+		BitSet visited = new BitSet();
 		List<BlockNode> stack = new ArrayList<>();
 		stack.add(start);
 		while (!stack.isEmpty()) {
@@ -1227,7 +1285,7 @@ final class IfRegionMaker {
 			}
 			visited.set(block.getPos());
 			List<BlockNode> successors = block.getCleanSuccessors();
-			if (block == mth.getExitBlock() || successors.isEmpty()) {
+			if (block == exitBlock || successors.isEmpty()) {
 				return true;
 			}
 			stack.addAll(successors);

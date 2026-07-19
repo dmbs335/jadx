@@ -559,6 +559,7 @@ public class BlockProcessor extends AbstractVisitor {
 			IfNode thenIf = (IfNode) BlockUtils.getLastInsn(thenEnd);
 			IfNode elseIf = (IfNode) BlockUtils.getLastInsn(elseEnd);
 			if (!areEquivalentIfs(thenIf, elseIf)
+					|| !haveCompatibleEquivalentIfInputTypes(thenEnd, elseEnd, thenIf, elseIf)
 					|| BlockUtils.isExceptionHandlerPath(thenEnd)
 					|| BlockUtils.isExceptionHandlerPath(elseEnd)) {
 				continue;
@@ -612,6 +613,49 @@ public class BlockProcessor extends AbstractVisitor {
 				&& first.getElseBlock() == second.getElseBlock()
 				&& first.getOp() == second.getOp()
 				&& first.getArguments().equals(second.getArguments());
+	}
+
+	static boolean haveCompatibleEquivalentIfInputTypes(
+			BlockNode firstBlock, BlockNode secondBlock, IfNode firstIf, IfNode secondIf) {
+		for (int i = 0; i < firstIf.getArgsCount(); i++) {
+			InsnArg firstArg = firstIf.getArg(i);
+			InsnArg secondArg = secondIf.getArg(i);
+			if (!firstArg.isRegister() || !secondArg.isRegister()) {
+				continue;
+			}
+			int firstReg = ((RegisterArg) firstArg).getRegNum();
+			int secondReg = ((RegisterArg) secondArg).getRegNum();
+			if (firstReg != secondReg) {
+				continue;
+			}
+			ArgType firstType = resolveRegisterType(
+					firstBlock, firstReg, firstBlock.getInstructions().indexOf(firstIf), 0);
+			ArgType secondType = resolveRegisterType(
+					secondBlock, secondReg, secondBlock.getInstructions().indexOf(secondIf), 0);
+			if (firstType != null && firstType.isTypeKnown()
+					&& secondType != null && secondType.isTypeKnown()
+					&& firstType.isPrimitive() != secondType.isPrimitive()) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static @Nullable ArgType resolveRegisterType(BlockNode block, int regNum, int end, int depth) {
+		List<InsnNode> insns = block.getInstructions();
+		for (int i = end - 1; i >= 0; i--) {
+			RegisterArg result = insns.get(i).getResult();
+			if (result != null && result.getRegNum() == regNum) {
+				return result.getInitType();
+			}
+		}
+		if (depth < 4 && block.getPredecessors().size() == 1) {
+			BlockNode predecessor = block.getPredecessors().get(0);
+			if (predecessor.getSuccessors().size() == 1) {
+				return resolveRegisterType(predecessor, regNum, predecessor.getInstructions().size(), depth + 1);
+			}
+		}
+		return null;
 	}
 
 	/**

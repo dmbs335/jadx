@@ -14,6 +14,7 @@ public class TestConstructorNullArgInline extends SmaliTest {
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.doesNotContain("Illegal instructions before constructor call")
+				.doesNotContain("call moved to the top of the method")
 				.contains("this(null, 1, null);");
 	}
 }

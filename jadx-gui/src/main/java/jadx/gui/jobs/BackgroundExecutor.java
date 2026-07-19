@@ -149,6 +149,10 @@ public class BackgroundExecutor {
 	}
 
 	private void taskComplete(InternalTask internalTask) {
+		// TaskExecutor waits uninterruptibly to prevent workers escaping the project
+		// lifecycle, then restores the interrupt flag. Clear it while dispatching the
+		// completion callback: Swing invokeAndWait rejects an interrupted caller.
+		boolean restoreInterrupt = Thread.interrupted();
 		try {
 			IBackgroundTask task = internalTask.getBgTask();
 			internalTask.setJobsComplete(internalTask.getTaskExecutor().getProgress());
@@ -171,6 +175,9 @@ public class BackgroundExecutor {
 			internalTask.taskComplete();
 			progressUpdater.taskComplete(internalTask);
 			removeTask(internalTask);
+			if (restoreInterrupt) {
+				Thread.currentThread().interrupt();
+			}
 		}
 	}
 

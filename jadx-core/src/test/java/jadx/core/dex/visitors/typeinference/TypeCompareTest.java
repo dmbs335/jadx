@@ -161,6 +161,17 @@ public class TypeCompareTest {
 	}
 
 	@Test
+	public void compareSelfBoundedGenericTypeWithRawBound() {
+		ArgType kType = genericType("K");
+		ArgType comparableOfSuperK = generic(
+				object("java.lang.Comparable"),
+				wildcard(kType, WildcardBound.SUPER));
+		ArgType selfBoundedK = genericType("K", comparableOfSuperK);
+
+		check(selfBoundedK, object("java.lang.Comparable"), TypeCompareEnum.NARROW);
+	}
+
+	@Test
 	public void compareGenericTypes2() {
 		ArgType npeType = object("java.lang.NullPointerException");
 

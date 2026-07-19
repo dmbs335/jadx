@@ -70,6 +70,10 @@ public final class SwitchRegionMaker {
 		stack.push(sw);
 
 		BlockNode out = calcSwitchOut(block, insn, stack);
+		BlockNode sharedCaseOut = detectSharedCaseOut(blocksMap);
+		if (sharedCaseOut != null) {
+			out = sharedCaseOut;
+		}
 		stack.addExit(out);
 
 		addCases(sw, out, stack, blocksMap);
@@ -108,7 +112,11 @@ public final class SwitchRegionMaker {
 			if (!fallThroughCases.isEmpty() && isBadCasesOrder(blocksMap, fallThroughCases)) {
 				Map<BlockNode, List<Object>> newBlocksMap = reOrderSwitchCases(blocksMap, fallThroughCases);
 				if (isBadCasesOrder(newBlocksMap, fallThroughCases)) {
-					mth.addWarnComment("Can't fix incorrect switch cases order, some code will duplicate");
+					// Keep the original case order and let region construction preserve the CFG by
+					// duplicating paths where needed. RegionMaker reports a warning separately if
+					// that duplication is unsafe, so emitting a warning here is only a prediction
+					// and produces false positives for terminal/shared-suffix case paths.
+					LOG.debug("Can't reorder switch cases in {}, using CFG-preserving fallback", mth);
 					fallThroughCases.clear();
 				} else {
 					blocksMap = newBlocksMap;
@@ -133,6 +141,45 @@ public final class SwitchRegionMaker {
 			}
 			sw.addCase(keysList, caseRegion);
 		}
+	}
+
+	/**
+	 * Detect a switch case used as a shared exit by every other case. This shape is common in
+	 * compiler generated string switches: successful comparisons leave the switch, while all
+	 * failed comparisons converge on the default case. Treating these edges as fall-throughs
+	 * requires placing several cases directly before the same target, which is impossible.
+	 */
+	private @Nullable BlockNode detectSharedCaseOut(Map<BlockNode, List<Object>> blocksMap) {
+		int expectedSources = blocksMap.size() - 1;
+		if (expectedSources < 2) {
+			return null;
+		}
+		boolean possibleSharedTarget = false;
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			if (caseBlock.getPredecessors().size() >= expectedSources) {
+				possibleSharedTarget = true;
+				break;
+			}
+		}
+		if (!possibleSharedTarget) {
+			return null;
+		}
+		BitSet caseBlocks = BlockUtils.blocksToBitSet(mth, blocksMap.keySet());
+		Map<BlockNode, Integer> targetCounts = new LinkedHashMap<>();
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			BitSet intersections = BlockUtils.copyBlocksBitSet(mth, caseBlock.getDomFrontier());
+			intersections.and(caseBlocks);
+			BlockNode target = BlockUtils.bitSetToOneBlock(mth, intersections);
+			if (target != null && target != caseBlock) {
+				targetCounts.merge(target, 1, Integer::sum);
+			}
+		}
+		for (Map.Entry<BlockNode, Integer> entry : targetCounts.entrySet()) {
+			if (entry.getValue() == expectedSources) {
+				return entry.getKey();
+			}
+		}
+		return null;
 	}
 
 	@Nullable
@@ -353,24 +400,34 @@ public final class SwitchRegionMaker {
 	private Map<BlockNode, List<Object>> reOrderSwitchCases(Map<BlockNode, List<Object>> blocksMap,
 			Map<BlockNode, BlockNode> fallThroughCases) {
 		List<BlockNode> list = new ArrayList<>(blocksMap.size());
-		list.addAll(blocksMap.keySet());
-		list.sort((a, b) -> {
-			BlockNode nextA = fallThroughCases.get(a);
-			if (nextA != null) {
-				if (b.equals(nextA)) {
-					return -1;
-				}
-			} else if (a.equals(fallThroughCases.get(b))) {
-				return 1;
+		Set<BlockNode> targets = new HashSet<>(fallThroughCases.values());
+		Set<BlockNode> added = new HashSet<>(blocksMap.size());
+		// Start with chain heads and preserve the original order between independent chains.
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			if (!targets.contains(caseBlock)) {
+				addFallThroughChain(list, added, caseBlock, fallThroughCases);
 			}
-			return 0;
-		});
+		}
+		// Cycles and converging chains have no complete linear ordering. Keep their remaining
+		// nodes deterministic; the caller will reject the result if adjacency is still invalid.
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			addFallThroughChain(list, added, caseBlock, fallThroughCases);
+		}
 
 		Map<BlockNode, List<Object>> newBlocksMap = new LinkedHashMap<>(blocksMap.size());
 		for (BlockNode key : list) {
 			newBlocksMap.put(key, blocksMap.get(key));
 		}
 		return newBlocksMap;
+	}
+
+	private static void addFallThroughChain(List<BlockNode> result, Set<BlockNode> added,
+			BlockNode start, Map<BlockNode, BlockNode> fallThroughCases) {
+		BlockNode current = start;
+		while (current != null && added.add(current)) {
+			result.add(current);
+			current = fallThroughCases.get(current);
+		}
 	}
 
 	private boolean insertContinueInSwitch(BlockNode switchBlock, BlockNode switchOut, BlockNode loopEnd) {

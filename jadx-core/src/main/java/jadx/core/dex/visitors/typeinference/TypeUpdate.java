@@ -364,8 +364,8 @@ public final class TypeUpdate {
 				return false;
 
 			case UNKNOWN:
-				LOG.warn("Can't compare types, unknown hierarchy: {} and {}", candidateType, boundType);
-				comparator.compareTypes(candidateType, boundType);
+				// Missing external or metadata-only classes are expected here and this bound is accepted.
+				LOG.debug("Can't compare types, unknown hierarchy: {} and {}", candidateType, boundType);
 				return true;
 
 			default:

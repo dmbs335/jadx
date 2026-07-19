@@ -1,7 +1,13 @@
 package jadx.cli;
 
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
 import org.assertj.core.api.Condition;
 import org.junit.jupiter.api.Test;
+
+import jadx.storage.impl.SqliteContentStore;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -17,6 +23,42 @@ public class TestExport extends BaseCliIntegrationTest {
 				.haveExactly(10, new Condition<>(f -> f.startsWith("resources/"), "resources"))
 				.haveExactly(1, new Condition<>(f -> f.equals("resources/AndroidManifest.xml"), "manifest"))
 				.hasSize(12);
+	}
+
+	@Test
+	public void testDependencyInputIsNotExported() throws Exception {
+		URL dependency = getClass().getClassLoader().getResource("samples/hello.dex");
+		assertThat(dependency).isNotNull();
+		int result = execJadxCli(
+				"samples/small.apk",
+				"--dependency-input", Path.of(dependency.toURI()).toString());
+
+		assertThat(result).isEqualTo(0);
+		assertThat(collectJavaFilesInDir(outputDir)).hasSize(2);
+	}
+
+	@Test
+	public void testContentStoreExport() throws Exception {
+		Path storeDir = testDir.resolve("content-store");
+		int result = execJadxCli("samples/small.apk", "--content-store-dir", storeDir.toString());
+		assertThat(result).isEqualTo(0);
+		assertThat(storeDir.resolve("index.sqlite")).isRegularFile();
+		try (var objects = Files.walk(storeDir.resolve("objects"))) {
+			assertThat(objects.filter(Files::isRegularFile).count()).isPositive();
+		}
+
+		assertThat(JadxCLI.execute(new String[] {
+				"--content-store-dir", storeDir.toString(), "--content-store-stats"
+		})).isEqualTo(0);
+		assertThat(JadxCLI.execute(new String[] {
+				"--content-store-dir", storeDir.toString(), "--content-store-search", "sources"
+		})).isEqualTo(0);
+		assertThat(JadxCLI.execute(new String[] {
+				"--content-store-dir", storeDir.toString(), "--content-store-compact", "--content-store-pack-size-mib", "1"
+		})).isEqualTo(0);
+		try (SqliteContentStore store = SqliteContentStore.open(storeDir)) {
+			assertThat(store.getStats().getPackedObjectCount()).isPositive();
+		}
 	}
 
 	@Test

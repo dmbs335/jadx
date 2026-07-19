@@ -16,6 +16,7 @@ import jadx.core.xmlgen.ResContainer;
 import jadx.plugins.input.dex.DexInputPlugin;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class JadxDecompilerTest {
 
@@ -57,6 +58,20 @@ public class JadxDecompilerTest {
 			}
 			assertThat(jadx.getClasses()).hasSize(1);
 			assertThat(jadx.getErrorsCount()).isEqualTo(0);
+		}
+	}
+
+	@Test
+	public void testRejectSamePrimaryAndDependencyInput() {
+		File sampleDex = getFileFromSampleDir("hello.dex");
+		JadxArgs args = new JadxArgs();
+		args.addInputFile(sampleDex);
+		args.getDependencyInputFiles().add(sampleDex);
+		assertThat(args.isDependencyInputFile(sampleDex.getAbsolutePath())).isTrue();
+
+		try (JadxDecompiler jadx = new JadxDecompiler(args)) {
+			assertThatThrownBy(jadx::load)
+					.hasMessageContaining("Input file can't also be a dependency");
 		}
 	}
 

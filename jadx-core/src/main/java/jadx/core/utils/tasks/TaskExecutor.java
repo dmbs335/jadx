@@ -205,13 +205,27 @@ public class TaskExecutor implements ITaskExecutor {
 	}
 
 	public static void awaitExecutorTermination(ExecutorService executor) {
+		boolean interrupted = false;
 		try {
-			boolean complete = executor.awaitTermination(10, TimeUnit.DAYS);
-			if (!complete) {
-				throw new JadxRuntimeException("Executor timeout");
+			while (true) {
+				try {
+					boolean complete = executor.awaitTermination(10, TimeUnit.DAYS);
+					if (!complete) {
+						throw new JadxRuntimeException("Executor timeout");
+					}
+					return;
+				} catch (InterruptedException e) {
+					// Do not let an interrupted coordinator abandon still running workers.
+					// Jadx lifecycle code can close inputs and plugin classloaders as soon as
+					// this method returns, so returning early leaves decompile tasks using
+					// already closed state during project reload.
+					interrupted = true;
+				}
 			}
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
 		}
 	}
 }

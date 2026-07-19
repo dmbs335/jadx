@@ -2,8 +2,11 @@ package jadx.gui.search;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -30,7 +33,7 @@ public class SearchTask extends CancelableBackgroundTask {
 
 	private final BackgroundExecutor backgroundExecutor;
 	private final Consumer<JNode> resultsListener;
-	private final BiConsumer<ITaskInfo, Boolean> onFinish;
+	private final BiConsumer<SearchTask, Boolean> onFinish;
 	private final List<SearchJob> jobs = new ArrayList<>();
 	private final TaskProgress taskProgress = new TaskProgress();
 
@@ -40,7 +43,7 @@ public class SearchTask extends CancelableBackgroundTask {
 
 	private Consumer<ITaskProgress> progressListener;
 
-	public SearchTask(MainWindow mainWindow, Consumer<JNode> results, BiConsumer<ITaskInfo, Boolean> onFinish) {
+	public SearchTask(MainWindow mainWindow, Consumer<JNode> results, BiConsumer<SearchTask, Boolean> onFinish) {
 		this.backgroundExecutor = mainWindow.getBackgroundExecutor();
 		this.resultsListener = results;
 		this.onFinish = onFinish;
@@ -77,17 +80,28 @@ public class SearchTask extends CancelableBackgroundTask {
 		return false;
 	}
 
-	public synchronized void waitTask() {
+	public synchronized boolean waitTask() {
 		if (future == null) {
-			return;
+			return true;
 		}
 		try {
 			future.get(200, TimeUnit.MILLISECONDS);
-		} catch (Exception e) {
-			LOG.warn("Search task wait error", e);
-			future.cancel(true);
-		} finally {
 			future = null;
+			return true;
+		} catch (TimeoutException e) {
+			LOG.debug("Canceled search task is still finishing");
+			return false;
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			LOG.debug("Interrupted while waiting for search task completion");
+			return false;
+		} catch (CancellationException e) {
+			future = null;
+			return true;
+		} catch (ExecutionException e) {
+			LOG.warn("Search task failed while waiting for completion", e.getCause());
+			future = null;
+			return true;
 		}
 	}
 
@@ -108,7 +122,7 @@ public class SearchTask extends CancelableBackgroundTask {
 		boolean complete = !isCanceled()
 				&& task.getStatus() == TaskStatus.COMPLETE
 				&& task.getJobsComplete() == task.getJobsCount();
-		this.onFinish.accept(task, complete);
+		this.onFinish.accept(this, complete);
 	}
 
 	@Override

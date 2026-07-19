@@ -52,6 +52,13 @@ public class JadxCLIArgs implements IJadxConfig {
 	protected List<String> files = Collections.emptyList();
 
 	@JadxConfigExclude
+	@Parameter(
+			names = { "--dependency-input" },
+			description = "standalone .dex used for resolution and analysis but not written to output"
+	)
+	protected List<String> dependencyInputFiles = Collections.emptyList();
+
+	@JadxConfigExclude
 	@Parameter(names = { "-d", "--output-dir" }, description = "output directory")
 	protected String outDir;
 
@@ -62,6 +69,58 @@ public class JadxCLIArgs implements IJadxConfig {
 	@JadxConfigExclude
 	@Parameter(names = { "-dr", "--output-dir-res" }, description = "output directory for resources")
 	protected String outDirRes;
+
+	@JadxConfigExclude
+	@Parameter(names = { "--content-store-dir" }, description = "content-addressed output store and SQLite search index")
+	protected String contentStoreDir;
+
+	@Parameter(
+			names = { "--content-store-hardlink" },
+			description = "replace generated files with read-only CAS hard links (falls back to ordinary files)"
+	)
+	protected boolean contentStoreHardLink;
+
+	@Parameter(
+			names = { "--content-store-index" },
+			description = "content index mode: 'none', 'security' (default), or 'full-text'"
+	)
+	protected String contentStoreIndex = "security";
+
+	@JadxConfigExclude
+	@Parameter(names = { "--content-store-search" }, description = "search indexed source paths, symbols, and full text")
+	protected String contentStoreSearch;
+
+	@JadxConfigExclude
+	@Parameter(names = { "--content-store-facts" }, description = "list security facts by kind (use an empty string for all)")
+	protected String contentStoreFacts;
+
+	@JadxConfigExclude
+	@Parameter(names = { "--content-store-compact" }, description = "compact loose CAS objects into verified pack files")
+	protected boolean contentStoreCompact;
+
+	@JadxConfigExclude
+	@Parameter(names = { "--content-store-stats" }, description = "show content-store statistics")
+	protected boolean contentStoreStats;
+
+	@JadxConfigExclude
+	@Parameter(names = { "--content-store-limit" }, description = "maximum search or fact results")
+	protected int contentStoreLimit = 50;
+
+	@JadxConfigExclude
+	@Parameter(names = { "--content-store-app-id" }, description = "application id filter for security facts; zero means all")
+	protected long contentStoreAppId;
+
+	@JadxConfigExclude
+	@Parameter(names = { "--content-store-pack-size-mib" }, description = "maximum pack size in MiB")
+	protected long contentStorePackSizeMiB = 512;
+
+	@JadxConfigExclude
+	@Parameter(names = { "--content-store-materialize-run" }, description = "restore all artifacts for a stored run id")
+	protected long contentStoreMaterializeRun;
+
+	@JadxConfigExclude
+	@Parameter(names = { "--content-store-materialize-dir" }, description = "target directory for run materialization")
+	protected String contentStoreMaterializeDir;
 
 	@Parameter(names = { "-r", "--no-res" }, description = "do not decode resources")
 	protected boolean skipResources = false;
@@ -449,6 +508,33 @@ public class JadxCLIArgs implements IJadxConfig {
 		if (threadsCount <= 0) {
 			throw new JadxArgsValidateException("Threads count must be positive, got: " + threadsCount);
 		}
+		if (!Set.of("none", "security", "full-text").contains(contentStoreIndex)) {
+			throw new JadxArgsValidateException("Unknown content-store index mode: " + contentStoreIndex);
+		}
+		int storeCommandCount = (contentStoreSearch == null ? 0 : 1)
+				+ (contentStoreFacts == null ? 0 : 1)
+				+ (contentStoreCompact ? 1 : 0)
+				+ (contentStoreStats ? 1 : 0)
+				+ (contentStoreMaterializeRun > 0 ? 1 : 0);
+		if (storeCommandCount > 1) {
+			throw new JadxArgsValidateException("Only one content-store command can be used at a time");
+		}
+		if (storeCommandCount != 0 && (contentStoreDir == null || contentStoreDir.isEmpty())) {
+			throw new JadxArgsValidateException("Content-store command requires --content-store-dir");
+		}
+		if (contentStoreLimit <= 0 || contentStorePackSizeMiB <= 0) {
+			throw new JadxArgsValidateException("Content-store limit and pack size must be positive");
+		}
+		if (contentStoreMaterializeRun > 0
+				&& (contentStoreMaterializeDir == null || contentStoreMaterializeDir.isEmpty())) {
+			throw new JadxArgsValidateException("Run materialization requires --content-store-materialize-dir");
+		}
+		for (String dependencyInputFile : dependencyInputFiles) {
+			if (!dependencyInputFile.toLowerCase(Locale.ROOT).endsWith(".dex")) {
+				throw new JadxArgsValidateException(
+						"Dependency input currently supports standalone .dex files only: " + dependencyInputFile);
+			}
+		}
 	}
 
 	private static <T extends JadxCLIArgs> void saveConfig(T argsObj, @Nullable JadxConfigAdapter<T> configAdapter) {
@@ -463,6 +549,8 @@ public class JadxCLIArgs implements IJadxConfig {
 	public JadxArgs toJadxArgs() {
 		JadxArgs args = new JadxArgs();
 		args.setInputFiles(files.stream().map(FileUtils::toFile).collect(Collectors.toList()));
+		args.setDependencyInputFiles(
+				dependencyInputFiles.stream().map(FileUtils::toFile).collect(Collectors.toList()));
 		args.setOutDir(FileUtils.toFile(outDir));
 		args.setOutDirSrc(FileUtils.toFile(outDirSrc));
 		args.setOutDirRes(FileUtils.toFile(outDirRes));
@@ -535,6 +623,10 @@ public class JadxCLIArgs implements IJadxConfig {
 		this.files = files;
 	}
 
+	public List<String> getDependencyInputFiles() {
+		return dependencyInputFiles;
+	}
+
 	public String getOutDir() {
 		return outDir;
 	}
@@ -545,6 +637,59 @@ public class JadxCLIArgs implements IJadxConfig {
 
 	public String getOutDirRes() {
 		return outDirRes;
+	}
+
+	public String getContentStoreDir() {
+		return contentStoreDir;
+	}
+
+	public boolean isContentStoreHardLink() {
+		return contentStoreHardLink;
+	}
+
+	public String getContentStoreIndex() {
+		return contentStoreIndex;
+	}
+
+	public String getContentStoreSearch() {
+		return contentStoreSearch;
+	}
+
+	public String getContentStoreFacts() {
+		return contentStoreFacts;
+	}
+
+	public boolean isContentStoreCompact() {
+		return contentStoreCompact;
+	}
+
+	public boolean isContentStoreStats() {
+		return contentStoreStats;
+	}
+
+	public int getContentStoreLimit() {
+		return contentStoreLimit;
+	}
+
+	public long getContentStoreAppId() {
+		return contentStoreAppId;
+	}
+
+	public long getContentStorePackSizeMiB() {
+		return contentStorePackSizeMiB;
+	}
+
+	public long getContentStoreMaterializeRun() {
+		return contentStoreMaterializeRun;
+	}
+
+	public String getContentStoreMaterializeDir() {
+		return contentStoreMaterializeDir;
+	}
+
+	public boolean hasContentStoreCommand() {
+		return contentStoreSearch != null || contentStoreFacts != null || contentStoreCompact || contentStoreStats
+				|| contentStoreMaterializeRun > 0;
 	}
 
 	public String getSingleClass() {

@@ -7,6 +7,7 @@ import jadx.core.dex.attributes.nodes.GenericInfoAttr;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.RegisterArg;
+import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.instructions.mods.ConstructorInsn;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.ClassNode;
@@ -45,7 +46,7 @@ public class GenericTypesVisitor extends AbstractVisitor {
 			if (resultArg == null) {
 				return;
 			}
-			ArgType argType = resultArg.getSVar().getCodeVar().getType();
+			ArgType argType = initAndGetCodeVarType(resultArg);
 			if (argType == null || argType.getGenericTypes() == null) {
 				return;
 			}
@@ -55,7 +56,18 @@ public class GenericTypesVisitor extends AbstractVisitor {
 			}
 			insn.addAttr(new GenericInfoAttr(argType.getGenericTypes()));
 		} catch (Exception e) {
-			LOG.error("Failed to attach constructor generic info", e);
+			LOG.error("Failed to attach constructor generic info in method: " + mth + ", insn: " + insn, e);
 		}
+	}
+
+	static ArgType initAndGetCodeVarType(RegisterArg resultArg) {
+		SSAVar ssaVar = resultArg.getSVar();
+		if (ssaVar == null) {
+			return null;
+		}
+		// Some late CFG/type repairs introduce constructor results after the regular
+		// InitCodeVariables pass. Initialize only that SSA component on demand.
+		InitCodeVariables.initCodeVar(ssaVar);
+		return ssaVar.getCodeVar().getType();
 	}
 }

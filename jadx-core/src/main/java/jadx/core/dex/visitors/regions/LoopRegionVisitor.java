@@ -206,6 +206,7 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 		if (!arrayArg.equals(arrGetInsn.getArg(0))) {
 			return null;
 		}
+		BlockNode lenBlock = BlockUtils.getBlockByInsn(mth, len);
 		RegisterArg iterVar = arrGetInsn.getResult();
 		if (iterVar != null) {
 			if (!usedOnlyInLoop(mth, loopRegion, iterVar)) {
@@ -237,7 +238,13 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 		ForEachLoop forEachLoop = new ForEachLoop(iterVar, len.getArg(0));
 		forEachLoop.injectFakeInsns(loopRegion);
 		if (InsnUtils.dontGenerateIfNotUsed(len)) {
-			InsnRemover.remove(mth, len);
+			if (lenBlock != null && lenBlock.contains(AFlag.DUPLICATED)) {
+				InsnRemover remover = new InsnRemover(mth);
+				remover.addWithoutUnbind(len);
+				remover.performWithoutDuplicatedBlockWarning();
+			} else {
+				InsnRemover.remove(mth, len);
+			}
 		}
 		CodeShrinkVisitor.shrinkMethod(mth);
 		return forEachLoop;
@@ -355,6 +362,12 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 				iterVar.setType(gType);
 				return true;
 			}
+			if (isSameRawObjectType(gType, varType)) {
+				if (iterVar.getImmutableType() == null) {
+					iterVar.setType(gType);
+				}
+				return true;
+			}
 			if (ArgType.isInstanceOf(mth.root(), gType, varType)) {
 				return true;
 			}
@@ -381,6 +394,12 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 		}
 		iterableArg.setType(genericType);
 		return true;
+	}
+
+	static boolean isSameRawObjectType(ArgType first, ArgType second) {
+		return first.isObject()
+				&& second.isObject()
+				&& first.getObject().equals(second.getObject());
 	}
 
 	/**

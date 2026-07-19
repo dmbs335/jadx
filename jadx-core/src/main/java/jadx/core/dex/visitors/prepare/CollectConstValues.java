@@ -29,6 +29,9 @@ public class CollectConstValues extends AbstractVisitor {
 		if (!root.getArgs().isReplaceConsts()) {
 			return true;
 		}
+		if (root.getArgs().isDependencyInputFile(cls.getInputFileName())) {
+			return true;
+		}
 		if (cls.getFields().isEmpty()) {
 			return true;
 		}

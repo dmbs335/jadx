@@ -12,6 +12,7 @@ dependencies {
 	implementation(project(":jadx-plugins-tools"))
 	implementation(project(":jadx-commons:jadx-app-commons"))
 	implementation(project(":jadx-commons:jadx-analysis"))
+	implementation(project(":jadx-commons:jadx-storage"))
 
 	runtimeOnly(project(":jadx-plugins:jadx-dex-input"))
 	runtimeOnly(project(":jadx-plugins:jadx-java-input"))

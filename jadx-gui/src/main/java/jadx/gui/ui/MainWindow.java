@@ -138,6 +138,7 @@ import jadx.gui.ui.codearea.theme.EditorThemeManager;
 import jadx.gui.ui.dialog.ADBDialog;
 import jadx.gui.ui.dialog.AboutDialog;
 import jadx.gui.ui.dialog.CharsetDialog;
+import jadx.gui.ui.dialog.ContentStoreSearchDialog;
 import jadx.gui.ui.dialog.GotoAddressDialog;
 import jadx.gui.ui.dialog.LogViewerDialog;
 import jadx.gui.ui.dialog.SearchDialog;
@@ -1248,6 +1249,12 @@ public class MainWindow extends JFrame {
 		tools.add(deobfMenuItem);
 		tools.add(quarkAction);
 		tools.add(debuggerAction);
+		tools.add(new AbstractAction("Content Store Search") {
+			@Override
+			public void actionPerformed(ActionEvent e) {
+				new ContentStoreSearchDialog(MainWindow.this).setVisible(true);
+			}
+		});
 
 		JMenu help = new JadxMenu(NLS.str("menu.help"), shortcutsController);
 		help.setMnemonic(KeyEvent.VK_H);

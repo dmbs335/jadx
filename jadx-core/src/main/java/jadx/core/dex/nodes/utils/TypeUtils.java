@@ -126,8 +126,11 @@ public class TypeUtils {
 
 	private static Set<ArgType> collectKnownTypeVarsAtMethod(MethodNode mth) {
 		Set<ArgType> typeVars = new HashSet<>();
-		typeVars.addAll(getKnownTypeVarsAtClass(mth.getParentClass()));
+		// Method type parameters shadow class parameters with the same name.
+		// ArgType equality intentionally ignores bounds for type variables, so insertion order matters
+		// here.
 		typeVars.addAll(mth.getTypeParameters());
+		typeVars.addAll(getKnownTypeVarsAtClass(mth.getParentClass()));
 		return typeVars.isEmpty() ? Collections.emptySet() : typeVars;
 	}
 

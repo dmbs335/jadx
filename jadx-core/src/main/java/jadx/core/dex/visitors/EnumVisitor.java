@@ -103,7 +103,9 @@ public class EnumVisitor extends AbstractVisitor {
 			try {
 				converted = convertToEnum(cls);
 			} catch (Exception e) {
-				cls.addWarnComment("Enum visitor error", e);
+				cls.addInfoComment("Enum visitor error"
+						+ cls.root().getArgs().getCodeNewLineStr()
+						+ Utils.getStackTrace(e));
 				converted = false;
 			}
 			if (!converted) {
@@ -244,6 +246,14 @@ public class EnumVisitor extends AbstractVisitor {
 
 		// search "$VALUES" array init and collect enum fields
 		BlockInsnPair valuesInitPair = getValuesInitInsn(data);
+		if (valuesInitPair == null && data.staticBlocks.size() < data.classInitMth.getBasicBlocks().size()) {
+			// A conditional enum argument can leave an IfRegion in <clinit>, so the linear region prefix
+			// ends before the enum constants and $VALUES initialization. Retry lookup over the method CFG;
+			// conversion still performs all regular enum-field checks below.
+			data.staticBlocks.clear();
+			data.staticBlocks.addAll(data.classInitMth.getBasicBlocks());
+			valuesInitPair = getValuesInitInsn(data);
+		}
 		if (valuesInitPair == null) {
 			return false;
 		}
@@ -529,12 +539,24 @@ public class EnumVisitor extends AbstractVisitor {
 				InsnNode enumUse = new IndexInsnNode(InsnType.SGET, enumField, 0);
 				replacement = InsnArg.wrapArg(enumUse);
 			} else {
-				replacement = inlineSimpleExternalValue(data, reg);
+				replacement = inlineSimpleExternalValue(data, reg, resCo);
 				if (replacement == null) {
 					replacement = inlineEnumValueExpression(data, reg);
 					if (replacement == null) {
-						InsnRemover.unbindInsn(null, resCo);
-						return null;
+						InsnNode assignInsn = reg.getAssignInsn();
+						if (assignInsn == null || !isSafeNestedEnumExpression(assignInsn)) {
+							InsnRemover.unbindInsn(null, resCo);
+							return null;
+						}
+						Set<InsnNode> pendingRemovals = new HashSet<>();
+						InsnNode copyUseInsn = Objects.requireNonNullElse(reg.getParentInsn(), resCo);
+						replacement = inlineSingleUseEnumExpression(
+								reg, copyUseInsn, new HashSet<>(), pendingRemovals);
+						if (replacement == null) {
+							InsnRemover.unbindInsn(null, resCo);
+							return null;
+						}
+						data.toRemove.addAll(pendingRemovals);
 					}
 				}
 			}
@@ -545,6 +567,76 @@ public class EnumVisitor extends AbstractVisitor {
 			}
 		}
 		return resCo;
+	}
+
+	/**
+	 * Inline a single-use expression tree used only to build an enum constant. This covers Kotlin
+	 * collection factories fed by temporary data objects without duplicating shared computations.
+	 * Arbitrary calls and multi-use intermediate values are intentionally rejected.
+	 */
+	private static @Nullable InsnArg inlineSingleUseEnumExpression(
+			RegisterArg reg, InsnNode parentCopy, Set<SSAVar> visiting, Set<InsnNode> pendingRemovals) {
+		SSAVar ssaVar = reg.getSVar();
+		if (ssaVar == null || !visiting.add(ssaVar)) {
+			return null;
+		}
+		try {
+			InsnNode assignInsn = ssaVar.getAssignInsn();
+			if (assignInsn == null) {
+				return null;
+			}
+			InsnType type = assignInsn.getType();
+			if (type == InsnType.CONST) {
+				if (hasSingleUseExcludingCopy(ssaVar, parentCopy)) {
+					pendingRemovals.add(assignInsn);
+				}
+				return assignInsn.getArg(0).duplicate();
+			}
+			if (type == InsnType.CONST_STR || type == InsnType.CONST_CLASS || type == InsnType.SGET) {
+				if (hasSingleUseExcludingCopy(ssaVar, parentCopy)) {
+					pendingRemovals.add(assignInsn);
+				}
+				return InsnArg.wrapArg(assignInsn.copyWithoutResult());
+			}
+			if (!hasSingleUseExcludingCopy(ssaVar, parentCopy) || !isSafeNestedEnumExpression(assignInsn)) {
+				return null;
+			}
+			InsnNode copy = assignInsn.copyWithoutResult();
+			List<RegisterArg> args = new ArrayList<>();
+			copy.getRegisterArgs(args);
+			for (RegisterArg arg : args) {
+				InsnArg replacement = inlineSingleUseEnumExpression(
+						arg, copy, visiting, pendingRemovals);
+				if (replacement == null || !copy.replaceArg(arg, replacement)) {
+					InsnRemover.unbindInsn(null, copy);
+					return null;
+				}
+			}
+			pendingRemovals.add(assignInsn);
+			return InsnArg.wrapArg(copy);
+		} finally {
+			visiting.remove(ssaVar);
+		}
+	}
+
+	private static boolean isSafeNestedEnumExpression(InsnNode insn) {
+		switch (insn.getType()) {
+			case CONSTRUCTOR:
+			case FILLED_NEW_ARRAY:
+				return true;
+
+			case INVOKE:
+				InvokeNode invoke = (InvokeNode) insn;
+				MethodInfo callMth = invoke.getCallMth();
+				String declClass = callMth.getDeclClass().getFullName();
+				String name = callMth.getName();
+				return invoke.getInvokeType() == InvokeType.STATIC
+						&& declClass.startsWith("kotlin.collections.")
+						&& (name.equals("listOf") || name.equals("setOf"));
+
+			default:
+				return false;
+		}
 	}
 
 	private static @Nullable InsnArg inlineEnumValueExpression(EnumData data, RegisterArg reg) {
@@ -572,7 +664,8 @@ public class EnumVisitor extends AbstractVisitor {
 		return InsnArg.wrapArg(copy);
 	}
 
-	private static @Nullable InsnArg inlineSimpleExternalValue(EnumData data, RegisterArg reg) {
+	private static @Nullable InsnArg inlineSimpleExternalValue(
+			EnumData data, RegisterArg reg, InsnNode copyUseInsn) {
 		SSAVar ssaVar = reg.getSVar();
 		InsnNode assignInsn = ssaVar.getAssignInsn();
 		if (assignInsn == null) {
@@ -593,16 +686,35 @@ public class EnumVisitor extends AbstractVisitor {
 				}
 				return InsnArg.wrapArg(assignInsn.copyWithoutResult());
 
+			case TERNARY:
+				List<RegisterArg> ternaryRegs = new ArrayList<>();
+				assignInsn.getRegisterArgs(ternaryRegs);
+				if (!ternaryRegs.isEmpty()) {
+					return null;
+				}
+				if (ssaVar.getUseCount() == 1) {
+					data.toRemove.add(assignInsn);
+				}
+				return InsnArg.wrapArg(assignInsn.copyWithoutResult());
+
 			case INVOKE:
-				return inlineSingleUseSingletonGetter(data, ssaVar, (InvokeNode) assignInsn);
+				InvokeNode invoke = (InvokeNode) assignInsn;
+				InsnArg singletonGetter = inlineSingleUseSingletonGetter(data, ssaVar, invoke, copyUseInsn);
+				if (singletonGetter != null) {
+					return singletonGetter;
+				}
+				return inlineSingleUsePrimitiveBoxing(data, ssaVar, invoke, copyUseInsn);
 
 			default:
 				return null;
 		}
 	}
 
-	private static @Nullable InsnArg inlineSingleUseSingletonGetter(EnumData data, SSAVar ssaVar, InvokeNode invoke) {
-		if (ssaVar.getUseCount() != 1 || invoke.getInvokeType() == InvokeType.STATIC || invoke.getArgsCount() != 1) {
+	private static @Nullable InsnArg inlineSingleUseSingletonGetter(
+			EnumData data, SSAVar ssaVar, InvokeNode invoke, InsnNode copyUseInsn) {
+		if (!hasSingleUseExcludingCopy(ssaVar, copyUseInsn)
+				|| invoke.getInvokeType() == InvokeType.STATIC
+				|| invoke.getArgsCount() != 1) {
 			return null;
 		}
 		RegisterArg receiver = invoke.getArg(0).isRegister() ? (RegisterArg) invoke.getArg(0) : null;
@@ -622,6 +734,55 @@ public class EnumVisitor extends AbstractVisitor {
 		}
 		data.toRemove.add(invoke);
 		return InsnArg.wrapArg(copy);
+	}
+
+	private static boolean hasSingleUseExcludingCopy(SSAVar ssaVar, InsnNode copyInsn) {
+		int actualUseCount = 0;
+		for (RegisterArg use : ssaVar.getUseList()) {
+			InsnNode parentInsn = use.getParentInsn();
+			if (parentInsn != copyInsn && ++actualUseCount > 1) {
+				return false;
+			}
+		}
+		return actualUseCount == 1;
+	}
+
+	private static @Nullable InsnArg inlineSingleUsePrimitiveBoxing(
+			EnumData data, SSAVar ssaVar, InvokeNode invoke, InsnNode copyUseInsn) {
+		if (!hasSingleUseExcludingCopy(ssaVar, copyUseInsn)
+				|| invoke.getInvokeType() != InvokeType.STATIC
+				|| invoke.getArgsCount() != 1
+				|| !isPrimitiveBoxingValueOf(invoke)) {
+			return null;
+		}
+		InsnArg arg = invoke.getArg(0);
+		if (arg.isRegister()) {
+			return null;
+		}
+		data.toRemove.add(invoke);
+		return InsnArg.wrapArg(invoke.copyWithoutResult());
+	}
+
+	private static boolean isPrimitiveBoxingValueOf(InvokeNode invoke) {
+		MethodInfo callMth = invoke.getCallMth();
+		if (!callMth.getName().equals("valueOf")
+				|| callMth.getArgumentsTypes().size() != 1
+				|| !callMth.getArgumentsTypes().get(0).isPrimitive()) {
+			return false;
+		}
+		switch (callMth.getDeclClass().getFullName()) {
+			case "java.lang.Boolean":
+			case "java.lang.Byte":
+			case "java.lang.Character":
+			case "java.lang.Short":
+			case "java.lang.Integer":
+			case "java.lang.Long":
+			case "java.lang.Float":
+			case "java.lang.Double":
+				return true;
+			default:
+				return false;
+		}
 	}
 
 	private static FieldInfo checkExternalRegUsage(EnumData data, RegisterArg reg) {

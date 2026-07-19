@@ -36,6 +36,7 @@ import jadx.core.dex.visitors.IDexTreeVisitor;
 import jadx.core.dex.visitors.InitCodeVariables;
 import jadx.core.dex.visitors.InlineMethods;
 import jadx.core.dex.visitors.MarkMethodsForInline;
+import jadx.core.dex.visitors.MarkReadOnlyMethods;
 import jadx.core.dex.visitors.MethodInvokeVisitor;
 import jadx.core.dex.visitors.MethodThrowsVisitor;
 import jadx.core.dex.visitors.MethodVisitor;
@@ -47,6 +48,7 @@ import jadx.core.dex.visitors.ProcessAnonymous;
 import jadx.core.dex.visitors.ProcessInstructionsVisitor;
 import jadx.core.dex.visitors.ProcessMethodsForInline;
 import jadx.core.dex.visitors.ReplaceNewArray;
+import jadx.core.dex.visitors.SameSourcePhiMoveVisitor;
 import jadx.core.dex.visitors.ShadowFieldVisitor;
 import jadx.core.dex.visitors.SignatureProcessor;
 import jadx.core.dex.visitors.SimplifyVisitor;
@@ -77,6 +79,7 @@ import jadx.core.dex.visitors.shrink.CodeShrinkVisitor;
 import jadx.core.dex.visitors.ssa.SSATransform;
 import jadx.core.dex.visitors.typeinference.FinishTypeInference;
 import jadx.core.dex.visitors.typeinference.FixTypesVisitor;
+import jadx.core.dex.visitors.typeinference.ReportTypeInferenceWarnings;
 import jadx.core.dex.visitors.typeinference.TypeInferenceVisitor;
 import jadx.core.dex.visitors.usage.UsageInfoVisitor;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -156,6 +159,7 @@ public class Jadx {
 		}
 		passes.add(new FixTypesVisitor());
 		passes.add(new FinishTypeInference());
+		passes.add(new SameSourcePhiMoveVisitor());
 
 		passes.add(new AdjustForIfMergeVisitor());
 
@@ -173,6 +177,7 @@ public class Jadx {
 		passes.add(new ModVisitor());
 		passes.add(new CodeShrinkVisitor());
 		passes.add(new ReplaceNewArray());
+		passes.add(new MarkReadOnlyMethods());
 		if (args.isCfgOutput()) {
 			passes.add(DotGraphVisitor.dump());
 		}
@@ -207,6 +212,7 @@ public class Jadx {
 		}
 		passes.add(new ProcessVariables());
 		passes.add(new ApplyVariableNames());
+		passes.add(new ReportTypeInferenceWarnings());
 
 		passes.add(new PrepareForCodeGen());
 		if (args.isCfgOutput()) {
@@ -251,6 +257,7 @@ public class Jadx {
 		passes.add(new ReplaceNewArray());
 		passes.add(new SimplifyVisitor());
 		passes.add(new MethodVisitor("ForceGenerateAll", mth -> mth.remove(AFlag.DONT_GENERATE)));
+		passes.add(new ReportTypeInferenceWarnings());
 		if (args.isCfgOutput()) {
 			passes.add(DotGraphVisitor.dump());
 		}

@@ -6,7 +6,6 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -236,10 +235,10 @@ public class TypeSearch {
 		addCandidateTypes(bounds, candidateTypes, uses);
 
 		for (ArgType assignType : assigns) {
-			addCandidateTypes(bounds, candidateTypes, getWiderTypes(assignType));
+			addWiderTypes(bounds, candidateTypes, assignType);
 		}
 		for (ArgType useType : uses) {
-			addCandidateTypes(bounds, candidateTypes, getNarrowTypes(useType));
+			addNarrowTypes(bounds, candidateTypes, useType);
 		}
 
 		addUsageTypeCandidates(ssaVar, bounds, candidateTypes);
@@ -295,32 +294,40 @@ public class TypeSearch {
 		return false;
 	}
 
-	private List<ArgType> getWiderTypes(ArgType type) {
+	private void addWiderTypes(Set<ITypeBound> bounds, Set<ArgType> candidateTypes, ArgType type) {
 		if (type.isTypeKnown()) {
 			if (type.isObject()) {
 				Set<String> ancestors = mth.root().getClsp().getSuperTypes(type.getObject());
-				return ancestors.stream().map(ArgType::object).collect(Collectors.toList());
+				addObjectTypes(bounds, candidateTypes, ancestors);
 			}
 		} else {
-			return expandUnknownType(type);
+			addCandidateTypes(bounds, candidateTypes, expandUnknownType(type));
 		}
-		return Collections.emptyList();
 	}
 
-	private List<ArgType> getNarrowTypes(ArgType type) {
+	private void addNarrowTypes(Set<ITypeBound> bounds, Set<ArgType> candidateTypes, ArgType type) {
 		if (type.isTypeKnown()) {
 			if (type.isObject()) {
 				if (type.equals(ArgType.OBJECT)) {
-					// a lot of objects to return
-					return Collections.singletonList(ArgType.OBJECT);
+					// Avoid expanding the complete implementation set for java.lang.Object.
+					addCandidateType(bounds, candidateTypes, ArgType.OBJECT);
+					return;
 				}
 				List<String> impList = mth.root().getClsp().getImplementations(type.getObject());
-				return impList.stream().map(ArgType::object).collect(Collectors.toList());
+				addObjectTypes(bounds, candidateTypes, impList);
 			}
 		} else {
-			return expandUnknownType(type);
+			addCandidateTypes(bounds, candidateTypes, expandUnknownType(type));
 		}
-		return Collections.emptyList();
+	}
+
+	private void addObjectTypes(
+			Set<ITypeBound> bounds, Set<ArgType> candidateTypes, Collection<String> objectNames) {
+		for (String objectName : objectNames) {
+			if (addCandidateType(bounds, candidateTypes, ArgType.object(objectName))) {
+				return;
+			}
+		}
 	}
 
 	private List<ArgType> expandUnknownType(ArgType type) {

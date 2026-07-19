@@ -5,7 +5,13 @@ import org.junit.jupiter.api.Test;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.nodes.SpecialEdgeAttr;
 import jadx.core.dex.attributes.nodes.SpecialEdgeAttr.SpecialEdgeType;
+import jadx.core.dex.instructions.IfNode;
+import jadx.core.dex.instructions.IfOp;
+import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.nodes.BlockNode;
+import jadx.core.dex.nodes.InsnNode;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
@@ -47,6 +53,74 @@ class FixMultiEntryLoopsTest {
 		connect(normalPath, loopEnd);
 		assertThat(FixMultiEntryLoops.isMultiEntryLoop(backEdge)).isTrue();
 		assertThat(FixMultiEntryLoops.isExceptionOnlyCycle(backEdge)).isFalse();
+	}
+
+	@Test
+	void testDetectPureCoroutineBranchJoinPath() {
+		BlockNode entry = block(0);
+		BlockNode path = block(1);
+		BlockNode join = block(2);
+		BlockNode thenBlock = block(3);
+		BlockNode elseBlock = block(4);
+		path.getInstructions().add(new InsnNode(InsnType.MOVE, 0));
+		InsnArg value = InsnArg.reg(0, ArgType.INT);
+		InsnArg zero = InsnArg.lit(0, ArgType.INT);
+		join.getInstructions().add(new IfNode(IfOp.EQ, -1, value, zero));
+		connect(entry, join);
+		connect(path, join);
+		connect(join, thenBlock);
+		connect(join, elseBlock);
+		SpecialEdgeAttr backEdge = new SpecialEdgeAttr(SpecialEdgeType.BACK_EDGE, path, join);
+
+		assertThat(FixMultiEntryLoops.isPureCoroutineJoinPath(backEdge)).isTrue();
+	}
+
+	@Test
+	void testRejectEffectfulCoroutineJoinPath() {
+		BlockNode entry = block(0);
+		BlockNode path = block(1);
+		BlockNode join = block(2);
+		BlockNode exit = block(3);
+		path.getInstructions().add(new InsnNode(InsnType.CONST, 0));
+		join.getInstructions().add(new InsnNode(InsnType.INVOKE, 0));
+		connect(entry, join);
+		connect(path, join);
+		connect(join, exit);
+		SpecialEdgeAttr backEdge = new SpecialEdgeAttr(SpecialEdgeType.BACK_EDGE, path, join);
+
+		assertThat(FixMultiEntryLoops.isPureCoroutineJoinPath(backEdge)).isFalse();
+	}
+
+	@Test
+	void testDetectPureCoroutineConstantJoinPath() {
+		BlockNode entry = block(0);
+		BlockNode path = block(1);
+		BlockNode join = block(2);
+		BlockNode exit = block(3);
+		path.getInstructions().add(new InsnNode(InsnType.MOVE, 0));
+		join.getInstructions().add(new InsnNode(InsnType.CONST, 0));
+		connect(entry, join);
+		connect(path, join);
+		connect(join, exit);
+		SpecialEdgeAttr backEdge = new SpecialEdgeAttr(SpecialEdgeType.BACK_EDGE, path, join);
+
+		assertThat(FixMultiEntryLoops.isPureCoroutineJoinPath(backEdge)).isTrue();
+	}
+
+	@Test
+	void testRejectCoroutineMoveJoinPath() {
+		BlockNode entry = block(0);
+		BlockNode path = block(1);
+		BlockNode join = block(2);
+		BlockNode exit = block(3);
+		path.getInstructions().add(new InsnNode(InsnType.MOVE, 0));
+		join.getInstructions().add(new InsnNode(InsnType.MOVE, 0));
+		connect(entry, join);
+		connect(path, join);
+		connect(join, exit);
+		SpecialEdgeAttr backEdge = new SpecialEdgeAttr(SpecialEdgeType.BACK_EDGE, path, join);
+
+		assertThat(FixMultiEntryLoops.isPureCoroutineJoinPath(backEdge)).isFalse();
 	}
 
 	private static void connect(BlockNode source, BlockNode target) {

@@ -6,6 +6,7 @@ import java.util.Queue;
 
 import jadx.api.ICodeWriter;
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.instructions.BaseInvokeNode;
 import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.InsnType;
@@ -13,6 +14,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
+import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.regions.conditions.Compare;
 import jadx.core.dex.regions.conditions.IfCondition;
@@ -101,9 +103,9 @@ public class ConditionGen extends InsnGen {
 	private void addCompare(ICodeWriter code, CondStack stack, Compare compare, IfOp op) throws CodegenException {
 		InsnArg firstArg = compare.getA();
 		InsnArg secondArg = compare.getB();
-		if (firstArg.getType().equals(ArgType.BOOLEAN)
+		if (isBooleanConditionArg(firstArg)
 				&& secondArg.isLiteral()
-				&& secondArg.getType().equals(ArgType.BOOLEAN)) {
+				&& isBooleanLiteral((LiteralArg) secondArg)) {
 			LiteralArg lit = (LiteralArg) secondArg;
 			if (lit.getLiteral() == 0) {
 				op = op.invert();
@@ -128,6 +130,27 @@ public class ConditionGen extends InsnGen {
 		addArg(code, firstArg, isArgWrapNeeded(firstArg));
 		code.add(' ').add(op.getSymbol()).add(' ');
 		addArg(code, secondArg, isArgWrapNeeded(secondArg));
+	}
+
+	private static boolean isBooleanConditionArg(InsnArg arg) {
+		if (ArgType.BOOLEAN.equals(arg.getType())) {
+			return true;
+		}
+		if (!arg.isInsnWrap()) {
+			return false;
+		}
+		InsnNode wrappedInsn = arg.unwrap();
+		RegisterArg result = wrappedInsn.getResult();
+		if (result != null && ArgType.BOOLEAN.equals(result.getInitType())) {
+			return true;
+		}
+		return wrappedInsn instanceof BaseInvokeNode
+				&& ArgType.BOOLEAN.equals(((BaseInvokeNode) wrappedInsn).getCallMth().getReturnType());
+	}
+
+	private static boolean isBooleanLiteral(LiteralArg literal) {
+		long value = literal.getLiteral();
+		return value == 0 || value == 1;
 	}
 
 	private void addTernary(ICodeWriter code, CondStack stack, IfCondition condition) throws CodegenException {

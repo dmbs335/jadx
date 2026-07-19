@@ -183,7 +183,7 @@ public class SignatureProcessor extends AbstractVisitor {
 			return;
 		}
 		try {
-			List<ArgType> typeParameters = sp.consumeGenericTypeParameters();
+			List<ArgType> typeParameters = sanitizeMethodTypeParameters(mth, sp.consumeGenericTypeParameters());
 			List<ArgType> parsedArgTypes = sp.consumeMethodArgs(mth.getMethodInfo().getArgsCount());
 			ArgType parsedRetType = sp.consumeType();
 
@@ -206,11 +206,57 @@ public class SignatureProcessor extends AbstractVisitor {
 		}
 	}
 
+	private static List<ArgType> sanitizeMethodTypeParameters(MethodNode mth, List<ArgType> typeParameters) {
+		List<ArgType> result = new ArrayList<>(typeParameters.size());
+		boolean changed = false;
+		for (ArgType typeParameter : typeParameters) {
+			List<ArgType> bounds = typeParameter.getExtendTypes();
+			if (!bounds.isEmpty() && bounds.get(0).isArray()) {
+				mth.addInfoComment("Removed non-Java array-bound type parameter from method signature: "
+						+ typeParameter.getObject() + " : " + bounds.get(0));
+				changed = true;
+				continue;
+			}
+			if (bounds.size() < 2) {
+				result.add(typeParameter);
+				continue;
+			}
+			List<ArgType> javaBounds = null;
+			for (int boundIndex = 1; boundIndex < bounds.size(); boundIndex++) {
+				ArgType bound = bounds.get(boundIndex);
+				if (bound.isGenericType()) {
+					if (javaBounds == null) {
+						javaBounds = new ArrayList<>(bounds.subList(0, boundIndex));
+					}
+					mth.addInfoComment("Removed non-Java type-variable bound from method signature: "
+							+ typeParameter.getObject() + " : " + bound.getObject());
+				} else if (javaBounds != null) {
+					javaBounds.add(bound);
+				}
+			}
+			if (javaBounds != null) {
+				result.add(ArgType.genericType(typeParameter.getObject(), javaBounds));
+				changed = true;
+			} else {
+				result.add(typeParameter);
+			}
+		}
+		return changed ? result : typeParameters;
+	}
+
 	private boolean validateAndApplyTypes(MethodNode mth, SignatureParser sp, ArgType retType, List<ArgType> argTypes) {
 		try {
-			if (!validateParsedType(retType, mth.getMethodInfo().getReturnType())) {
-				mth.addWarnComment("Incorrect return type in method signature: " + sp.getSignature());
-				return false;
+			ArgType currentRetType = mth.getMethodInfo().getReturnType();
+			if (!validateParsedType(retType, currentRetType)
+					&& !isValidTypeVariableErasure(mth, retType, currentRetType)) {
+				if (canReplaceUnboundGenericType(retType, currentRetType)) {
+					mth.addInfoComment("Replace unresolved generic return type in method signature: "
+							+ retType + " -> " + currentRetType);
+					retType = currentRetType;
+				} else {
+					mth.addWarnComment("Incorrect return type in method signature: " + sp.getSignature());
+					return false;
+				}
 			}
 			List<ArgType> checkedArgTypes = checkArgTypes(mth, sp, argTypes);
 			if (checkedArgTypes == null) {
@@ -227,6 +273,7 @@ public class SignatureProcessor extends AbstractVisitor {
 	private List<ArgType> checkArgTypes(MethodNode mth, SignatureParser sp, List<ArgType> parsedArgTypes) {
 		MethodInfo mthInfo = mth.getMethodInfo();
 		List<ArgType> mthArgTypes = mthInfo.getArgumentsTypes();
+		List<ArgType> resultArgTypes = parsedArgTypes;
 		int len = parsedArgTypes.size();
 		if (len != mthArgTypes.size()) {
 			if (mth.getParentClass().getAccessFlags().isEnum()) {
@@ -248,11 +295,85 @@ public class SignatureProcessor extends AbstractVisitor {
 			ArgType parsedType = parsedArgTypes.get(i);
 			ArgType mthArgType = mthArgTypes.get(i);
 			if (!validateParsedType(parsedType, mthArgType)) {
+				if (isValidTypeVariableErasure(mth, parsedType, mthArgType)) {
+					continue;
+				}
+				if (canReplaceUnboundGenericType(parsedType, mthArgType)) {
+					if (resultArgTypes == parsedArgTypes) {
+						resultArgTypes = new ArrayList<>(parsedArgTypes);
+					}
+					resultArgTypes.set(i, mthArgType);
+					mth.addInfoComment("Replace unresolved generic type in method signature: "
+							+ parsedType + " -> " + mthArgType);
+					continue;
+				}
 				mth.addWarnComment("Incorrect types in method signature: " + sp.getSignature());
 				return null;
 			}
 		}
-		return parsedArgTypes;
+		return resultArgTypes;
+	}
+
+	private boolean isValidTypeVariableErasure(MethodNode mth, ArgType parsedType, ArgType currentType) {
+		if (!parsedType.isGenericType() || !currentType.isObject()) {
+			return false;
+		}
+		ArgType erasedBound = getTypeVariableErasure(mth, parsedType, new HashSet<>());
+		return erasedBound != null && erasedBound.equals(currentType);
+	}
+
+	@Nullable
+	private ArgType getTypeVariableErasure(MethodNode mth, ArgType type, Set<String> resolving) {
+		if (!type.isGenericType()) {
+			return type.isGeneric() ? ArgType.object(type.getObject()) : type;
+		}
+		String typeVarName = type.getObject();
+		if (!resolving.add(typeVarName)) {
+			return null;
+		}
+		try {
+			List<ArgType> bounds = type.getExtendTypes();
+			if (bounds.isEmpty()) {
+				for (ArgType knownTypeVar : root.getTypeUtils().getKnownTypeVarsAtMethod(mth)) {
+					if (knownTypeVar.getObject().equals(typeVarName)) {
+						bounds = knownTypeVar.getExtendTypes();
+						break;
+					}
+				}
+			}
+			if (bounds.isEmpty() || !isJavaTypeParameterBounds(bounds)) {
+				return null;
+			}
+			return getTypeVariableErasure(mth, bounds.get(0), resolving);
+		} finally {
+			resolving.remove(typeVarName);
+		}
+	}
+
+	private boolean isJavaTypeParameterBounds(List<ArgType> bounds) {
+		if (bounds.size() == 1 && bounds.get(0).isGenericType()) {
+			return true;
+		}
+		for (int i = 0; i < bounds.size(); i++) {
+			ArgType bound = bounds.get(i);
+			if (!bound.isObject() || bound.isGenericType() || bound.isWildcard()) {
+				return false;
+			}
+			if (i > 0) {
+				ClassNode boundCls = root.resolveClass(bound);
+				if (boundCls != null && !boundCls.getAccessFlags().isInterface()) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private static boolean canReplaceUnboundGenericType(ArgType parsedType, ArgType currentType) {
+		return parsedType.isGenericType()
+				&& parsedType.getExtendTypes().isEmpty()
+				&& (currentType.isObject() || currentType.isArray())
+				&& !currentType.isGenericType();
 	}
 
 	private boolean validateParsedType(ArgType parsedType, ArgType currentType) {

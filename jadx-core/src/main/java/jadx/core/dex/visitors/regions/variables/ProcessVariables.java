@@ -1,10 +1,13 @@
 package jadx.core.dex.visitors.regions.variables;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -41,10 +44,13 @@ public class ProcessVariables extends AbstractVisitor {
 
 	@Override
 	public void visit(MethodNode mth) throws JadxException {
-		if (mth.isNoCode() || mth.getSVars().isEmpty()) {
+		if (mth.isNoCode()) {
 			return;
 		}
 		removeUnusedResults(mth);
+		if (mth.getSVars().isEmpty()) {
+			return;
+		}
 
 		List<CodeVar> codeVars = collectCodeVars(mth);
 		if (codeVars.isEmpty()) {
@@ -69,10 +75,17 @@ public class ProcessVariables extends AbstractVisitor {
 	}
 
 	private static void removeUnusedResults(MethodNode mth) {
+		Set<SSAVar> knownVars = Collections.newSetFromMap(new IdentityHashMap<>());
+		knownVars.addAll(mth.getSVars());
 		DepthRegionTraversal.traverse(mth, new AbstractRegionVisitor() {
+			private final List<RegisterArg> args = new ArrayList<>();
+
 			@Override
 			public void processBlock(MethodNode mth, IBlock container) {
 				for (InsnNode insn : container.getInstructions()) {
+					if (!insn.contains(AFlag.DONT_GENERATE) && !insn.contains(AFlag.REMOVE)) {
+						initOrphanCodeVars(insn);
+					}
 					RegisterArg resultArg = insn.getResult();
 					if (resultArg == null) {
 						continue;
@@ -100,6 +113,17 @@ public class ProcessVariables extends AbstractVisitor {
 							}
 						}
 					}
+				}
+			}
+
+			private void initOrphanCodeVars(InsnNode insn) {
+				insn.visitInsns(innerInsn -> {
+					initOrphanSsaVar(knownVars, innerInsn.getResult());
+				});
+				args.clear();
+				insn.getRegisterArgs(args);
+				for (RegisterArg arg : args) {
+					initOrphanSsaVar(knownVars, arg);
 				}
 			}
 
@@ -158,6 +182,27 @@ public class ProcessVariables extends AbstractVisitor {
 				return false;
 			}
 		});
+	}
+
+	private static void initOrphanSsaVar(Set<SSAVar> knownVars, @Nullable RegisterArg arg) {
+		if (arg == null || arg.contains(AFlag.DONT_GENERATE)) {
+			return;
+		}
+		SSAVar ssaVar = arg.getSVar();
+		if (ssaVar != null && knownVars.add(ssaVar)) {
+			initOrphanRegionSsaVar(ssaVar);
+		}
+	}
+
+	static void initOrphanRegionSsaVar(SSAVar ssaVar) {
+		if (!ssaVar.isCodeVarSet()) {
+			ssaVar.setCodeVar(new CodeVar());
+		}
+		ArgType type = ssaVar.getAssign().getType();
+		ArgType codeVarType = ssaVar.getCodeVar().getType();
+		if ((codeVarType == null || !codeVarType.isTypeKnown()) && type.isTypeKnown()) {
+			ssaVar.getCodeVar().setType(type);
+		}
 	}
 
 	private void checkCodeVars(MethodNode mth, List<CodeVar> codeVars) {

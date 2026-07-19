@@ -58,12 +58,10 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 	}
 
 	@Override
-	public void visit(MethodNode mth) throws JadxException {
-		MethodThrowsAttr attr = mth.get(AType.METHOD_THROWS);
-		if (attr == null) {
-			attr = new MethodThrowsAttr(new HashSet<>());
-			mth.addAttr(attr);
-		}
+	public synchronized void visit(MethodNode mth) throws JadxException {
+		// Exception inference recursively visits callees. Keep the full call-chain update atomic so
+		// parallel class processing can't observe a callee after 'visited' is set but before its set is complete.
+		MethodThrowsAttr attr = getOrCreateThrowsAttr(mth);
 		if (!attr.isVisited()) {
 			attr.setVisited(true);
 			processInstructions(mth);
@@ -232,8 +230,17 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 				}
 			}
 
-			mth.get(AType.METHOD_THROWS).getList().add(excType.getObject());
+			getOrCreateThrowsAttr(mth).getList().add(excType.getObject());
 		}
+	}
+
+	private static MethodThrowsAttr getOrCreateThrowsAttr(MethodNode mth) {
+		MethodThrowsAttr attr = mth.get(AType.METHOD_THROWS);
+		if (attr == null) {
+			attr = new MethodThrowsAttr(new HashSet<>());
+			mth.addAttr(attr);
+		}
+		return attr;
 	}
 
 	private boolean isThrowsRequired(MethodNode mth, ArgType type) {

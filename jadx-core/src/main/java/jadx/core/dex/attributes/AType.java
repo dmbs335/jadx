@@ -4,8 +4,10 @@ import jadx.api.plugins.input.data.attributes.IJadxAttrType;
 import jadx.api.plugins.input.data.attributes.IJadxAttribute;
 import jadx.core.codegen.utils.CodeComment;
 import jadx.core.dex.attributes.nodes.AnonymousClassAttr;
+import jadx.core.dex.attributes.nodes.BooleanNumericConversionAttr;
 import jadx.core.dex.attributes.nodes.ClassTypeVarsAttr;
 import jadx.core.dex.attributes.nodes.CodeFeaturesAttr;
+import jadx.core.dex.attributes.nodes.ConstantReturnMethodAttr;
 import jadx.core.dex.attributes.nodes.DeclareVariablesAttr;
 import jadx.core.dex.attributes.nodes.DecompileModeOverrideAttr;
 import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
@@ -26,6 +28,7 @@ import jadx.core.dex.attributes.nodes.LoopLabelAttr;
 import jadx.core.dex.attributes.nodes.MethodBridgeAttr;
 import jadx.core.dex.attributes.nodes.MethodInlineAttr;
 import jadx.core.dex.attributes.nodes.MethodOverrideAttr;
+import jadx.core.dex.attributes.nodes.ReadOnlyMethodAttr;
 import jadx.core.dex.attributes.nodes.MethodReplaceAttr;
 import jadx.core.dex.attributes.nodes.MethodThrowsAttr;
 import jadx.core.dex.attributes.nodes.MethodTypeVarsAttr;
@@ -36,6 +39,7 @@ import jadx.core.dex.attributes.nodes.RenameReasonAttr;
 import jadx.core.dex.attributes.nodes.SkipMethodArgsAttr;
 import jadx.core.dex.attributes.nodes.SpecialEdgeAttr;
 import jadx.core.dex.attributes.nodes.TmpEdgeAttr;
+import jadx.core.dex.attributes.nodes.UnsupportedMultiEntryLoopAttr;
 import jadx.core.dex.nodes.IMethodDetails;
 import jadx.core.dex.trycatch.CatchAttr;
 import jadx.core.dex.trycatch.ExcHandlerAttr;
@@ -82,6 +86,9 @@ public final class AType<T extends IJadxAttribute> implements IJadxAttrType<T> {
 	public static final AType<AttrList<TryCatchBlockAttr>> TRY_BLOCKS_LIST = new AType<>();
 	public static final AType<CodeFeaturesAttr> METHOD_CODE_FEATURES = new AType<>();
 	public static final AType<MethodThrowsAttr> METHOD_THROWS = new AType<>();
+	public static final AType<ReadOnlyMethodAttr> READ_ONLY_METHOD = new AType<>();
+	public static final AType<ConstantReturnMethodAttr> CONSTANT_RETURN_METHOD = new AType<>();
+	public static final AType<UnsupportedMultiEntryLoopAttr> UNSUPPORTED_MULTI_ENTRY_LOOP = new AType<>();
 	public static final AType<InitAtDeclareVarsAttr> INIT_AT_DECLARE_VARS = new AType<>();
 
 	// region
@@ -102,6 +109,7 @@ public final class AType<T extends IJadxAttribute> implements IJadxAttrType<T> {
 	public static final AType<CatchAttr> EXC_CATCH = new AType<>();
 
 	// instruction
+	public static final AType<BooleanNumericConversionAttr> BOOLEAN_NUMERIC_CONVERSION = new AType<>();
 	public static final AType<LoopLabelAttr> LOOP_LABEL = new AType<>();
 	public static final AType<AttrList<JumpInfo>> JUMP = new AType<>();
 	public static final AType<IMethodDetails> METHOD_DETAILS = new AType<>();

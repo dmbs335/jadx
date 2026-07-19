@@ -520,7 +520,7 @@ public class SimplifyVisitor extends AbstractVisitor {
 				insnRemover.addAndUnbind(insnNode);
 			}
 		}
-		insnRemover.perform();
+		insnRemover.performWithoutDuplicatedBlockWarning();
 	}
 
 	private static List<InsnNode> flattenInsnChainUntil(InsnNode insn, InsnType insnType) {

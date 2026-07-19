@@ -90,6 +90,7 @@ public final class JadxDecompiler implements Closeable {
 	private final JadxPluginManager pluginManager;
 	private final List<ICodeLoader> loadedInputs = new ArrayList<>();
 	private final ZipReader zipReader;
+	private Set<String> dependencyInputFileNames = Collections.emptySet();
 
 	private RootNode root;
 	private List<JavaClass> classes;
@@ -157,8 +158,14 @@ public final class JadxDecompiler implements Closeable {
 
 	private void loadInputFiles() {
 		loadedInputs.clear();
-		List<Path> inputPaths = Utils.collectionMap(args.getInputFiles(), File::toPath);
-		List<Path> inputFiles = FileUtils.expandDirs(inputPaths);
+		List<Path> primaryInputPaths = Utils.collectionMap(args.getInputFiles(), File::toPath);
+		List<Path> dependencyInputPaths = Utils.collectionMap(args.getDependencyInputFiles(), File::toPath);
+		List<Path> inputFiles = new ArrayList<>(FileUtils.expandDirs(primaryInputPaths));
+		List<Path> dependencyInputFiles = FileUtils.expandDirs(dependencyInputPaths);
+		inputFiles.addAll(dependencyInputFiles);
+		dependencyInputFileNames = dependencyInputFiles.stream()
+				.map(JadxDecompiler::normalizedInputPath)
+				.collect(Collectors.toSet());
 		long start = System.currentTimeMillis();
 		for (PluginContext plugin : pluginManager.getResolvedPluginContexts()) {
 			for (JadxCodeInput codeLoader : plugin.getCodeInputs()) {
@@ -397,9 +404,18 @@ public final class JadxDecompiler implements Closeable {
 	private void appendSourcesSave(ITaskExecutor executor, File outDir) {
 		List<JavaClass> classes = getClasses();
 		List<JavaClass> processQueue = filterClasses(classes);
+		processDependencyInputs(processQueue);
 		List<List<JavaClass>> batches;
 		try {
 			batches = decompileScheduler.buildBatches(processQueue);
+			if (!dependencyInputFileNames.isEmpty()) {
+				batches = batches.stream()
+						.map(batch -> batch.stream()
+								.filter(cls -> !isDependencyInputClass(cls.getClassNode()))
+								.collect(Collectors.toList()))
+						.filter(batch -> !batch.isEmpty())
+						.collect(Collectors.toList());
+			}
 		} catch (Exception e) {
 			throw new JadxRuntimeException("Decompilation batches build failed", e);
 		}
@@ -410,7 +426,9 @@ public final class JadxDecompiler implements Closeable {
 					try {
 						ClassNode clsNode = cls.getClassNode();
 						ICodeInfo code = clsNode.getCode();
-						SaveCode.save(outDir, clsNode, code);
+						if (!isDependencyInputClass(clsNode)) {
+							SaveCode.save(outDir, clsNode, code);
+						}
 					} catch (Exception e) {
 						LOG.error("Error saving class: {}", cls, e);
 					}
@@ -421,12 +439,33 @@ public final class JadxDecompiler implements Closeable {
 		executor.addParallelTasks(decompileTasks);
 	}
 
+	private void processDependencyInputs(List<JavaClass> processQueue) {
+		if (dependencyInputFileNames.isEmpty()) {
+			return;
+		}
+		Set<ClassNode> dependencyClasses = new HashSet<>();
+		for (JavaClass cls : processQueue) {
+			for (ClassNode dependency : cls.getClassNode().getDependencies()) {
+				ClassNode topDependency = dependency.getTopParentClass();
+				if (isDependencyInputClass(topDependency)) {
+					dependencyClasses.add(topDependency);
+				}
+			}
+		}
+		dependencyClasses.stream()
+				.sorted()
+				.forEach(root.getProcessClasses()::forceProcess);
+	}
+
 	private List<JavaClass> filterClasses(List<JavaClass> classes) {
 		Predicate<String> classFilter = args.getClassFilter();
 		List<JavaClass> list = new ArrayList<>(classes.size());
 		for (JavaClass cls : classes) {
 			ClassNode clsNode = cls.getClassNode();
 			if (clsNode.contains(AFlag.DONT_GENERATE)) {
+				continue;
+			}
+			if (isDependencyInputClass(clsNode)) {
 				continue;
 			}
 			if (classFilter != null && !classFilter.test(clsNode.getClassInfo().getFullName())) {
@@ -438,6 +477,15 @@ public final class JadxDecompiler implements Closeable {
 			list.add(cls);
 		}
 		return list;
+	}
+
+	private boolean isDependencyInputClass(ClassNode clsNode) {
+		return !dependencyInputFileNames.isEmpty()
+				&& dependencyInputFileNames.contains(normalizedInputPath(Path.of(clsNode.getInputFileName())));
+	}
+
+	private static String normalizedInputPath(Path path) {
+		return path.toAbsolutePath().normalize().toString();
 	}
 
 	public synchronized List<JavaClass> getClasses() {

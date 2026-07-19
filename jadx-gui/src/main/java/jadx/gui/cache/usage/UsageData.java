@@ -3,6 +3,7 @@ package jadx.gui.cache.usage;
 import java.util.List;
 import java.util.Map;
 
+import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,7 +22,7 @@ class UsageData implements IUsageInfoData {
 	private static final Logger LOG = LoggerFactory.getLogger(UsageData.class);
 
 	private final RootNode root;
-	private final RawUsageData rawUsageData;
+	private @Nullable RawUsageData rawUsageData;
 
 	public UsageData(RootNode root, RawUsageData rawUsageData) {
 		this.root = root;
@@ -30,20 +31,32 @@ class UsageData implements IUsageInfoData {
 
 	@Override
 	public void apply() {
-		Map<String, ClsUsageData> clsMap = rawUsageData.getClsMap();
-		for (ClassNode cls : root.getClasses()) {
-			String clsRawName = cls.getRawName();
-			ClsUsageData clsUsageData = clsMap.get(clsRawName);
-			if (clsUsageData != null) {
-				applyForClass(clsUsageData, cls);
+		RawUsageData data = rawUsageData;
+		if (data == null) {
+			return;
+		}
+		try {
+			Map<String, ClsUsageData> clsMap = data.getClsMap();
+			for (ClassNode cls : root.getClasses()) {
+				String clsRawName = cls.getRawName();
+				ClsUsageData clsUsageData = clsMap.get(clsRawName);
+				if (clsUsageData != null) {
+					applyForClass(clsUsageData, cls);
+				}
 			}
+		} finally {
+			rawUsageData = null;
 		}
 	}
 
 	@Override
 	public void applyForClass(ClassNode cls) {
+		RawUsageData data = rawUsageData;
+		if (data == null) {
+			return;
+		}
 		String clsRawName = cls.getRawName();
-		ClsUsageData clsUsageData = rawUsageData.getClsMap().get(clsRawName);
+		ClsUsageData clsUsageData = data.getClsMap().get(clsRawName);
 		if (clsUsageData == null) {
 			LOG.debug("No usage data for class: {}", clsRawName);
 			return;
