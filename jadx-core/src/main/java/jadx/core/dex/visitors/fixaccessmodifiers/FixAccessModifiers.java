@@ -3,9 +3,11 @@ package jadx.core.dex.visitors.fixaccessmodifiers;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import jadx.api.CommentsLevel;
 import jadx.api.plugins.input.data.AccessFlags;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.nodes.JadxCommentsAttr;
 import jadx.core.dex.attributes.nodes.MethodInlineAttr;
 import jadx.core.dex.attributes.nodes.MethodOverrideAttr;
 import jadx.core.dex.attributes.nodes.NotificationAttrNode;
@@ -25,6 +27,7 @@ import jadx.core.utils.exceptions.JadxException;
 		runAfter = ModVisitor.class
 )
 public class FixAccessModifiers extends AbstractVisitor {
+	private static final String ACCESS_CHANGE_COMMENT = "Access modifiers changed from: ";
 
 	private VisibilityUtils visibilityUtils;
 
@@ -115,7 +118,18 @@ public class FixAccessModifiers extends AbstractVisitor {
 		AccessInfo newAccFlags = accessFlags.changeVisibility(newVisFlag);
 		if (newAccFlags != accessFlags) {
 			node.setAccessFlags(newAccFlags);
-			node.addInfoComment("Access modifiers changed from: " + accessFlags.visibilityName());
+			if (!hasAccessChangeComment(node)) {
+				node.addInfoComment(ACCESS_CHANGE_COMMENT + accessFlags.visibilityName());
+			}
 		}
+	}
+
+	private static boolean hasAccessChangeComment(NotificationAttrNode node) {
+		JadxCommentsAttr commentsAttr = node.get(AType.JADX_COMMENTS);
+		if (commentsAttr == null) {
+			return false;
+		}
+		Set<String> infoComments = commentsAttr.getComments().get(CommentsLevel.INFO);
+		return infoComments != null && infoComments.stream().anyMatch(comment -> comment.startsWith(ACCESS_CHANGE_COMMENT));
 	}
 }

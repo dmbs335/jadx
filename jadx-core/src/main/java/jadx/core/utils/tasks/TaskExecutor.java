@@ -5,6 +5,8 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -51,6 +53,7 @@ public class TaskExecutor implements ITaskExecutor {
 	private final AtomicBoolean terminating = new AtomicBoolean(false);
 	private final Object executorSync = new Object();
 	private @Nullable ExecutorService executor;
+	private @Nullable ThreadPoolExecutor activeStageExecutor;
 	private int tasksCount = 0;
 	private @Nullable Error terminateError;
 
@@ -137,6 +140,25 @@ public class TaskExecutor implements ITaskExecutor {
 	@Override
 	public void terminate() {
 		terminating.set(true);
+		synchronized (executorSync) {
+			if (activeStageExecutor != null) {
+				activeStageExecutor.shutdownNow();
+			}
+		}
+	}
+
+	/**
+	 * Stop scheduling queued parallel tasks without interrupting tasks already running.
+	 * Useful for searches where interrupting code generation would produce false errors.
+	 */
+	public void cancelPendingTasks() {
+		terminating.set(true);
+		synchronized (executorSync) {
+			if (activeStageExecutor != null) {
+				activeStageExecutor.getQueue().clear();
+				activeStageExecutor.shutdown();
+			}
+		}
 	}
 
 	@SuppressWarnings("DataFlowIssue")
@@ -173,13 +195,34 @@ public class TaskExecutor implements ITaskExecutor {
 						wrapTask(task);
 					}
 				} else {
-					ExecutorService parallelExecutor = Executors.newFixedThreadPool(
+					ThreadPoolExecutor parallelExecutor = (ThreadPoolExecutor) Executors.newFixedThreadPool(
 							threads, Utils.simpleThreadFactory("task-p"));
-					for (Runnable task : stage.getTasks()) {
-						parallelExecutor.execute(() -> wrapTask(task));
+					synchronized (executorSync) {
+						activeStageExecutor = parallelExecutor;
 					}
-					parallelExecutor.shutdown();
-					awaitExecutorTermination(parallelExecutor);
+					try {
+						for (Runnable task : stage.getTasks()) {
+							if (terminating.get()) {
+								break;
+							}
+							try {
+								parallelExecutor.execute(() -> wrapTask(task));
+							} catch (RejectedExecutionException e) {
+								if (!terminating.get()) {
+									throw e;
+								}
+								break;
+							}
+						}
+						parallelExecutor.shutdown();
+						awaitExecutorTermination(parallelExecutor);
+					} finally {
+						synchronized (executorSync) {
+							if (activeStageExecutor == parallelExecutor) {
+								activeStageExecutor = null;
+							}
+						}
+					}
 				}
 				if (terminating.get()) {
 					break;
@@ -205,13 +248,27 @@ public class TaskExecutor implements ITaskExecutor {
 	}
 
 	public static void awaitExecutorTermination(ExecutorService executor) {
+		boolean interrupted = false;
 		try {
-			boolean complete = executor.awaitTermination(10, TimeUnit.DAYS);
-			if (!complete) {
-				throw new JadxRuntimeException("Executor timeout");
+			while (true) {
+				try {
+					boolean complete = executor.awaitTermination(10, TimeUnit.DAYS);
+					if (!complete) {
+						throw new JadxRuntimeException("Executor timeout");
+					}
+					return;
+				} catch (InterruptedException e) {
+					// Do not let an interrupted coordinator abandon still running workers.
+					// Jadx lifecycle code can close inputs and plugin classloaders as soon as
+					// this method returns, so returning early leaves decompile tasks using
+					// already closed state during project reload.
+					interrupted = true;
+				}
 			}
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
 		}
 	}
 }

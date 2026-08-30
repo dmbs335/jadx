@@ -1,11 +1,15 @@
 package jadx.core.dex.nodes;
 
+import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -35,12 +39,12 @@ import jadx.api.plugins.input.data.attributes.types.InnerClassesAttr;
 import jadx.api.plugins.input.data.attributes.types.InnerClsInfo;
 import jadx.api.plugins.input.data.attributes.types.SourceFileAttr;
 import jadx.api.plugins.input.data.impl.ListConsumer;
-import jadx.api.usage.IUsageInfoData;
 import jadx.core.Consts;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.InlinedAttr;
 import jadx.core.dex.attributes.nodes.NotificationAttrNode;
+import jadx.core.dex.attributes.nodes.RenameReasonAttr;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.info.AccessInfo.AFType;
 import jadx.core.dex.info.ClassInfo;
@@ -52,6 +56,7 @@ import jadx.core.dex.nodes.utils.TypeUtils;
 import jadx.core.utils.ListUtils;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
+import jadx.core.utils.exceptions.JadxTaskCancelledException;
 
 import static jadx.core.dex.nodes.ProcessState.LOADED;
 import static jadx.core.dex.nodes.ProcessState.NOT_LOADED;
@@ -81,7 +86,8 @@ public class ClassNode extends NotificationAttrNode
 	private String inputFileName;
 
 	private List<MethodNode> methods;
-	private List<FieldNode> fields;
+	private volatile List<FieldNode> fields;
+	private final Object fieldsInitLock = new Object();
 	private List<ClassNode> innerClasses = Collections.emptyList();
 
 	private List<ClassNode> inlinedClasses = Collections.emptyList();
@@ -126,10 +132,12 @@ public class ClassNode extends NotificationAttrNode
 
 	private void load(IClassData cls, boolean reloading) {
 		try {
+			List<FieldNode> previousFields = reloading ? fields : null;
+			List<MethodNode> previousMethods = reloading ? methods : null;
 			addAttrs(cls.getAttributes());
 			this.accessFlags = new AccessInfo(getAccessFlags(cls), AFType.CLASS);
 			this.superClass = checkSuperType(cls);
-			this.interfaces = Utils.collectionMap(cls.getInterfacesTypes(), ArgType::object);
+			this.interfaces = Utils.lockList(Utils.collectionMap(cls.getInterfacesTypes(), ArgType::object));
 			setInputFileName(cls.getInputFileName());
 
 			ListConsumer<IFieldData, FieldNode> fieldsConsumer = new ListConsumer<>(fld -> FieldNode.build(this, fld));
@@ -138,7 +146,7 @@ public class ClassNode extends NotificationAttrNode
 			this.fields = fieldsConsumer.getResult();
 			this.methods = methodsConsumer.getResult();
 			if (reloading) {
-				restoreUsageData();
+				restoreUsageData(previousFields, previousMethods);
 			}
 			initStaticValues(fields);
 			processAttributes(this);
@@ -154,13 +162,60 @@ public class ClassNode extends NotificationAttrNode
 		}
 	}
 
-	private void restoreUsageData() {
-		IUsageInfoData usageInfoData = root.getArgs().getUsageInfoCache().get(root);
-		if (usageInfoData != null) {
-			usageInfoData.applyForClass(this);
-		} else {
-			LOG.warn("Can't restore usage data for class: {}", this);
+	private void restoreUsageData(List<FieldNode> previousFields, List<MethodNode> previousMethods) {
+		Map<MethodInfo, MethodNode> newMethodsByInfo = new HashMap<>(methods.size());
+		for (MethodNode mth : methods) {
+			newMethodsByInfo.put(mth.getMethodInfo(), mth);
 		}
+
+		Map<MethodNode, MethodNode> methodReplacements = new HashMap<>(previousMethods.size());
+		for (MethodNode previousMth : previousMethods) {
+			MethodNode newMth = newMethodsByInfo.get(previousMth.getMethodInfo());
+			if (newMth != null) {
+				methodReplacements.put(previousMth, newMth);
+			}
+		}
+
+		useInMth = ListUtils.compactList(remapMethods(useInMth, methodReplacements));
+
+		Map<FieldInfo, FieldNode> previousFieldsByInfo = new HashMap<>(previousFields.size());
+		for (FieldNode field : previousFields) {
+			previousFieldsByInfo.put(field.getFieldInfo(), field);
+		}
+		for (FieldNode field : fields) {
+			FieldNode previousField = previousFieldsByInfo.get(field.getFieldInfo());
+			if (previousField != null) {
+				field.copyAttributeFrom(previousField, AType.RENAME_REASON);
+				field.copyAttributeFrom(previousField, AType.CONST_REPLACEMENT_USE);
+				field.setUseIn(remapMethods(previousField.getUseIn(), methodReplacements));
+			}
+		}
+
+		for (Map.Entry<MethodNode, MethodNode> entry : methodReplacements.entrySet()) {
+			entry.getValue().copyAttributeFrom(entry.getKey(), AType.RENAME_REASON);
+			entry.getValue().copyAttributeFrom(entry.getKey(), AType.METHOD_THROWS);
+			entry.getValue().setMethodThrowsVisited(entry.getKey().isMethodThrowsVisited());
+			entry.getValue().restoreUsageFrom(entry.getKey(), methodReplacements);
+		}
+	}
+
+	private static List<MethodNode> remapMethods(
+			List<MethodNode> source, Map<MethodNode, MethodNode> replacements) {
+		if (source.isEmpty() || replacements.isEmpty()) {
+			return source;
+		}
+		List<MethodNode> result = new ArrayList<>(source.size());
+		boolean changed = false;
+		for (MethodNode mth : source) {
+			MethodNode replacement = replacements.get(mth);
+			if (replacement == null) {
+				result.add(mth);
+			} else {
+				result.add(replacement);
+				changed = true;
+			}
+		}
+		return changed ? result : source;
 	}
 
 	private ArgType checkSuperType(IClassData cls) {
@@ -180,9 +235,9 @@ public class ClassNode extends NotificationAttrNode
 	}
 
 	public void updateGenericClsData(List<ArgType> generics, ArgType superClass, List<ArgType> interfaces) {
-		this.generics = generics;
+		this.generics = Utils.lockList(generics);
 		this.superClass = superClass;
-		this.interfaces = interfaces;
+		this.interfaces = Utils.lockList(interfaces);
 	}
 
 	private static void processSpecialClasses(ClassNode cls) {
@@ -371,10 +426,14 @@ public class ClassNode extends NotificationAttrNode
 			// manually added class
 			return;
 		}
+		RenameReasonAttr renameReason = get(AType.RENAME_REASON);
 		clearAttributes();
 		unload();
 		root().getConstValues().removeForClass(this);
 		load(clsData, true);
+		if (renameReason != null) {
+			addAttr(renameReason);
+		}
 
 		innerClasses.forEach(ClassNode::deepUnload);
 	}
@@ -414,6 +473,8 @@ public class ClassNode extends NotificationAttrNode
 			ICodeInfo codeInfo = root.getProcessClasses().generateCode(this);
 			processDefinitionAnnotations(codeInfo);
 			return codeInfo;
+		} catch (JadxTaskCancelledException e) {
+			throw e;
 		} catch (StackOverflowError | Exception e) {
 			addError("Code generation failed", e);
 			return new SimpleCodeInfo(Utils.getStackTrace(e));
@@ -538,10 +599,125 @@ public class ClassNode extends NotificationAttrNode
 	}
 
 	public void addField(FieldNode fld) {
-		if (fields == null || fields.isEmpty()) {
-			fields = new ArrayList<>(1);
+		List<FieldNode> currentFields = fields;
+		if (currentFields instanceof AppendOnlyFieldList) {
+			currentFields.add(fld);
+			return;
 		}
-		fields.add(fld);
+		/*
+		 * Don't lock on this ClassNode here. Class decompilation locks ClassNode
+		 * before ClassInfo, while visitors processing a dependency can hold
+		 * ClassInfo and add a synthetic field to this class.
+		 */
+		synchronized (fieldsInitLock) {
+			currentFields = fields;
+			if (currentFields instanceof AppendOnlyFieldList) {
+				currentFields.add(fld);
+				return;
+			}
+			List<FieldNode> updatedFields = new AppendOnlyFieldList(currentFields);
+			updatedFields.add(fld);
+			fields = updatedFields;
+		}
+	}
+
+	public void moveFieldsToEnd(List<FieldNode> orderedFields) {
+		if (orderedFields.isEmpty()) {
+			return;
+		}
+		synchronized (fieldsInitLock) {
+			List<FieldNode> currentFields = fields;
+			if (currentFields instanceof AppendOnlyFieldList) {
+				((AppendOnlyFieldList) currentFields).moveToEnd(orderedFields);
+				return;
+			}
+			List<FieldNode> updatedFields = new ArrayList<>(currentFields);
+			updatedFields.removeAll(orderedFields);
+			updatedFields.addAll(orderedFields);
+			fields = updatedFields;
+		}
+	}
+
+	private static final class AppendOnlyFieldList extends AbstractList<FieldNode> {
+		private volatile FieldNode[] elements;
+		private volatile int size;
+
+		private AppendOnlyFieldList(List<FieldNode> fields) {
+			int initialSize = fields == null ? 0 : fields.size();
+			int capacity = Math.max(4, initialSize + 1);
+			this.elements = fields == null
+					? new FieldNode[capacity]
+					: fields.toArray(new FieldNode[capacity]);
+			this.size = initialSize;
+		}
+
+		@Override
+		public synchronized boolean add(FieldNode field) {
+			int insertPos = size;
+			FieldNode[] currentElements = elements;
+			if (insertPos == currentElements.length) {
+				int newCapacity = insertPos + (insertPos >> 1) + 1;
+				currentElements = Arrays.copyOf(currentElements, newCapacity);
+				elements = currentElements;
+			}
+			currentElements[insertPos] = field;
+			size = insertPos + 1;
+			return true;
+		}
+
+		private synchronized void moveToEnd(List<FieldNode> orderedFields) {
+			int currentSize = size;
+			FieldNode[] currentElements = elements;
+			FieldNode[] reorderedElements = new FieldNode[Math.max(currentElements.length, currentSize)];
+			int insertPos = 0;
+			for (int i = 0; i < currentSize; i++) {
+				FieldNode field = currentElements[i];
+				if (!orderedFields.contains(field)) {
+					reorderedElements[insertPos++] = field;
+				}
+			}
+			for (FieldNode field : orderedFields) {
+				reorderedElements[insertPos++] = field;
+			}
+			elements = reorderedElements;
+			size = insertPos;
+		}
+
+		@Override
+		public FieldNode get(int index) {
+			int currentSize = size;
+			if (index < 0 || index >= currentSize) {
+				throw new IndexOutOfBoundsException(index);
+			}
+			return elements[index];
+		}
+
+		@Override
+		public int size() {
+			return size;
+		}
+
+		@Override
+		public Iterator<FieldNode> iterator() {
+			int snapshotSize = size;
+			FieldNode[] snapshot = elements;
+			return new Iterator<>() {
+				private int index;
+
+				@Override
+				public boolean hasNext() {
+					return index < snapshotSize;
+				}
+
+				@Override
+				public FieldNode next() {
+					if (!hasNext()) {
+						throw new NoSuchElementException();
+					}
+					return snapshot[index++];
+				}
+			};
+		}
 	}
 
 	public @Nullable IFieldInfoRef getConstField(Object obj) {
@@ -943,7 +1119,7 @@ public class ClassNode extends NotificationAttrNode
 	}
 
 	public void setDependencies(List<ClassNode> dependencies) {
-		this.dependencies = dependencies;
+		this.dependencies = ListUtils.compactList(dependencies);
 	}
 
 	public void removeDependency(ClassNode dep) {
@@ -973,7 +1149,7 @@ public class ClassNode extends NotificationAttrNode
 	}
 
 	public void setUseIn(List<ClassNode> useIn) {
-		this.useIn = useIn;
+		this.useIn = ListUtils.compactList(useIn);
 	}
 
 	public List<MethodNode> getUseInMth() {
@@ -981,7 +1157,7 @@ public class ClassNode extends NotificationAttrNode
 	}
 
 	public void setUseInMth(List<MethodNode> useInMth) {
-		this.useInMth = useInMth;
+		this.useInMth = ListUtils.compactList(useInMth);
 	}
 
 	@Override

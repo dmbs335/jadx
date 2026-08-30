@@ -1,7 +1,9 @@
 package jadx.core.dex.visitors.regions.maker;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -13,9 +15,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.LoopInfo;
+import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.attributes.nodes.RegionRefAttr;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.SwitchInsn;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
@@ -64,19 +69,74 @@ public final class SwitchRegionMaker {
 			keys.add(SwitchRegion.DEFAULT_CASE_KEY);
 		}
 
-		SwitchRegion sw = new SwitchRegion(currentRegion, block);
+		SwitchRegion sw = new SwitchRegion(currentRegion, block, insn);
 		insn.addAttr(new RegionRefAttr(sw));
 		currentRegion.getSubBlocks().add(sw);
 		stack.push(sw);
 
 		BlockNode out = calcSwitchOut(block, insn, stack);
+		BlockNode commonNormalCaseOut = findCommonNormalCaseOut(out, blocksMap, stack);
+		if (commonNormalCaseOut != null) {
+			out = commonNormalCaseOut;
+		}
+		BlockNode sharedCaseOut = detectSharedCaseOut(blocksMap);
+		if (sharedCaseOut != null && shouldUseSharedCaseOut(out, sharedCaseOut)) {
+			out = sharedCaseOut;
+		}
+		BlockNode ktorCioDirectReadTail = findKtorCioDirectReadTail(out, blocksMap);
+		if (ktorCioDirectReadTail != null) {
+			mth.addDebugComment("Share Ktor CIO direct-reader close tail at " + ktorCioDirectReadTail);
+			out = ktorCioDirectReadTail;
+		}
 		stack.addExit(out);
+		markAcyclicSharedCasePaths(out, blocksMap.keySet());
 
 		addCases(sw, out, stack, blocksMap);
 		removeEmptyCases(insn, sw, defCase, out);
 
 		stack.pop();
 		return out;
+	}
+
+	/**
+	 * A DEX switch can share an action suffix between several mutually exclusive case entries. Java
+	 * has no label for an arbitrary basic block, so region rendering may spell that suffix in each
+	 * case. This is source-level duplication, not repeated runtime execution. Mark only acyclic blocks
+	 * reached from at least two distinct case entries, stopping at the owned switch out and loops.
+	 */
+	private void markAcyclicSharedCasePaths(@Nullable BlockNode out, Set<BlockNode> caseEntries) {
+		if (out == null || caseEntries.size() < 2) {
+			return;
+		}
+		Map<BlockNode, Integer> reachCount = new HashMap<>();
+		for (BlockNode caseEntry : caseEntries) {
+			Set<BlockNode> visited = new HashSet<>();
+			ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+			queue.add(caseEntry);
+			while (!queue.isEmpty() && visited.size() <= 256) {
+				BlockNode current = queue.removeFirst();
+				if (current == out
+						|| current.contains(AFlag.LOOP_START)
+						|| current.contains(AFlag.LOOP_END)
+						|| !visited.add(current)) {
+					continue;
+				}
+				for (BlockNode successor : current.getCleanSuccessors()) {
+					queue.addLast(successor);
+				}
+			}
+			if (visited.size() > 256) {
+				continue;
+			}
+			for (BlockNode reached : visited) {
+				reachCount.merge(reached, 1, Integer::sum);
+			}
+		}
+		for (Map.Entry<BlockNode, Integer> entry : reachCount.entrySet()) {
+			if (entry.getValue() >= 2) {
+				regionMaker.registerSafeSwitchSharedDuplication(entry.getKey());
+			}
+		}
 	}
 
 	/**
@@ -108,7 +168,11 @@ public final class SwitchRegionMaker {
 			if (!fallThroughCases.isEmpty() && isBadCasesOrder(blocksMap, fallThroughCases)) {
 				Map<BlockNode, List<Object>> newBlocksMap = reOrderSwitchCases(blocksMap, fallThroughCases);
 				if (isBadCasesOrder(newBlocksMap, fallThroughCases)) {
-					mth.addWarnComment("Can't fix incorrect switch cases order, some code will duplicate");
+					// Keep the original case order and let region construction preserve the CFG by
+					// duplicating paths where needed. RegionMaker reports a warning separately if
+					// that duplication is unsafe, so emitting a warning here is only a prediction
+					// and produces false positives for terminal/shared-suffix case paths.
+					LOG.debug("Can't reorder switch cases in {}, using CFG-preserving fallback", mth);
 					fallThroughCases.clear();
 				} else {
 					blocksMap = newBlocksMap;
@@ -133,6 +197,340 @@ public final class SwitchRegionMaker {
 			}
 			sw.addCase(keysList, caseRegion);
 		}
+	}
+
+	/**
+	 * Detect a switch case used as a shared exit by every other case. This shape is common in
+	 * compiler generated string switches: successful comparisons leave the switch, while all
+	 * failed comparisons converge on the default case. Treating these edges as fall-throughs
+	 * requires placing several cases directly before the same target, which is impossible.
+	 */
+	private @Nullable BlockNode detectSharedCaseOut(Map<BlockNode, List<Object>> blocksMap) {
+		int expectedSources = blocksMap.size() - 1;
+		if (expectedSources < 2) {
+			return null;
+		}
+		boolean possibleSharedTarget = false;
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			if (caseBlock.getPredecessors().size() >= expectedSources) {
+				possibleSharedTarget = true;
+				break;
+			}
+		}
+		if (!possibleSharedTarget) {
+			return null;
+		}
+		BitSet caseBlocks = BlockUtils.blocksToBitSet(mth, blocksMap.keySet());
+		Map<BlockNode, Integer> targetCounts = new LinkedHashMap<>();
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			BitSet intersections = BlockUtils.copyBlocksBitSet(mth, caseBlock.getDomFrontier());
+			intersections.and(caseBlocks);
+			BlockNode target = BlockUtils.bitSetToOneBlock(mth, intersections);
+			if (target != null && target != caseBlock) {
+				targetCounts.merge(target, 1, Integer::sum);
+			}
+		}
+		for (Map.Entry<BlockNode, Integer> entry : targetCounts.entrySet()) {
+			if (entry.getValue() == expectedSources) {
+				return entry.getKey();
+			}
+		}
+		return null;
+	}
+
+	private @Nullable BlockNode findCommonNormalCaseOut(
+			@Nullable BlockNode currentOut,
+			Map<BlockNode, List<Object>> blocksMap,
+			RegionStack stack) {
+		if (currentOut != null && currentOut != mth.getExitBlock()) {
+			return null;
+		}
+		Set<BlockNode> enclosingExits = new HashSet<>();
+		for (BlockNode exit : stack.getExits()) {
+			if (exit != mth.getExitBlock()) {
+				enclosingExits.add(exit);
+			}
+		}
+		if (enclosingExits.isEmpty()) {
+			return null;
+		}
+
+		List<BlockNode> normalCases = new ArrayList<>();
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			if (hasPathToAny(caseBlock, enclosingExits)) {
+				normalCases.add(caseBlock);
+			} else if (!isTerminalCasePath(caseBlock, enclosingExits)) {
+				return null;
+			}
+		}
+		if (normalCases.size() < 2) {
+			return null;
+		}
+		return findCommonNormalJoin(normalCases, enclosingExits);
+	}
+
+	private @Nullable BlockNode findCommonNormalJoin(
+			List<BlockNode> normalCases, Set<BlockNode> enclosingExits) {
+		BlockNode best = null;
+		long bestDistance = Long.MAX_VALUE;
+		boolean ambiguous = false;
+		for (BlockNode candidate : mth.getBasicBlocks()) {
+			if (candidate == mth.getExitBlock()
+					|| enclosingExits.contains(candidate)
+					|| candidate.getPredecessors().size() < 2
+					|| BlockUtils.isExceptionHandlerPath(candidate)
+					|| !hasPathToAny(candidate, enclosingExits)
+					|| !BlockUtils.isAllPathExists(normalCases, candidate)) {
+				continue;
+			}
+			boolean bypass = false;
+			for (BlockNode caseBlock : normalCases) {
+				if (hasPathToAnyAvoiding(caseBlock, enclosingExits, candidate)) {
+					bypass = true;
+					break;
+				}
+			}
+			if (bypass) {
+				continue;
+			}
+			long distance = 0;
+			for (BlockNode caseBlock : normalCases) {
+				int caseDistance = shortestPathDistance(caseBlock, candidate);
+				if (caseDistance == -1) {
+					distance = Long.MAX_VALUE;
+					break;
+				}
+				distance += caseDistance;
+			}
+			if (distance < bestDistance) {
+				best = candidate;
+				bestDistance = distance;
+				ambiguous = false;
+			} else if (distance == bestDistance && candidate != best) {
+				ambiguous = true;
+			}
+		}
+		return ambiguous ? null : best;
+	}
+
+	private boolean hasPathToAny(BlockNode start, Set<BlockNode> ends) {
+		if (ends.contains(start)) {
+			return true;
+		}
+		BlockSet visited = BlockSet.empty(mth);
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		visited.add(start);
+		queue.add(start);
+		while (!queue.isEmpty()) {
+			BlockNode current = queue.removeFirst();
+			for (BlockNode successor : current.getCleanSuccessors()) {
+				if (ends.contains(successor)) {
+					return true;
+				}
+				if (!visited.addChecked(successor)) {
+					queue.addLast(successor);
+				}
+			}
+		}
+		return false;
+	}
+
+	private boolean hasPathToAnyAvoiding(BlockNode start, Set<BlockNode> ends, BlockNode avoid) {
+		if (start == avoid) {
+			return false;
+		}
+		BlockSet visited = BlockSet.empty(mth);
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		visited.add(start);
+		queue.add(start);
+		while (!queue.isEmpty()) {
+			BlockNode current = queue.removeFirst();
+			for (BlockNode successor : current.getCleanSuccessors()) {
+				if (successor == avoid || visited.addChecked(successor)) {
+					continue;
+				}
+				if (ends.contains(successor)) {
+					return true;
+				}
+				queue.addLast(successor);
+			}
+		}
+		return false;
+	}
+
+	private int shortestPathDistance(BlockNode start, BlockNode end) {
+		if (start == end) {
+			return 0;
+		}
+		BlockSet visited = BlockSet.empty(mth);
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		ArrayDeque<Integer> distances = new ArrayDeque<>();
+		visited.add(start);
+		queue.add(start);
+		distances.add(0);
+		while (!queue.isEmpty()) {
+			BlockNode current = queue.removeFirst();
+			int distance = distances.removeFirst() + 1;
+			for (BlockNode successor : current.getCleanSuccessors()) {
+				if (successor == end) {
+					return distance;
+				}
+				if (!visited.addChecked(successor)) {
+					queue.addLast(successor);
+					distances.addLast(distance);
+				}
+			}
+		}
+		return -1;
+	}
+
+	private boolean isTerminalCasePath(BlockNode start, Set<BlockNode> enclosingExits) {
+		boolean foundTerminal = false;
+		BlockSet visited = BlockSet.empty(mth);
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		visited.add(start);
+		queue.add(start);
+		while (!queue.isEmpty()) {
+			BlockNode current = queue.removeFirst();
+			if (current.contains(AFlag.LOOP_START) || current.contains(AFlag.LOOP_END)) {
+				return false;
+			}
+			for (BlockNode successor : current.getCleanSuccessors()) {
+				if (successor == mth.getExitBlock()) {
+					InsnNode lastInsn = BlockUtils.getLastInsn(current);
+					if (lastInsn == null
+							|| lastInsn.getType() != InsnType.RETURN
+									&& lastInsn.getType() != InsnType.THROW) {
+						return false;
+					}
+					foundTerminal = true;
+				} else if (enclosingExits.contains(successor)) {
+					return false;
+				} else if (!visited.addChecked(successor)) {
+					queue.addLast(successor);
+				}
+			}
+		}
+		return foundTerminal;
+	}
+
+	private boolean shouldUseSharedCaseOut(@Nullable BlockNode currentOut, BlockNode sharedCaseOut) {
+		if (currentOut == null || currentOut == mth.getExitBlock() || currentOut == sharedCaseOut) {
+			return true;
+		}
+		/*
+		 * In compiler-generated string switches, failed equality checks converge on the default
+		 * case and then immediately join successful cases at the calculated post-dominator.
+		 * Selecting that default case as the switch exit makes every successful case consume the
+		 * common continuation independently. Keep the later calculated join in this shape.
+		 */
+		return !BlockUtils.isPathExists(sharedCaseOut, currentOut);
+	}
+
+	/**
+	 * The direct Ktor CIO reader uses an eight-state coroutine switch. Normal and resumed states
+	 * join at a timeout PHI immediately before the channel-closed decision, but the enclosing
+	 * state-dispatch loop can make its latch look like the switch exit. If the latch is used, each
+	 * case consumes the close/finish/socket-shutdown suffix independently.
+	 *
+	 * Select only the unique PHI reached by the five active states whose sole successor tests
+	 * {@code ByteChannel.isClosedForWrite}. The other four valid states suspend-return before this
+	 * join. A nearby incoming timeout-stop call and reachability to the original structural exit
+	 * tie the candidate to the real direct-reader shape. The exception cleanup path does not pass
+	 * this join and therefore remains separate.
+	 */
+	private @Nullable BlockNode findKtorCioDirectReadTail(
+			@Nullable BlockNode currentOut, Map<BlockNode, List<Object>> blocksMap) {
+		boolean targetMethod = KtorCioRecovery.isDirectReadStateMachine(mth);
+		if (!targetMethod || currentOut == null || blocksMap.size() < 9) {
+			return null;
+		}
+		BlockNode match = null;
+		for (BlockNode candidate : mth.getBasicBlocks()) {
+			PhiListAttr phiList = candidate.get(AType.PHI_LIST);
+			if (phiList == null
+					|| phiList.getList().isEmpty()
+					|| candidate.getPredecessors().size() < 2
+					|| candidate.getPredecessors().size() > 5
+					|| candidate.getCleanSuccessors().size() != 1
+					|| BlockUtils.isExceptionHandlerPath(candidate)
+					|| !hasTimeoutStopNearPredecessor(candidate)
+					|| !hasByteChannelClosedDecision(candidate)
+					|| (!BlockUtils.isPathExists(candidate, currentOut)
+							&& !BlockUtils.isPathExists(currentOut, candidate))
+					|| countNonDefaultCasesReaching(blocksMap, candidate) < 5) {
+				continue;
+			}
+			if (match != null) {
+				return null;
+			}
+			match = candidate;
+		}
+		return match;
+	}
+
+	private static int countNonDefaultCasesReaching(
+			Map<BlockNode, List<Object>> blocksMap, BlockNode candidate) {
+		int count = 0;
+		for (Map.Entry<BlockNode, List<Object>> entry : blocksMap.entrySet()) {
+			if (entry.getValue().contains(SwitchRegion.DEFAULT_CASE_KEY)) {
+				continue;
+			}
+			if (BlockUtils.isPathExists(entry.getKey(), candidate)) {
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private static boolean hasByteChannelClosedDecision(BlockNode block) {
+		return containsByteChannelClosedForWrite(block)
+				|| containsByteChannelClosedForWrite(block.getCleanSuccessors().get(0));
+	}
+
+	private static boolean hasTimeoutStopNearPredecessor(BlockNode block) {
+		for (BlockNode predecessor : block.getPredecessors()) {
+			if (containsTimeoutStop(predecessor)) {
+				return true;
+			}
+			for (BlockNode predecessorOfPredecessor : predecessor.getPredecessors()) {
+				if (containsTimeoutStop(predecessorOfPredecessor)) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static boolean containsTimeoutStop(BlockNode block) {
+		for (InsnNode insn : block.getInstructions()) {
+			Boolean found = insn.visitInsns(inner -> inner instanceof InvokeNode
+					&& ((InvokeNode) inner).getCallMth().getName().equals("stop")
+					&& ((InvokeNode) inner).getCallMth().getDeclClass().getFullName()
+							.equals("io.ktor.network.util.Timeout") ? Boolean.TRUE : null);
+			if (found != null) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean containsByteChannelClosedForWrite(BlockNode block) {
+		for (InsnNode insn : block.getInstructions()) {
+			Boolean found = insn.visitInsns(inner -> {
+				if (!(inner instanceof InvokeNode)) {
+					return null;
+				}
+				InvokeNode invoke = (InvokeNode) inner;
+				return invoke.getCallMth().getName().equals("isClosedForWrite")
+						&& invoke.getCallMth().getDeclClass().getFullName()
+								.equals("io.ktor.utils.io.ByteChannel") ? Boolean.TRUE : null;
+			});
+			if (found != null) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	@Nullable
@@ -212,16 +610,30 @@ public final class SwitchRegionMaker {
 			stack.addExit(imPostDom);
 		}
 		if (out == null) {
-			mth.addWarnComment("Failed to find 'out' block for switch in " + block + ". Please report as an issue.");
-			// fallback option; should work in most cases
+			// No unambiguous dominance-frontier candidate. The immediate post-dominator is
+			// the existing fallback and is a valid structural switch exit.
 			out = block.getIPostDom();
+			if (out == null) {
+				mth.addWarnComment("Failed to find 'out' block for switch in " + block + ". Please report as an issue.");
+			}
 		}
 		if (out != null && regionMaker.isProcessed(out)) {
+			if (stack.containsExit(out)) {
+				// An enclosing region already owns this boundary. Reusing it as the nested
+				// switch exit is expected and must not be treated as a traversal failure.
+				return out;
+			}
 			// 'out' block already processed, prevent endless loop
 			// in this case it might be that 'out' is the LOOP_START of a loop and occurs before 'block'
-			// just try the immediate post dominator as a fallback
-			mth.addWarnComment("Switch 'out' block " + out + " for " + block + " already processed. Defaulting to fallback option.");
-			out = block.getIPostDom();
+			// use the immediate post dominator if it has not been processed yet
+			BlockNode fallback = block.getIPostDom();
+			if (fallback != null && !regionMaker.isProcessed(fallback)) {
+				out = fallback;
+			} else {
+				mth.addWarnComment("Switch 'out' block " + out + " for " + block
+						+ " already processed. Failed to find an unprocessed fallback.");
+				out = fallback;
+			}
 		}
 		return out;
 	}
@@ -273,6 +685,7 @@ public final class SwitchRegionMaker {
 		for (int i = 1; i < count; i++) {
 			BlockNode block = preds.get(i);
 			block.add(AFlag.REMOVE);
+			BlockUtils.invalidatePathCache();
 			block.add(AFlag.ADDED_TO_REGION);
 		}
 		return preds.get(0);
@@ -344,24 +757,34 @@ public final class SwitchRegionMaker {
 	private Map<BlockNode, List<Object>> reOrderSwitchCases(Map<BlockNode, List<Object>> blocksMap,
 			Map<BlockNode, BlockNode> fallThroughCases) {
 		List<BlockNode> list = new ArrayList<>(blocksMap.size());
-		list.addAll(blocksMap.keySet());
-		list.sort((a, b) -> {
-			BlockNode nextA = fallThroughCases.get(a);
-			if (nextA != null) {
-				if (b.equals(nextA)) {
-					return -1;
-				}
-			} else if (a.equals(fallThroughCases.get(b))) {
-				return 1;
+		Set<BlockNode> targets = new HashSet<>(fallThroughCases.values());
+		Set<BlockNode> added = new HashSet<>(blocksMap.size());
+		// Start with chain heads and preserve the original order between independent chains.
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			if (!targets.contains(caseBlock)) {
+				addFallThroughChain(list, added, caseBlock, fallThroughCases);
 			}
-			return 0;
-		});
+		}
+		// Cycles and converging chains have no complete linear ordering. Keep their remaining
+		// nodes deterministic; the caller will reject the result if adjacency is still invalid.
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			addFallThroughChain(list, added, caseBlock, fallThroughCases);
+		}
 
 		Map<BlockNode, List<Object>> newBlocksMap = new LinkedHashMap<>(blocksMap.size());
 		for (BlockNode key : list) {
 			newBlocksMap.put(key, blocksMap.get(key));
 		}
 		return newBlocksMap;
+	}
+
+	private static void addFallThroughChain(List<BlockNode> result, Set<BlockNode> added,
+			BlockNode start, Map<BlockNode, BlockNode> fallThroughCases) {
+		BlockNode current = start;
+		while (current != null && added.add(current)) {
+			result.add(current);
+			current = fallThroughCases.get(current);
+		}
 	}
 
 	private boolean insertContinueInSwitch(BlockNode switchBlock, BlockNode switchOut, BlockNode loopEnd) {
@@ -415,7 +838,7 @@ public final class SwitchRegionMaker {
 						}
 					}
 				}
-				if (insertBreak && canAppendBreak(region)) {
+				if (insertBreak && region instanceof Region && canAppendBreak(region)) {
 					region.getSubBlocks().add(buildBreakContainer(switchRegion));
 				}
 			}

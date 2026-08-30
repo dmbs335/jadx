@@ -59,8 +59,35 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 				tryBlocks.remove(tb);
 				return true;
 			}
+			BlockNode protectedAnchor = findDirectProtectedAnchor(region, tb);
+			if (protectedAnchor != null) {
+				if (!wrapBlocks(region, tb, protectedAnchor)) {
+					mth.addWarn("Can't wrap narrow try/catch for region: " + region);
+				}
+				tryBlocks.remove(tb);
+				return true;
+			}
 		}
 		return false;
+	}
+
+	/**
+	 * A synthetic exception top-splitter can remain outside the structured branch which owns a
+	 * one-block try body. In that case the exact protected block is a safe local anchor: requiring a
+	 * single direct protected block prevents an arbitrary inner block from widening the try region.
+	 */
+	private static BlockNode findDirectProtectedAnchor(IRegion region, TryCatchBlockAttr tb) {
+		BlockNode anchor = null;
+		for (BlockNode block : tb.getBlocks()) {
+			if (!region.getSubBlocks().contains(block)) {
+				continue;
+			}
+			if (anchor != null) {
+				return null;
+			}
+			anchor = block;
+		}
+		return anchor;
 	}
 
 	/**
@@ -84,8 +111,10 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		// path from any of the exception handlers i.e. they are not before the end of the try block so
 		// should be inside the try block.
 		for (IContainer cont : subBlocks) {
-			if (RegionUtils.hasPathThroughBlock(dominator, cont)) {
-				if (isHandlerPath(tb, cont)) {
+			if (cont == dominator || RegionUtils.hasPathThroughBlock(dominator, cont)) {
+				boolean containsTryBlock = tb.getBlocks().stream()
+						.anyMatch(block -> RegionUtils.isRegionContainsBlock(cont, block));
+				if (!containsTryBlock && cont != dominator && isHandlerPath(tb, cont)) {
 					// this block/region has a path from an exception handler so is after the end of the try block
 					continue;
 				}
@@ -122,7 +151,9 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			BlockNode handlerBlock = h.getHandlerBlock();
 			if (handlerBlock != null
 					&& !handlerBlock.contains(AFlag.REMOVE)
-					&& RegionUtils.isPathExists(handlerBlock, container)) {
+					&& (tb.isNarrowRegion() || RegionUtils.getFirstBlockNode(container) == null
+							? RegionUtils.hasPathThroughBlock(handlerBlock, container)
+							: RegionUtils.isPathExists(handlerBlock, container))) {
 				return true;
 			}
 		}

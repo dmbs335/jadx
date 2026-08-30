@@ -6,16 +6,22 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 
 public class TypeUpdateRequest {
-	private final InsnArg arg;
-	private final ArgType candidateType;
-	private final boolean direct;
-	private final @Nullable ITypeUpdateCallback callback;
+	private InsnArg arg;
+	private ArgType candidateType;
+	private boolean direct;
+	private @Nullable ITypeUpdateCallback callback;
+	private @Nullable TypeUpdateRequest nextFree;
 
 	public TypeUpdateRequest(InsnArg arg, ArgType candidateType, boolean direct, @Nullable ITypeUpdateCallback callback) {
+		init(arg, candidateType, direct, callback);
+	}
+
+	void init(InsnArg arg, ArgType candidateType, boolean direct, @Nullable ITypeUpdateCallback callback) {
 		this.arg = arg;
 		this.candidateType = candidateType;
 		this.direct = direct;
 		this.callback = callback;
+		this.nextFree = null;
 	}
 
 	public InsnArg getArg() {
@@ -32,6 +38,15 @@ public class TypeUpdateRequest {
 
 	public @Nullable ITypeUpdateCallback getCallback() {
 		return callback;
+	}
+
+	@Nullable TypeUpdateRequest getNextFree() {
+		return nextFree;
+	}
+
+	void recycle(@Nullable TypeUpdateRequest nextFree) {
+		this.callback = null;
+		this.nextFree = nextFree;
 	}
 
 	@Override

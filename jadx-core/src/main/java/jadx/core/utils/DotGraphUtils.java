@@ -106,7 +106,7 @@ public class DotGraphUtils {
 			return;
 		}
 		File file = getFullFile(mth, dir);
-		SaveCode.save(graph, file);
+		SaveCode.save(graph, file, mth.root().getArgs());
 	}
 
 	public @Nullable String dumpToString(MethodNode mth) {

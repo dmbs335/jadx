@@ -4,17 +4,27 @@ import jadx.api.plugins.input.data.attributes.IJadxAttrType;
 import jadx.api.plugins.input.data.attributes.IJadxAttribute;
 import jadx.core.codegen.utils.CodeComment;
 import jadx.core.dex.attributes.nodes.AnonymousClassAttr;
+import jadx.core.dex.attributes.nodes.AnonymousClassOriginAttr;
+import jadx.core.dex.attributes.nodes.BooleanNumericConversionAttr;
 import jadx.core.dex.attributes.nodes.ClassTypeVarsAttr;
 import jadx.core.dex.attributes.nodes.CodeFeaturesAttr;
+import jadx.core.dex.attributes.nodes.ConstantReturnMethodAttr;
+import jadx.core.dex.attributes.nodes.ConstReplacementUseAttr;
+import jadx.core.dex.attributes.nodes.CoroutineLoopCarryTailAttr;
+import jadx.core.dex.attributes.nodes.CoroutineLoopPreHeaderAttr;
+import jadx.core.dex.attributes.nodes.CoroutineStateMachineAttr;
 import jadx.core.dex.attributes.nodes.DeclareVariablesAttr;
 import jadx.core.dex.attributes.nodes.DecompileModeOverrideAttr;
 import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
 import jadx.core.dex.attributes.nodes.EnumClassAttr;
 import jadx.core.dex.attributes.nodes.EnumMapAttr;
 import jadx.core.dex.attributes.nodes.ExcSplitCrossAttr;
+import jadx.core.dex.attributes.nodes.ExpectedTraversalCycleAttr;
 import jadx.core.dex.attributes.nodes.FieldReplaceAttr;
 import jadx.core.dex.attributes.nodes.ForceReturnAttr;
 import jadx.core.dex.attributes.nodes.GenericInfoAttr;
+import jadx.core.dex.attributes.nodes.IncompleteFieldTypeConflictAttr;
+import jadx.core.dex.attributes.nodes.InitAtDeclareVarsAttr;
 import jadx.core.dex.attributes.nodes.InlinedAttr;
 import jadx.core.dex.attributes.nodes.JadxCommentsAttr;
 import jadx.core.dex.attributes.nodes.JadxError;
@@ -28,13 +38,20 @@ import jadx.core.dex.attributes.nodes.MethodOverrideAttr;
 import jadx.core.dex.attributes.nodes.MethodReplaceAttr;
 import jadx.core.dex.attributes.nodes.MethodThrowsAttr;
 import jadx.core.dex.attributes.nodes.MethodTypeVarsAttr;
+import jadx.core.dex.attributes.nodes.NormalizedCoroutineLoopAttr;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
+import jadx.core.dex.attributes.nodes.ProtectedCoroutineZeroDelayAttr;
+import jadx.core.dex.attributes.nodes.ReadOnlyMethodAttr;
 import jadx.core.dex.attributes.nodes.RegDebugInfoAttr;
 import jadx.core.dex.attributes.nodes.RegionRefAttr;
 import jadx.core.dex.attributes.nodes.RenameReasonAttr;
+import jadx.core.dex.attributes.nodes.SafeDuplicationAttr;
 import jadx.core.dex.attributes.nodes.SkipMethodArgsAttr;
 import jadx.core.dex.attributes.nodes.SpecialEdgeAttr;
+import jadx.core.dex.attributes.nodes.StandaloneIfRegionAttr;
 import jadx.core.dex.attributes.nodes.TmpEdgeAttr;
+import jadx.core.dex.attributes.nodes.TryProtectedIteratorBooleanActionAttr;
+import jadx.core.dex.attributes.nodes.UnsupportedMultiEntryLoopAttr;
 import jadx.core.dex.nodes.IMethodDetails;
 import jadx.core.dex.trycatch.CatchAttr;
 import jadx.core.dex.trycatch.ExcHandlerAttr;
@@ -63,12 +80,14 @@ public final class AType<T extends IJadxAttribute> implements IJadxAttrType<T> {
 	public static final AType<EnumMapAttr> ENUM_MAP = new AType<>();
 	public static final AType<ClassTypeVarsAttr> CLASS_TYPE_VARS = new AType<>();
 	public static final AType<AnonymousClassAttr> ANONYMOUS_CLASS = new AType<>();
+	public static final AType<AnonymousClassOriginAttr> ANONYMOUS_CLASS_ORIGIN = new AType<>();
 	public static final AType<InlinedAttr> INLINED = new AType<>();
 	public static final AType<DecompileModeOverrideAttr> DECOMPILE_MODE_OVERRIDE = new AType<>();
 
 	// field
 	public static final AType<FieldInitInsnAttr> FIELD_INIT_INSN = new AType<>();
 	public static final AType<FieldReplaceAttr> FIELD_REPLACE = new AType<>();
+	public static final AType<ConstReplacementUseAttr> CONST_REPLACEMENT_USE = new AType<>();
 
 	// method
 	public static final AType<LocalVarsDebugInfoAttr> LOCAL_VARS_DEBUG_INFO = new AType<>();
@@ -81,6 +100,14 @@ public final class AType<T extends IJadxAttribute> implements IJadxAttrType<T> {
 	public static final AType<AttrList<TryCatchBlockAttr>> TRY_BLOCKS_LIST = new AType<>();
 	public static final AType<CodeFeaturesAttr> METHOD_CODE_FEATURES = new AType<>();
 	public static final AType<MethodThrowsAttr> METHOD_THROWS = new AType<>();
+	public static final AType<ReadOnlyMethodAttr> READ_ONLY_METHOD = new AType<>();
+	public static final AType<ConstantReturnMethodAttr> CONSTANT_RETURN_METHOD = new AType<>();
+	public static final AType<UnsupportedMultiEntryLoopAttr> UNSUPPORTED_MULTI_ENTRY_LOOP = new AType<>();
+	public static final AType<NormalizedCoroutineLoopAttr> NORMALIZED_COROUTINE_LOOP = new AType<>();
+	public static final AType<CoroutineStateMachineAttr> COROUTINE_STATE_MACHINE = new AType<>();
+	public static final AType<TryProtectedIteratorBooleanActionAttr> TRY_PROTECTED_ITERATOR_BOOLEAN_ACTION =
+			new AType<>();
+	public static final AType<InitAtDeclareVarsAttr> INIT_AT_DECLARE_VARS = new AType<>();
 
 	// region
 	public static final AType<DeclareVariablesAttr> DECLARE_VARIABLES = new AType<>();
@@ -94,16 +121,24 @@ public final class AType<T extends IJadxAttribute> implements IJadxAttrType<T> {
 	public static final AType<TmpEdgeAttr> TMP_EDGE = new AType<>();
 	public static final AType<TryCatchBlockAttr> TRY_BLOCK = new AType<>();
 	public static final AType<ExcSplitCrossAttr> EXC_SPLIT_CROSS = new AType<>();
+	public static final AType<ExpectedTraversalCycleAttr> EXPECTED_TRAVERSAL_CYCLE = new AType<>();
+	public static final AType<ProtectedCoroutineZeroDelayAttr> PROTECTED_COROUTINE_ZERO_DELAY = new AType<>();
+	public static final AType<CoroutineLoopPreHeaderAttr> COROUTINE_LOOP_PRE_HEADER = new AType<>();
+	public static final AType<CoroutineLoopCarryTailAttr> COROUTINE_LOOP_CARRY_TAIL = new AType<>();
+	public static final AType<SafeDuplicationAttr> SAFE_DUPLICATION = new AType<>();
+	public static final AType<StandaloneIfRegionAttr> STANDALONE_IF_REGION = new AType<>();
 
 	// block or insn
 	public static final AType<ExcHandlerAttr> EXC_HANDLER = new AType<>();
 	public static final AType<CatchAttr> EXC_CATCH = new AType<>();
 
 	// instruction
+	public static final AType<BooleanNumericConversionAttr> BOOLEAN_NUMERIC_CONVERSION = new AType<>();
 	public static final AType<LoopLabelAttr> LOOP_LABEL = new AType<>();
 	public static final AType<AttrList<JumpInfo>> JUMP = new AType<>();
 	public static final AType<IMethodDetails> METHOD_DETAILS = new AType<>();
 	public static final AType<GenericInfoAttr> GENERIC_INFO = new AType<>();
+	public static final AType<IncompleteFieldTypeConflictAttr> INCOMPLETE_FIELD_TYPE_CONFLICT = new AType<>();
 	public static final AType<RegionRefAttr> REGION_REF = new AType<>();
 
 	// register

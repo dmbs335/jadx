@@ -2,7 +2,6 @@ package jadx.core.dex.visitors;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 
 import org.jetbrains.annotations.Nullable;
@@ -19,6 +18,7 @@ import jadx.api.plugins.input.data.attributes.types.AnnotationsAttr;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.AttrNode;
+import jadx.core.dex.attributes.nodes.ConstReplacementUseAttr;
 import jadx.core.dex.attributes.nodes.SkipMethodArgsAttr;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.info.FieldInfo;
@@ -106,9 +106,9 @@ public class ModVisitor extends AbstractVisitor {
 			int size = insnsList.size();
 			for (int i = 0; i < size; i++) {
 				InsnNode insn = insnsList.get(i);
+				processAnonymousConstructors(mth, insn);
 				switch (insn.getType()) {
 					case CONSTRUCTOR:
-						processAnonymousConstructor(mth, ((ConstructorInsn) insn));
 						break;
 
 					case CONST:
@@ -166,6 +166,17 @@ public class ModVisitor extends AbstractVisitor {
 				}
 			}
 			remover.perform();
+		}
+	}
+
+	private static void processAnonymousConstructors(MethodNode mth, InsnNode insn) {
+		if (insn.getType() == InsnType.CONSTRUCTOR) {
+			processAnonymousConstructor(mth, (ConstructorInsn) insn);
+		}
+		for (InsnArg arg : insn.getArguments()) {
+			if (arg instanceof InsnWrapArg) {
+				processAnonymousConstructors(mth, ((InsnWrapArg) arg).getWrapInsn());
+			}
 		}
 	}
 
@@ -304,23 +315,19 @@ public class ModVisitor extends AbstractVisitor {
 		if (annotationsList == null) {
 			return;
 		}
-		for (IAnnotation annotation : annotationsList.getAll()) {
+		annotationsList.forEach((type, annotation) -> {
 			if (annotation.getVisibility() == AnnotationVisibility.SYSTEM) {
-				continue;
+				return;
 			}
-			for (Map.Entry<String, EncodedValue> entry : annotation.getValues().entrySet()) {
-				entry.setValue(replaceConstValue(parentCls, entry.getValue()));
-			}
-		}
+			annotation.replaceValues((name, value) -> replaceConstValue(parentCls, value));
+		});
 	}
 
 	@SuppressWarnings("unchecked")
 	private EncodedValue replaceConstValue(ClassNode parentCls, EncodedValue encodedValue) {
 		if (encodedValue.getType() == EncodedType.ENCODED_ANNOTATION) {
 			IAnnotation annotation = (IAnnotation) encodedValue.getValue();
-			for (Map.Entry<String, EncodedValue> entry : annotation.getValues().entrySet()) {
-				entry.setValue(replaceConstValue(parentCls, entry.getValue()));
-			}
+			annotation.replaceValues((name, value) -> replaceConstValue(parentCls, value));
 			return encodedValue;
 		}
 		if (encodedValue.getType() == EncodedType.ENCODED_ARRAY) {
@@ -414,6 +421,9 @@ public class ModVisitor extends AbstractVisitor {
 		ArgType castType = (ArgType) insn.getIndex();
 		if (!ArgType.isCastNeeded(mth.root(), castArg.getType(), castType)) {
 			RegisterArg result = insn.getResult();
+			if (result.isTypeImmutable()) {
+				return;
+			}
 			result.setType(castArg.getType());
 
 			InsnNode move = new InsnNode(InsnType.MOVE, 1);
@@ -512,7 +522,11 @@ public class ModVisitor extends AbstractVisitor {
 			return;
 		}
 		MethodNode callMth = (MethodNode) callMthDetails;
-		if (!callMth.contains(AFlag.ANONYMOUS_CONSTRUCTOR) || callMth.contains(AFlag.NO_SKIP_ARGS)) {
+		if (!callMth.contains(AFlag.ANONYMOUS_CONSTRUCTOR)
+				&& !callMth.getParentClass().contains(AType.ANONYMOUS_CLASS_ORIGIN)) {
+			return;
+		}
+		if (callMth.contains(AFlag.NO_SKIP_ARGS)) {
 			return;
 		}
 		SkipMethodArgsAttr attr = callMth.get(AType.SKIP_MTH_ARGS);
@@ -532,7 +546,9 @@ public class ModVisitor extends AbstractVisitor {
 	private static void anonymousCallArgMod(InsnArg arg) {
 		arg.add(AFlag.DONT_INLINE);
 		if (arg.isRegister()) {
-			((RegisterArg) arg).getSVar().getCodeVar().setFinal(true);
+			SSAVar sVar = ((RegisterArg) arg).getSVar();
+			InitCodeVariables.initCodeVar(sVar);
+			sVar.getCodeVar().setFinal(true);
 		}
 	}
 
@@ -627,7 +643,9 @@ public class ModVisitor extends AbstractVisitor {
 
 	public static void addFieldUsage(IFieldInfoRef fieldData, MethodNode mth) {
 		if (fieldData instanceof FieldNode) {
-			((FieldNode) fieldData).addUseIn(mth);
+			FieldNode field = (FieldNode) fieldData;
+			field.addUseIn(mth);
+			ConstReplacementUseAttr.mark(field, mth);
 		}
 	}
 }

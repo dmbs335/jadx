@@ -54,47 +54,52 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 		if (block.getInstructions().isEmpty()) {
 			return;
 		}
-		InsnList insnList = new InsnList(block.getInstructions());
+		List<InsnNode> insnList = block.getInstructions();
 		int insnCount = insnList.size();
-		List<ArgsInfo> argsList = new ArrayList<>(insnCount);
+		ArgsInfo[] argsList = new ArgsInfo[insnCount];
 		for (int i = 0; i < insnCount; i++) {
-			argsList.add(new ArgsInfo(insnList.get(i), argsList, i));
+			argsList[i] = new ArgsInfo(insnList.get(i), argsList, i);
 		}
-		List<WrapInfo> wrapList = new ArrayList<>();
+		List<WrapInfo> wrapList = null;
 		for (ArgsInfo argsInfo : argsList) {
 			List<RegisterArg> args = argsInfo.getArgs();
 			for (int i = args.size() - 1; i >= 0; i--) {
-				RegisterArg arg = args.get(i);
-				checkInline(mth, block, insnList, wrapList, argsInfo, arg);
+				WrapInfo wrapInfo = checkInline(mth, block, insnList, argsInfo, args.get(i));
+				if (wrapInfo != null) {
+					if (wrapList == null) {
+						wrapList = new ArrayList<>();
+					}
+					wrapList.add(wrapInfo);
+				}
 			}
 		}
-		if (!wrapList.isEmpty()) {
+		if (wrapList != null) {
 			for (WrapInfo wrapInfo : wrapList) {
 				inline(mth, wrapInfo.getArg(), wrapInfo.getInsn(), block);
 			}
 		}
 	}
 
-	private static void checkInline(MethodNode mth, BlockNode block, InsnList insnList,
-			List<WrapInfo> wrapList, ArgsInfo argsInfo, RegisterArg arg) {
+	private static WrapInfo checkInline(MethodNode mth, BlockNode block, List<InsnNode> insnList,
+			ArgsInfo argsInfo, RegisterArg arg) {
 		if (arg.contains(AFlag.DONT_INLINE)
 				|| arg.getParentInsn() == null
 				|| arg.getParentInsn().contains(AFlag.DONT_GENERATE)) {
-			return;
+			return null;
 		}
 		SSAVar sVar = arg.getSVar();
 		if (sVar == null || sVar.getAssign().contains(AFlag.DONT_INLINE)) {
-			return;
+			return null;
 		}
 		InsnNode assignInsn = sVar.getAssign().getParentInsn();
 		if (assignInsn == null
 				|| assignInsn.contains(AFlag.DONT_INLINE)
 				|| assignInsn.contains(AFlag.WRAPPED)) {
-			return;
+			return null;
 		}
 		boolean assignInline = assignInsn.contains(AFlag.FORCE_ASSIGN_INLINE);
 		if (!assignInline && sVar.isUsedInPhi()) {
-			return;
+			return null;
 		}
 		// allow inline only one use arg
 		int useCount = 0;
@@ -104,12 +109,12 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 				continue;
 			}
 			if (!assignInline && useArg.contains(AFlag.DONT_INLINE_CONST)) {
-				return;
+				return null;
 			}
 			useCount++;
 		}
 		if (!assignInline && useCount != 1) {
-			return;
+			return null;
 		}
 		if (!assignInline && sVar.getName() != null) {
 			if (searchArgWithName(assignInsn, sVar.getName())) {
@@ -118,32 +123,29 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 				// allow inline if var name is duplicated
 			} else {
 				// reject inline of named variable
-				return;
+				return null;
 			}
 		}
 		if (!checkLambdaInline(arg, assignInsn)) {
-			return;
+			return null;
 		}
 
-		int assignPos = insnList.getIndex(assignInsn);
+		int assignPos = InsnList.getIndex(insnList, assignInsn);
 		if (assignPos != -1) {
-			WrapInfo wrapInfo = argsInfo.checkInline(assignPos, arg);
-			if (wrapInfo != null) {
-				wrapList.add(wrapInfo);
-			}
-		} else {
-			// another block
-			BlockNode assignBlock = BlockUtils.getBlockByInsn(mth, assignInsn);
-			if (assignBlock != null
-					&& assignInsn != arg.getParentInsn()
-					&& canMoveBetweenBlocks(mth, assignInsn, assignBlock, block, argsInfo.getInsn())) {
-				if (assignInline) {
-					assignInline(mth, arg, assignInsn, assignBlock);
-				} else {
-					inline(mth, arg, assignInsn, assignBlock);
-				}
+			return argsInfo.checkInline(assignPos, arg);
+		}
+		// another block
+		BlockNode assignBlock = BlockUtils.getBlockByInsn(mth, assignInsn);
+		if (assignBlock != null
+				&& assignInsn != arg.getParentInsn()
+				&& canMoveBetweenBlocks(mth, assignInsn, assignBlock, block, argsInfo.getInsn())) {
+			if (assignInline) {
+				assignInline(mth, arg, assignInsn, assignBlock);
+			} else {
+				inline(mth, arg, assignInsn, assignBlock);
 			}
 		}
+		return null;
 	}
 
 	/**

@@ -31,7 +31,7 @@ public class ClspGraph {
 	private final RootNode root;
 	private Map<String, ClspClass> nameMap;
 	private Map<String, Set<String>> superTypesCache;
-	private Map<String, List<String>> implementsCache;
+	private Map<String, List<ArgType>> implementsCache;
 
 	private final Set<String> missingClasses = new HashSet<>();
 
@@ -85,6 +85,12 @@ public class ClspGraph {
 	}
 
 	@Nullable
+	public ArgType getClsType(String fullName) {
+		ClspClass cls = nameMap.get(fullName);
+		return cls == null ? null : cls.getClsType();
+	}
+
+	@Nullable
 	public IMethodDetails getMethodDetails(MethodInfo methodInfo) {
 		ClspClass cls = nameMap.get(methodInfo.getDeclClass().getRawName());
 		if (cls == null) {
@@ -128,18 +134,31 @@ public class ClspGraph {
 		return anc.contains(implClsName);
 	}
 
-	public List<String> getImplementations(String clsName) {
-		List<String> list = implementsCache.get(clsName);
+	public List<ArgType> getImplementationTypes(String clsName) {
+		List<ArgType> list = implementsCache.get(clsName);
 		return list == null ? Collections.emptyList() : list;
 	}
 
+	public List<String> getImplementations(String clsName) {
+		List<ArgType> types = getImplementationTypes(clsName);
+		if (types.isEmpty()) {
+			return Collections.emptyList();
+		}
+		List<String> names = new ArrayList<>(types.size());
+		for (ArgType type : types) {
+			names.add(type.getObject());
+		}
+		return names;
+	}
+
 	private void fillImplementsCache() {
-		Map<String, List<String>> map = new HashMap<>(nameMap.size());
+		Map<String, List<ArgType>> map = new HashMap<>(nameMap.size());
 		List<String> classes = new ArrayList<>(nameMap.keySet());
 		Collections.sort(classes);
-		for (String cls : classes) {
-			for (String st : getSuperTypes(cls)) {
-				map.computeIfAbsent(st, v -> new ArrayList<>()).add(cls);
+		for (String clsName : classes) {
+			ArgType clsType = nameMap.get(clsName).getClsType();
+			for (String st : getSuperTypes(clsName)) {
+				map.computeIfAbsent(st, v -> new ArrayList<>()).add(clsType);
 			}
 		}
 		implementsCache = map;
@@ -258,4 +277,5 @@ public class ClspGraph {
 			}
 		}
 	}
+
 }

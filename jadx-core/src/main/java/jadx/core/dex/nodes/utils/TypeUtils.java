@@ -1,11 +1,15 @@
 package jadx.core.dex.nodes.utils;
 
+import java.util.AbstractMap;
+import java.util.AbstractSet;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.function.BiConsumer;
 
@@ -126,8 +130,11 @@ public class TypeUtils {
 
 	private static Set<ArgType> collectKnownTypeVarsAtMethod(MethodNode mth) {
 		Set<ArgType> typeVars = new HashSet<>();
-		typeVars.addAll(getKnownTypeVarsAtClass(mth.getParentClass()));
+		// Method type parameters shadow class parameters with the same name.
+		// ArgType equality intentionally ignores bounds for type variables, so insertion order matters
+		// here.
 		typeVars.addAll(mth.getTypeParameters());
+		typeVars.addAll(getKnownTypeVarsAtClass(mth.getParentClass()));
 		return typeVars.isEmpty() ? Collections.emptySet() : typeVars;
 	}
 
@@ -176,10 +183,10 @@ public class TypeUtils {
 		if (typeVars != null) {
 			typeVarsMap = mergeTypeMaps(typeVarsMap, typeVars.getTypeVarsMapFor(genericSourceType));
 		}
-		typeVarsMap = mergeTypeMaps(typeVarsMap, getTypeVariablesMapping(instanceType));
+		typeVarsMap = mergeTypeMapping(typeVarsMap, getTypeVariablesMapping(instanceType));
 		ArgType outerType = instanceType.getOuterType();
 		while (outerType != null) {
-			typeVarsMap = mergeTypeMaps(typeVarsMap, getTypeVariablesMapping(outerType));
+			typeVarsMap = mergeTypeMapping(typeVarsMap, getTypeVariablesMapping(outerType));
 			outerType = outerType.getOuterType();
 		}
 		return replaceTypeVariablesUsingMap(typeWithGeneric, typeVarsMap);
@@ -206,6 +213,14 @@ public class TypeUtils {
 		return map;
 	}
 
+	private static Map<ArgType, ArgType> mergeTypeMapping(
+			Map<ArgType, ArgType> base, Map<ArgType, ArgType> typeMapping) {
+		if (!base.isEmpty() && !typeMapping.isEmpty() && typeMapping.size() <= 3) {
+			typeMapping = new HashMap<>(typeMapping);
+		}
+		return mergeTypeMaps(base, typeMapping);
+	}
+
 	public Map<ArgType, ArgType> getTypeVariablesMapping(ArgType clsType) {
 		if (!clsType.isGeneric()) {
 			return Collections.emptyMap();
@@ -222,17 +237,179 @@ public class TypeUtils {
 		if (genericParamsCount != typeParameters.size()) {
 			return Collections.emptyMap();
 		}
+		if (genericParamsCount == 1) {
+			ArgType typeVar = normalizeTypeVar(typeParameters.get(0));
+			return Collections.singletonMap(typeVar, actualTypes.get(0));
+		}
+		if (genericParamsCount == 2) {
+			ArgType first = normalizeTypeVar(typeParameters.get(0));
+			ArgType second = normalizeTypeVar(typeParameters.get(1));
+			ArgType firstActual = actualTypes.get(0);
+			ArgType secondActual = actualTypes.get(1);
+			if (!first.equals(second) && firstActual != null && secondActual != null) {
+				return new TwoTypeVariablesMap(first, firstActual, second, secondActual);
+			}
+		}
+		if (genericParamsCount == 3) {
+			ArgType first = normalizeTypeVar(typeParameters.get(0));
+			ArgType second = normalizeTypeVar(typeParameters.get(1));
+			ArgType third = normalizeTypeVar(typeParameters.get(2));
+			ArgType firstActual = actualTypes.get(0);
+			ArgType secondActual = actualTypes.get(1);
+			ArgType thirdActual = actualTypes.get(2);
+			if (!first.equals(second) && !first.equals(third) && !second.equals(third)
+					&& firstActual != null && secondActual != null && thirdActual != null) {
+				return new ThreeTypeVariablesMap(
+						first, firstActual,
+						second, secondActual,
+						third, thirdActual);
+			}
+		}
 		Map<ArgType, ArgType> replaceMap = new HashMap<>(genericParamsCount);
 		for (int i = 0; i < genericParamsCount; i++) {
 			ArgType actualType = actualTypes.get(i);
-			ArgType typeVar = typeParameters.get(i);
-			if (typeVar.getExtendTypes() != null) {
-				// force short form (only type var name)
-				typeVar = ArgType.genericType(typeVar.getObject());
-			}
+			ArgType typeVar = normalizeTypeVar(typeParameters.get(i));
 			replaceMap.put(typeVar, actualType);
 		}
 		return replaceMap;
+	}
+
+	/**
+	 * Allocation-friendly immutable map for the common two and three type-variable cases.
+	 * Unlike {@link Map#of(Object, Object, Object, Object)}, this representation doesn't
+	 * allocate a separate object array for every short-lived mapping.
+	 */
+	private abstract static class SmallTypeVariablesMap extends AbstractMap<ArgType, ArgType> {
+		protected abstract ArgType keyAt(int index);
+
+		protected abstract ArgType valueAt(int index);
+
+		@Override
+		public boolean containsKey(Object key) {
+			int size = size();
+			for (int i = 0; i < size; i++) {
+				if (keyAt(i).equals(key)) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		@Override
+		@Nullable
+		public ArgType get(Object key) {
+			int size = size();
+			for (int i = 0; i < size; i++) {
+				if (keyAt(i).equals(key)) {
+					return valueAt(i);
+				}
+			}
+			return null;
+		}
+
+		@Override
+		public Set<Entry<ArgType, ArgType>> entrySet() {
+			return new AbstractSet<>() {
+				@Override
+				public int size() {
+					return SmallTypeVariablesMap.this.size();
+				}
+
+				@Override
+				public Iterator<Entry<ArgType, ArgType>> iterator() {
+					return new Iterator<>() {
+						private int index;
+
+						@Override
+						public boolean hasNext() {
+							return index < SmallTypeVariablesMap.this.size();
+						}
+
+						@Override
+						public Entry<ArgType, ArgType> next() {
+							if (!hasNext()) {
+								throw new NoSuchElementException();
+							}
+							int current = index++;
+							return new SimpleImmutableEntry<>(keyAt(current), valueAt(current));
+						}
+					};
+				}
+			};
+		}
+	}
+
+	private static final class TwoTypeVariablesMap extends SmallTypeVariablesMap {
+		private final ArgType key1;
+		private final ArgType value1;
+		private final ArgType key2;
+		private final ArgType value2;
+
+		private TwoTypeVariablesMap(ArgType key1, ArgType value1, ArgType key2, ArgType value2) {
+			this.key1 = key1;
+			this.value1 = value1;
+			this.key2 = key2;
+			this.value2 = value2;
+		}
+
+		@Override
+		public int size() {
+			return 2;
+		}
+
+		@Override
+		protected ArgType keyAt(int index) {
+			return index == 0 ? key1 : key2;
+		}
+
+		@Override
+		protected ArgType valueAt(int index) {
+			return index == 0 ? value1 : value2;
+		}
+	}
+
+	private static final class ThreeTypeVariablesMap extends SmallTypeVariablesMap {
+		private final ArgType key1;
+		private final ArgType value1;
+		private final ArgType key2;
+		private final ArgType value2;
+		private final ArgType key3;
+		private final ArgType value3;
+
+		private ThreeTypeVariablesMap(
+				ArgType key1, ArgType value1,
+				ArgType key2, ArgType value2,
+				ArgType key3, ArgType value3) {
+			this.key1 = key1;
+			this.value1 = value1;
+			this.key2 = key2;
+			this.value2 = value2;
+			this.key3 = key3;
+			this.value3 = value3;
+		}
+
+		@Override
+		public int size() {
+			return 3;
+		}
+
+		@Override
+		protected ArgType keyAt(int index) {
+			return index == 0 ? key1 : index == 1 ? key2 : key3;
+		}
+
+		@Override
+		protected ArgType valueAt(int index) {
+			return index == 0 ? value1 : index == 1 ? value2 : value3;
+		}
+	}
+
+	private static ArgType normalizeTypeVar(ArgType typeVar) {
+		if (notEmpty(typeVar.getExtendTypes())) {
+			// force short form (only type var name)
+			return ArgType.genericType(typeVar.getObject());
+		}
+		return typeVar;
 	}
 
 	public Map<ArgType, ArgType> getTypeVarMappingForInvoke(BaseInvokeNode invokeInsn) {

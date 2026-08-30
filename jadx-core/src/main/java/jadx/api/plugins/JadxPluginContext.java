@@ -26,6 +26,17 @@ public interface JadxPluginContext {
 
 	void addCodeInput(JadxCodeInput codeInput);
 
+	/**
+	 * Report a recoverable input-loading failure which can reduce analysis coverage.
+	 */
+	void reportInputError(String message, @Nullable Throwable error);
+
+	/** Report a recoverable input-loading failure under a provenance-aware category. */
+	void reportInputError(String category, String message, @Nullable Throwable error);
+
+	/** Report an explicit, fingerprint-audited exclusion without hiding it or failing completeness. */
+	void reportInputExclusion(String category, String message, @Nullable Throwable error);
+
 	void registerOptions(JadxPluginOptions options);
 
 	/**

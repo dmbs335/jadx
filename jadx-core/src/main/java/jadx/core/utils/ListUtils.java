@@ -111,10 +111,10 @@ public class ListUtils {
 
 	public static <T extends Comparable<T>> List<T> distinctMergeSortedLists(List<T> first, List<T> second) {
 		if (first.isEmpty()) {
-			return second;
+			return new ArrayList<>(second);
 		}
 		if (second.isEmpty()) {
-			return first;
+			return new ArrayList<>(first);
 		}
 		Set<T> set = new TreeSet<>(first);
 		set.addAll(second);
@@ -152,6 +152,15 @@ public class ListUtils {
 		return list;
 	}
 
+	/**
+	 * Replace an element in a new list without mutating the supplied list.
+	 * Useful for usage lists shared between parallel class-processing tasks.
+	 */
+	public static <T> List<T> safeReplaceCopy(List<T> list, T oldObj, T newObj) {
+		List<T> copy = list == null ? new ArrayList<>(1) : new ArrayList<>(list);
+		return safeReplace(copy, oldObj, newObj);
+	}
+
 	public static <T> void safeRemove(List<T> list, T obj) {
 		if (list != null && !list.isEmpty()) {
 			list.remove(obj);
@@ -161,6 +170,9 @@ public class ListUtils {
 	public static <T> List<T> safeRemoveAndTrim(List<T> list, T obj) {
 		if (list == null || list.isEmpty()) {
 			return list;
+		}
+		if (!(list instanceof ArrayList)) {
+			list = new ArrayList<>(list);
 		}
 		if (list.remove(obj)) {
 			if (list.isEmpty()) {
@@ -176,7 +188,28 @@ public class ListUtils {
 			newList.add(obj);
 			return newList;
 		}
+		if (!(list instanceof ArrayList)) {
+			list = new ArrayList<>(list);
+		}
 		list.add(obj);
+		return list;
+	}
+
+	/**
+	 * Replace small non-null lists with JDK fixed-size implementations that store elements inline.
+	 * The returned list is immutable for sizes one and two; use safe mutation helpers to update it.
+	 */
+	public static <T> List<T> compactList(List<T> list) {
+		int size = list.size();
+		if (size == 0) {
+			return Collections.emptyList();
+		}
+		if (size == 1) {
+			return Collections.singletonList(Objects.requireNonNull(list.get(0)));
+		}
+		if (size == 2) {
+			return List.of(Objects.requireNonNull(list.get(0)), Objects.requireNonNull(list.get(1)));
+		}
 		return list;
 	}
 

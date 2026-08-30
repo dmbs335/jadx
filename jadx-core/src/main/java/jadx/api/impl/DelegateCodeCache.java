@@ -32,6 +32,11 @@ public abstract class DelegateCodeCache implements ICodeCache {
 	}
 
 	@Override
+	public @NotNull ICodeInfo getWithKnownCode(String clsFullName, @Nullable String knownCode) {
+		return backCache.getWithKnownCode(clsFullName, knownCode);
+	}
+
+	@Override
 	@Nullable
 	public String getCode(String clsFullName) {
 		return backCache.getCode(clsFullName);

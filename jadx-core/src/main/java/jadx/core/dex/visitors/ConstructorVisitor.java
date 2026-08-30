@@ -1,6 +1,10 @@
 package jadx.core.dex.visitors;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -47,21 +51,29 @@ public class ConstructorVisitor extends AbstractVisitor {
 	private static boolean replaceInvoke(MethodNode mth) {
 		boolean replaced = false;
 		InsnRemover remover = new InsnRemover(mth);
+		List<InsnNode> assignChainInsns = new ArrayList<>();
+		List<PhiInsn> assignChainPhis = new ArrayList<>();
 		for (BlockNode block : mth.getBasicBlocks()) {
 			remover.setBlock(block);
 			int size = block.getInstructions().size();
 			for (int i = 0; i < size; i++) {
 				InsnNode insn = block.getInstructions().get(i);
 				if (insn.getType() == InsnType.INVOKE) {
-					replaced |= processInvoke(mth, block, i, remover);
+					replaced |= processInvoke(mth, block, i, remover, assignChainInsns, assignChainPhis);
 				}
 			}
 			remover.perform();
 		}
+		for (PhiInsn phiInsn : assignChainPhis) {
+			InsnRemover.unbindInsn(mth, phiInsn);
+			InsnRemover.delistPhi(mth, phiInsn);
+		}
+		removeAssignChainInsns(mth, assignChainInsns);
 		return replaced;
 	}
 
-	private static boolean processInvoke(MethodNode mth, BlockNode block, int indexInBlock, InsnRemover remover) {
+	private static boolean processInvoke(MethodNode mth, BlockNode block, int indexInBlock,
+			InsnRemover remover, List<InsnNode> assignChainInsns, List<PhiInsn> assignChainPhis) {
 		InvokeNode inv = (InvokeNode) block.getInstructions().get(indexInBlock);
 		MethodInfo callMth = inv.getCallMth();
 		if (!callMth.isConstructor()) {
@@ -90,11 +102,18 @@ public class ConstructorVisitor extends AbstractVisitor {
 					// insert new PHI insn to merge these branched constructors results
 					instanceArg = insertPhiInsn(mth, block, instanceArg, ((ConstructorInsn) assignInsn));
 				} else {
-					InsnNode newInstInsn = removeAssignChain(mth, assignInsn, remover, InsnType.NEW_INSTANCE);
+					boolean branchedAlias = assignInsn instanceof PhiInsn;
+					InsnNode newInstInsn = branchedAlias
+							? removeBranchedAssignChain(assignInsn, assignChainInsns, assignChainPhis, InsnType.NEW_INSTANCE)
+							: removeLinearAssignChain(mth, assignInsn, remover, InsnType.NEW_INSTANCE);
 					if (newInstInsn != null) {
 						co.inheritMetadata(newInstInsn);
 						newInstInsn.add(AFlag.REMOVE);
-						remover.addWithoutUnbind(newInstInsn);
+						if (branchedAlias) {
+							addUnique(assignChainInsns, newInstInsn);
+						} else {
+							remover.addWithoutUnbind(newInstInsn);
+						}
 					}
 				}
 			}
@@ -136,7 +155,7 @@ public class ConstructorVisitor extends AbstractVisitor {
 			// use new SSA var on usage from current path
 			RegisterArg newResArg = instArg.duplicateWithNewSSAVar(mth);
 			List<BlockNode> pathBlocks = BlockUtils.collectAllSuccessors(mth, curBlock, true);
-			for (RegisterArg useReg : instArg.getSVar().getUseList()) {
+			for (RegisterArg useReg : List.copyOf(instArg.getSVar().getUseList())) {
 				InsnNode parentInsn = useReg.getParentInsn();
 				if (parentInsn != null) {
 					BlockNode useBlock = BlockUtils.getBlockByInsn(mth, parentInsn, pathBlocks);
@@ -229,7 +248,57 @@ public class ConstructorVisitor extends AbstractVisitor {
 	/**
 	 * Remove instructions on 'move' chain until instruction with type 'insnType'
 	 */
-	private static InsnNode removeAssignChain(MethodNode mth, InsnNode insn, InsnRemover remover, InsnType insnType) {
+	private static InsnNode removeBranchedAssignChain(InsnNode insn, List<InsnNode> insnsToRemove,
+			List<PhiInsn> phisToRemove, InsnType insnType) {
+		Set<InsnNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+		Set<InsnNode> chain = Collections.newSetFromMap(new IdentityHashMap<>());
+		Set<InsnNode> sources = Collections.newSetFromMap(new IdentityHashMap<>());
+		if (!collectAssignChainSources(insn, insnType, visited, chain, sources) || sources.size() != 1) {
+			return null;
+		}
+		for (InsnNode chainInsn : chain) {
+			if (chainInsn instanceof PhiInsn) {
+				PhiInsn phiInsn = (PhiInsn) chainInsn;
+				if (!phisToRemove.contains(phiInsn)) {
+					phisToRemove.add(phiInsn);
+				}
+			} else {
+				addUnique(insnsToRemove, chainInsn);
+			}
+		}
+		return sources.iterator().next();
+	}
+
+	private static void addUnique(List<InsnNode> insns, InsnNode insn) {
+		if (!insns.contains(insn)) {
+			insns.add(insn);
+		}
+	}
+
+	private static void removeAssignChainInsns(MethodNode mth, List<InsnNode> insns) {
+		if (insns.isEmpty()) {
+			return;
+		}
+		// Unbind the complete component before removing results. This is required for
+		// loop-carried MOVE cycles where each result is still used by another move.
+		InsnRemover.unbindInsns(mth, insns);
+		for (InsnNode insn : insns) {
+			BlockNode block = BlockUtils.getBlockByInsn(mth, insn);
+			if (block == null) {
+				if (!insn.contains(AFlag.WRAPPED)) {
+					mth.addWarnComment("Failed to remove constructor assign-chain instruction: " + insn);
+				}
+				continue;
+			}
+			if (block.contains(AFlag.DUPLICATED)) {
+				mth.addWarnComment("Instruction removed from duplicated block: " + block + ", please report this as an issue");
+			}
+			InsnRemover.removeWithoutUnbind(mth, block, insn);
+		}
+	}
+
+	private static InsnNode removeLinearAssignChain(
+			MethodNode mth, InsnNode insn, InsnRemover remover, InsnType insnType) {
 		if (insn == null) {
 			return null;
 		}
@@ -244,8 +313,44 @@ public class ConstructorVisitor extends AbstractVisitor {
 		}
 		if (type == InsnType.MOVE) {
 			RegisterArg arg = (RegisterArg) insn.getArg(0);
-			return removeAssignChain(mth, arg.getAssignInsn(), remover, insnType);
+			return removeLinearAssignChain(mth, arg.getAssignInsn(), remover, insnType);
 		}
 		return null;
 	}
+
+	private static boolean collectAssignChainSources(InsnNode insn, InsnType sourceType,
+			Set<InsnNode> visited, Set<InsnNode> chain, Set<InsnNode> sources) {
+		if (insn == null) {
+			return false;
+		}
+		if (insn.getType() == sourceType) {
+			sources.add(insn);
+			return sources.size() == 1;
+		}
+		InsnType type = insn.getType();
+		if (type != InsnType.MOVE && !(insn instanceof PhiInsn)) {
+			return false;
+		}
+		if (!visited.add(insn)) {
+			// Back edge in a MOVE/PHI component. A concrete source must still be found
+			// through another edge before the complete traversal can be accepted.
+			return true;
+		}
+		chain.add(insn);
+		if (type == InsnType.MOVE) {
+			InsnArg arg = insn.getArg(0);
+			return arg.isRegister()
+					&& collectAssignChainSources(
+							((RegisterArg) arg).getAssignInsn(), sourceType, visited, chain, sources);
+		}
+		for (InsnArg arg : insn.getArguments()) {
+			if (!arg.isRegister()
+					|| !collectAssignChainSources(
+							((RegisterArg) arg).getAssignInsn(), sourceType, visited, chain, sources)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 }

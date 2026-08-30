@@ -31,6 +31,7 @@ import jadx.api.ICodeWriter;
 import jadx.api.JadxDecompiler;
 import jadx.core.dex.visitors.DepthTraversal;
 import jadx.core.utils.exceptions.JadxRuntimeException;
+import jadx.core.utils.exceptions.JadxTaskCancelledException;
 
 public class Utils {
 
@@ -604,7 +605,7 @@ public class Utils {
 
 	public static void checkThreadInterrupt() {
 		if (Thread.currentThread().isInterrupted()) {
-			throw new JadxRuntimeException("Thread interrupted");
+			throw new JadxTaskCancelledException();
 		}
 	}
 

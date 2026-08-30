@@ -1,8 +1,7 @@
 package jadx.core.dex.visitors.typeinference;
 
+import java.util.Comparator;
 import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
@@ -114,7 +113,7 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 				}
 			}
 		} catch (JadxOverflowException e) {
-			throw e;
+			LOG.debug("Type update limit reached for immutable var {} in method: {}", ssaVar, mth, e);
 		} catch (Exception e) {
 			mth.addWarnComment("Failed to set immutable type for var: " + ssaVar, e);
 		}
@@ -124,7 +123,7 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 		try {
 			calculateFromBounds(mth, ssaVar);
 		} catch (JadxOverflowException e) {
-			throw e;
+			LOG.debug("Type update limit reached for var {} in method: {}", ssaVar, mth, e);
 		} catch (Exception e) {
 			mth.addWarnComment("Failed to calculate best type for var: " + ssaVar, e);
 		}
@@ -133,8 +132,8 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 	private void calculateFromBounds(MethodNode mth, SSAVar ssaVar) {
 		TypeInfo typeInfo = ssaVar.getTypeInfo();
 		Set<ITypeBound> bounds = typeInfo.getBounds();
-		Optional<ArgType> bestTypeOpt = selectBestTypeFromBounds(bounds);
-		if (bestTypeOpt.isEmpty()) {
+		ArgType candidateType = selectBestTypeFromBounds(bounds);
+		if (candidateType == null) {
 			if (Consts.DEBUG_TYPE_INFERENCE) {
 				LOG.warn("Failed to select best type from bounds, count={} : ", bounds.size());
 				for (ITypeBound bound : bounds) {
@@ -143,7 +142,6 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 			}
 			return;
 		}
-		ArgType candidateType = bestTypeOpt.get();
 		TypeUpdateResult result = typeUpdate.apply(mth, ssaVar, candidateType);
 		if (Consts.DEBUG_TYPE_INFERENCE && result == TypeUpdateResult.REJECT) {
 			if (ssaVar.getTypeInfo().getType().equals(candidateType)) {
@@ -154,11 +152,16 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 		}
 	}
 
-	private Optional<ArgType> selectBestTypeFromBounds(Set<ITypeBound> bounds) {
-		return bounds.stream()
-				.map(ITypeBound::getType)
-				.filter(Objects::nonNull)
-				.max(typeUpdate.getTypeCompare().getComparator());
+	private @Nullable ArgType selectBestTypeFromBounds(Set<ITypeBound> bounds) {
+		Comparator<ArgType> comparator = typeUpdate.getTypeCompare().getComparator();
+		ArgType bestType = null;
+		for (ITypeBound bound : bounds) {
+			ArgType type = bound.getType();
+			if (type != null && (bestType == null || comparator.compare(bestType, type) < 0)) {
+				bestType = type;
+			}
+		}
+		return bestType;
 	}
 
 	private void attachBounds(SSAVar var) {
@@ -175,10 +178,20 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 	private void mergePhiBounds(SSAVar ssaVar) {
 		for (PhiInsn usedInPhi : ssaVar.getUsedInPhi()) {
 			Set<ITypeBound> bounds = ssaVar.getTypeInfo().getBounds();
-			bounds.addAll(usedInPhi.getResult().getSVar().getTypeInfo().getBounds());
+			addPhiVarBounds(bounds, usedInPhi.getResult());
 			for (InsnArg arg : usedInPhi.getArguments()) {
-				bounds.addAll(((RegisterArg) arg).getSVar().getTypeInfo().getBounds());
+				addPhiVarBounds(bounds, (RegisterArg) arg);
 			}
+		}
+	}
+
+	private static void addPhiVarBounds(Set<ITypeBound> bounds, RegisterArg arg) {
+		if (arg == null) {
+			return;
+		}
+		SSAVar ssaVar = arg.getSVar();
+		if (ssaVar != null) {
+			bounds.addAll(ssaVar.getTypeInfo().getBounds());
 		}
 	}
 
@@ -296,6 +309,11 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 		InsnNode insn = regArg.getParentInsn();
 		if (insn == null) {
 			return null;
+		}
+		if (insn.getType() == InsnType.IPUT
+				&& insn.getArg(0) == regArg
+				&& regArg.getInitType().containsTypeVariable()) {
+			return new TypeBoundFieldPutUse(root, (IndexInsnNode) insn, regArg);
 		}
 		if (insn instanceof BaseInvokeNode) {
 			ITypeBound invokeUseBound = makeInvokeUseBound(regArg, (BaseInvokeNode) insn);

@@ -15,19 +15,29 @@ import jadx.core.utils.exceptions.JadxException;
 
 public class SaveDeobfMapping extends AbstractVisitor {
 	private static final Logger LOG = LoggerFactory.getLogger(SaveDeobfMapping.class);
+	private final DeobfPresets.ReapplyData reapplyData;
+
+	public SaveDeobfMapping() {
+		this(new DeobfPresets.ReapplyData());
+	}
+
+	public SaveDeobfMapping(DeobfPresets.ReapplyData reapplyData) {
+		this.reapplyData = reapplyData;
+	}
 
 	@Override
 	public void init(RootNode root) throws JadxException {
 		JadxArgs args = root.getArgs();
 		if (args.isDeobfuscationOn() || !args.isJsonOutput()) {
-			saveMappings(root);
+			processMappings(root);
 		}
 		if (args.isJsonOutput()) {
 			JsonMappingGen.dump(root);
 		}
 	}
 
-	private void saveMappings(RootNode root) {
+	private void processMappings(RootNode root) {
+		reapplyData.reapply(root);
 		GeneratedRenamesMappingFileMode mode = root.getArgs().getGeneratedRenamesMappingFileMode();
 		if (!mode.shouldWrite()) {
 			return;

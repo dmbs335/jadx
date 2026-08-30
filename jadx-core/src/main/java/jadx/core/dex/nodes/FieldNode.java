@@ -104,7 +104,7 @@ public class FieldNode extends NotificationAttrNode implements ICodeNode, IField
 	}
 
 	public void setUseIn(List<MethodNode> useIn) {
-		this.useIn = useIn;
+		this.useIn = ListUtils.compactList(useIn);
 	}
 
 	public synchronized void addUseIn(MethodNode mth) {

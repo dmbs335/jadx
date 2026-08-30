@@ -29,7 +29,7 @@ public final class FieldInfo implements IFieldInfoRef {
 
 	public static FieldInfo fromRef(RootNode root, IFieldRef fieldRef) {
 		ClassInfo declClass = ClassInfo.fromName(root, fieldRef.getParentClassType());
-		FieldInfo field = new FieldInfo(declClass, fieldRef.getName(), ArgType.parse(fieldRef.getType()));
+		FieldInfo field = new FieldInfo(declClass, fieldRef.getName(), root.getInfoStorage().getType(fieldRef.getType()));
 		return root.getInfoStorage().getField(field);
 	}
 

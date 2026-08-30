@@ -153,6 +153,7 @@ public final class TypeUpdate {
 			if (current == REJECT) {
 				updateInfo.rollbackUpdate(cbReq.getArg());
 			}
+			updateInfo.releaseRequest(cbReq);
 			// proceed to next callback
 		}
 	}
@@ -175,17 +176,17 @@ public final class TypeUpdate {
 			}
 			TypeUpdateResult result = callback.updateCallback(res);
 			if (result == null) {
-				updateInfo.saveCallback(new TypeUpdateRequest(arg, candidateType, false, callback));
+				updateInfo.saveCallback(arg, candidateType, false, callback);
 			}
 			return result;
 		}
-		updateInfo.queueRequest(new TypeUpdateRequest(arg, candidateType, false, callback));
+		updateInfo.queueRequest(arg, candidateType, false, callback);
 		return null;
 	}
 
 	public @Nullable TypeUpdateResult queueDirectTypeUpdate(TypeUpdateInfo updateInfo, InsnArg arg, ArgType candidateType,
 			@Nullable ITypeUpdateCallback callback) {
-		updateInfo.queueRequest(new TypeUpdateRequest(arg, candidateType, true, callback));
+		updateInfo.queueRequest(arg, candidateType, true, callback);
 		return null;
 	}
 
@@ -195,7 +196,10 @@ public final class TypeUpdate {
 		}
 		if (arg instanceof RegisterArg) {
 			RegisterArg reg = (RegisterArg) arg;
-			return updateTypeForSsaVar(updateInfo, reg.getSVar(), candidateType);
+			SSAVar ssaVar = reg.getSVar();
+			if (ssaVar != null) {
+				return updateTypeForSsaVar(updateInfo, ssaVar, candidateType);
+			}
 		}
 		return requestUpdate(updateInfo, arg, candidateType);
 	}
@@ -279,15 +283,8 @@ public final class TypeUpdate {
 		if (!inBounds(updateInfo, ssaVar, typeInfo.getBounds(), candidateType)) {
 			return REJECT;
 		}
-		var updateCallback = new ArgsListUpdateCallback<>(this, updateInfo, ssaVar.getUseList(), candidateType, true);
-		updateCallback.setFinalResultCallback(result -> {
-			if (result == REJECT) {
-				// rollback update for all registers in current SSA var
-				updateInfo.rollbackUpdate(ssaVar.getAssign());
-				ssaVar.getUseList().forEach(updateInfo::rollbackUpdate);
-			}
-			return result;
-		});
+		var updateCallback = updateInfo.acquireArgsListUpdateCallback(this, ssaVar.getUseList(), candidateType, true);
+		updateCallback.setRollbackSsaVarOnReject(ssaVar);
 		return queueDirectTypeUpdate(updateInfo, ssaVar.getAssign(), candidateType, updateCallback);
 	}
 
@@ -364,8 +361,8 @@ public final class TypeUpdate {
 				return false;
 
 			case UNKNOWN:
-				LOG.warn("Can't compare types, unknown hierarchy: {} and {}", candidateType, boundType);
-				comparator.compareTypes(candidateType, boundType);
+				// Missing external or metadata-only classes are expected here and this bound is accepted.
+				LOG.debug("Can't compare types, unknown hierarchy: {} and {}", candidateType, boundType);
 				return true;
 
 			default:
@@ -448,6 +445,9 @@ public final class TypeUpdate {
 
 	private TypeUpdateResult sameFirstArgListener(TypeUpdateInfo updateInfo, InsnNode insn, InsnArg arg, ArgType candidateType) {
 		InsnArg changeArg = isAssign(insn, arg) ? insn.getArg(0) : insn.getResult();
+		if (changeArg == null) {
+			return CHANGED;
+		}
 		if (updateInfo.hasUpdateWithType(changeArg, candidateType)) {
 			return CHANGED;
 		}
@@ -485,10 +485,14 @@ public final class TypeUpdate {
 	 */
 	private TypeUpdateResult allSameListener(TypeUpdateInfo updateInfo, InsnNode insn, InsnArg arg, ArgType candidateType) {
 		if (!isAssign(insn, arg)) {
-			return queueTypeUpdate(updateInfo, insn.getResult(), candidateType, null);
+			RegisterArg result = insn.getResult();
+			if (result == null) {
+				return CHANGED;
+			}
+			return queueTypeUpdate(updateInfo, result, candidateType, null);
 		}
 		// update args with same type
-		var updateCallback = new ArgsListUpdateCallback<>(this, updateInfo, insn.getArgList(), candidateType, false);
+		var updateCallback = updateInfo.acquireArgsListUpdateCallback(this, insn.getArgList(), candidateType, false);
 		updateCallback.setArgsFilter(a -> a != arg);
 		return updateCallback.runFirstQueue();
 	}
@@ -506,7 +510,7 @@ public final class TypeUpdate {
 	 * Try to set candidate type to all args, don't fail on reject
 	 */
 	private TypeUpdateResult suggestAllSameListener(TypeUpdateInfo updateInfo, InsnNode insn, InsnArg arg, ArgType candidateType) {
-		var updateCallback = new ArgsListUpdateCallback<>(this, updateInfo, insn.getArgList(), candidateType, false);
+		var updateCallback = updateInfo.acquireArgsListUpdateCallback(this, insn.getArgList(), candidateType, false);
 		updateCallback.setArgsFilter(a -> a != arg);
 		updateCallback.setIgnoreReject(true);
 		if (!isAssign(insn, arg)) {

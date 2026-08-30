@@ -112,4 +112,9 @@ public enum AFlag {
 
 	RESOLVE_JAVA_JSR,
 	COMPUTE_POST_DOM,
+
+	/**
+	 * Fast mirror for {@link AType#JADX_ERROR} presence.
+	 */
+	JADX_ERROR,
 }

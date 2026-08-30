@@ -1,7 +1,12 @@
 package jadx.core.dex.visitors;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.ConcurrentModificationException;
+import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -50,43 +55,104 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 	}
 
 	private RootNode root;
+	private final Set<MethodNode> processing = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+	private final Map<ClassNode, Map<String, List<MethodNode>>> methodsBySignature = new IdentityHashMap<>();
+	private final Deque<MethodNode> propagationQueue = new ArrayDeque<>();
+	private final Set<MethodNode> queuedForPropagation = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+	private boolean drainingPropagation;
 
 	@Override
 	public void init(RootNode root) throws JadxException {
 		this.root = root;
+		processing.clear();
+		methodsBySignature.clear();
+		propagationQueue.clear();
+		queuedForPropagation.clear();
+		drainingPropagation = false;
 	}
 
 	@Override
-	public void visit(MethodNode mth) throws JadxException {
-		MethodThrowsAttr attr = mth.get(AType.METHOD_THROWS);
-		if (attr == null) {
-			attr = new MethodThrowsAttr(new HashSet<>());
-			mth.addAttr(attr);
-		}
-		if (!attr.isVisited()) {
-			attr.setVisited(true);
-			processInstructions(mth);
-		}
-
-		List<ArgType> invalid = new ArrayList<>();
-		ExceptionsAttr exceptions = mth.get(JadxAttrType.EXCEPTIONS);
-		if (exceptions != null && !exceptions.getList().isEmpty()) {
-			for (String throwsTypeStr : exceptions.getList()) {
-				ArgType excType = ArgType.object(throwsTypeStr);
-				if (validateException(excType) == ExceptionType.NO_EXCEPTION) {
-					invalid.add(excType);
-				} else {
-					attr.getList().add(excType.getObject());
-				}
-			}
-		}
-		if (!invalid.isEmpty()) {
-			mth.addWarnComment("Byte code manipulation detected: skipped illegal throws declarations: " + invalid);
-		}
-		mergeExceptions(attr.getList());
+	public synchronized void visit(MethodNode mth) throws JadxException {
+		visit(mth, mth.isMethodThrowsVisited());
+		drainPropagationQueue();
 	}
 
-	private void mergeExceptions(Set<String> excSet) {
+	private void visit(MethodNode mth, boolean force) throws JadxException {
+		if (!force && mth.isMethodThrowsVisited()) {
+			return;
+		}
+		if (!processing.add(mth)) {
+			return;
+		}
+		try {
+			MethodThrowsAttr attr = mth.get(AType.METHOD_THROWS);
+			int initialSize = attr == null ? 0 : attr.size();
+			processInstructions(mth);
+
+			if (!mth.isMethodThrowsVisited()) {
+				mth.setMethodThrowsVisited(true);
+				List<ArgType> invalid = new ArrayList<>();
+				ExceptionsAttr exceptions = mth.get(JadxAttrType.EXCEPTIONS);
+				if (exceptions != null && !exceptions.getList().isEmpty()) {
+					for (String throwsTypeStr : exceptions.getList()) {
+						ArgType excType = ArgType.object(throwsTypeStr);
+						if (validateException(excType) == ExceptionType.NO_EXCEPTION) {
+							invalid.add(excType);
+						} else {
+							getOrCreateThrowsAttr(mth).add(excType.getObject());
+						}
+					}
+				}
+				if (!invalid.isEmpty()) {
+					mth.addWarnComment("Byte code manipulation detected: skipped illegal throws declarations: " + invalid);
+				}
+			}
+			attr = mth.get(AType.METHOD_THROWS);
+			if (attr != null) {
+				mergeExceptions(attr);
+			}
+			if (attr != null && attr.size() > initialSize) {
+				enqueueProcessedCallers(mth);
+			}
+		} finally {
+			processing.remove(mth);
+		}
+	}
+
+	private void enqueueProcessedCallers(MethodNode mth) {
+		for (MethodNode caller : new ArrayList<>(mth.getUseIn())) {
+			if (caller == null || caller.getBasicBlocks() == null) {
+				continue;
+			}
+			if (caller.isMethodThrowsVisited() && queuedForPropagation.add(caller)) {
+				propagationQueue.addLast(caller);
+			}
+		}
+	}
+
+	private void drainPropagationQueue() throws JadxException {
+		if (drainingPropagation) {
+			return;
+		}
+		drainingPropagation = true;
+		try {
+			while (!propagationQueue.isEmpty()) {
+				MethodNode caller = propagationQueue.removeFirst();
+				queuedForPropagation.remove(caller);
+				if (caller.isMethodThrowsVisited()) {
+					visit(caller, true);
+				}
+			}
+		} finally {
+			drainingPropagation = false;
+		}
+	}
+
+	private void mergeExceptions(MethodThrowsAttr attr) {
+		if (attr.isEmpty()) {
+			return;
+		}
+		Set<String> excSet = attr.getList();
 		if (excSet.contains(Consts.CLASS_EXCEPTION)) {
 			excSet.removeIf(e -> !e.equals(Consts.CLASS_EXCEPTION));
 			return;
@@ -114,25 +180,51 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 			return;
 		}
 		try {
-			blocks: for (BlockNode block : mth.getBasicBlocks()) {
-				// Skip e.g. throw instructions of synchronized regions
-				boolean skipExceptions = block.contains(AFlag.REMOVE) || block.contains(AFlag.DONT_GENERATE);
-				Set<String> excludedExceptions = new HashSet<>();
-				CatchAttr catchAttr = block.get(AType.EXC_CATCH);
-				if (catchAttr != null) {
-					for (ExceptionHandler handler : catchAttr.getHandlers()) {
-						if (handler.isCatchAll()) {
-							continue blocks;
-						}
-						excludedExceptions.add(handler.getArgType().toString());
-					}
-				}
-				for (InsnNode insn : block.getInstructions()) {
-					checkInsn(mth, insn, excludedExceptions, skipExceptions);
-				}
+			scanInstructions(mth, false);
+		} catch (ConcurrentModificationException e) {
+			try {
+				scanInstructions(mth, true);
+			} catch (Exception retryException) {
+				retryException.addSuppressed(e);
+				mth.addWarnComment("Failed to analyze thrown exceptions", retryException);
 			}
 		} catch (Exception e) {
 			mth.addWarnComment("Failed to analyze thrown exceptions", e);
+		}
+	}
+
+	private void scanInstructions(MethodNode mth, boolean snapshot) throws JadxException {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		if (snapshot) {
+			blocks = new ArrayList<>(blocks);
+		}
+		blocks: for (BlockNode block : blocks) {
+			// Skip e.g. throw instructions of synchronized regions
+			boolean skipExceptions = block.contains(AFlag.REMOVE) || block.contains(AFlag.DONT_GENERATE);
+			Set<String> excludedExceptions = java.util.Collections.emptySet();
+			CatchAttr catchAttr = block.get(AType.EXC_CATCH);
+			if (catchAttr != null) {
+				List<ExceptionHandler> handlers = catchAttr.getHandlers();
+				if (snapshot) {
+					handlers = new ArrayList<>(handlers);
+				}
+				for (ExceptionHandler handler : handlers) {
+					if (handler.isCatchAll()) {
+						continue blocks;
+					}
+					if (excludedExceptions.isEmpty()) {
+						excludedExceptions = new HashSet<>();
+					}
+					excludedExceptions.add(handler.getArgType().toString());
+				}
+			}
+			List<InsnNode> instructions = block.getInstructions();
+			if (snapshot) {
+				instructions = new ArrayList<>(instructions);
+			}
+			for (InsnNode insn : instructions) {
+				checkInsn(mth, insn, excludedExceptions, skipExceptions);
+			}
 		}
 	}
 
@@ -166,7 +258,7 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 		if (insn.getType() == InsnType.INVOKE) {
 			InvokeNode invokeNode = (InvokeNode) insn;
 			MethodInfo callMth = invokeNode.getCallMth();
-			String signature = callMth.makeSignature(true);
+			String signature = callMth.makeSignature(false);
 			ClassInfo classInfo = callMth.getDeclClass();
 
 			ClassNode classNode = root.resolveClass(classInfo);
@@ -175,10 +267,8 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 				if (cMth == null) {
 					return;
 				}
-				visit(cMth);
 				MethodThrowsAttr cAttr = cMth.get(AType.METHOD_THROWS);
-				MethodThrowsAttr attr = mth.get(AType.METHOD_THROWS);
-				if (attr != null && cAttr != null && !cAttr.getList().isEmpty()) {
+				if (cAttr != null && !cAttr.getList().isEmpty()) {
 					for (String argTypeStr : cAttr.getList()) {
 						visitThrows(mth, ArgType.object(argTypeStr), excludedExceptions);
 					}
@@ -188,11 +278,8 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 				if (clsDetails != null) {
 					ClspMethod cMth = searchOverriddenMethod(clsDetails, signature);
 					if (cMth != null && cMth.getThrows() != null && !cMth.getThrows().isEmpty()) {
-						MethodThrowsAttr attr = mth.get(AType.METHOD_THROWS);
-						if (attr != null) {
-							for (ArgType argType : cMth.getThrows()) {
-								visitThrows(mth, argType, excludedExceptions);
-							}
+						for (ArgType argType : cMth.getThrows()) {
+							visitThrows(mth, argType, excludedExceptions);
 						}
 					}
 				}
@@ -208,8 +295,17 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 				}
 			}
 
-			mth.get(AType.METHOD_THROWS).getList().add(excType.getObject());
+			getOrCreateThrowsAttr(mth).add(excType.getObject());
 		}
+	}
+
+	private static MethodThrowsAttr getOrCreateThrowsAttr(MethodNode mth) {
+		MethodThrowsAttr attr = mth.get(AType.METHOD_THROWS);
+		if (attr == null) {
+			attr = new MethodThrowsAttr();
+			mth.addAttr(attr);
+		}
+		return attr;
 	}
 
 	private boolean isThrowsRequired(MethodNode mth, ArgType type) {
@@ -255,17 +351,21 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 	}
 
 	private @Nullable MethodNode searchOverriddenMethod(ClassNode cls, MethodInfo mth, String signature) {
-		// search by exact full signature (with return value) to fight obfuscation (see test
-		// 'TestOverrideWithSameName')
-		String shortId = mth.getShortId();
-		for (MethodNode supMth : cls.getMethods()) {
-			if (supMth.getMethodInfo().getShortId().equals(shortId)) {
-				return supMth;
-			}
+		MethodNode exactMethod = cls.searchMethod(mth);
+		if (exactMethod != null) {
+			return exactMethod;
 		}
 		// search by signature without return value and check if return value is wider type
-		for (MethodNode supMth : cls.getMethods()) {
-			if (supMth.getMethodInfo().getShortId().startsWith(signature) && !supMth.getAccessFlags().isStatic()) {
+		Map<String, List<MethodNode>> classIndex = methodsBySignature.computeIfAbsent(cls, classNode -> {
+			Map<String, List<MethodNode>> index = new HashMap<>();
+			for (MethodNode method : classNode.getMethods()) {
+				index.computeIfAbsent(method.getMethodInfo().makeSignature(false), key -> new ArrayList<>())
+						.add(method);
+			}
+			return index;
+		});
+		for (MethodNode supMth : classIndex.getOrDefault(signature, java.util.Collections.emptyList())) {
+			if (!supMth.getAccessFlags().isStatic()) {
 				TypeCompare typeCompare = cls.root().getTypeCompare();
 				ArgType supRetType = supMth.getMethodInfo().getReturnType();
 				ArgType mthRetType = mth.getReturnType();

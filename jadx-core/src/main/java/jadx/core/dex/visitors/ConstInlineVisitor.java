@@ -238,6 +238,11 @@ public class ConstInlineVisitor extends AbstractVisitor {
 
 		if (constArg.isLiteral()) {
 			long literal = ((LiteralArg) constArg).getLiteral();
+			if (literal != 0
+					&& useInsn instanceof BaseInvokeNode
+					&& ((BaseInvokeNode) useInsn).getInstanceArg() == arg) {
+				return false;
+			}
 			ArgType argType = arg.getType();
 			if (argType == ArgType.UNKNOWN) {
 				argType = arg.getInitType();

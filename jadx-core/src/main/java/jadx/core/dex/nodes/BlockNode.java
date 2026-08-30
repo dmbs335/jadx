@@ -34,10 +34,14 @@ public final class BlockNode extends AttrNode implements IBlock, Comparable<Bloc
 	 */
 	private final int startOffset;
 
-	private final List<InsnNode> instructions = new ArrayList<>(2);
+	/*
+	 * Keep the backing arrays lazy. An explicit zero capacity grows to one on the first add,
+	 * unlike the no-arg ArrayList constructor which grows to the default capacity of ten.
+	 */
+	private final List<InsnNode> instructions = new ArrayList<>(0);
 
-	private List<BlockNode> predecessors = new ArrayList<>(1);
-	private List<BlockNode> successors = new ArrayList<>(1);
+	private List<BlockNode> predecessors = new ArrayList<>(0);
+	private List<BlockNode> successors = new ArrayList<>(0);
 	private List<BlockNode> cleanSuccessors;
 
 	/**
@@ -68,7 +72,7 @@ public final class BlockNode extends AttrNode implements IBlock, Comparable<Bloc
 	/**
 	 * Blocks on which dominates this block
 	 */
-	private List<BlockNode> dominatesOn = new ArrayList<>(3);
+	private List<BlockNode> dominatesOn = new ArrayList<>(0);
 
 	public BlockNode(int cid, int pos, int offset) {
 		this.cid = cid;
@@ -142,19 +146,27 @@ public final class BlockNode extends AttrNode implements IBlock, Comparable<Bloc
 		if (sucList.isEmpty()) {
 			return sucList;
 		}
-		List<BlockNode> toRemove = new ArrayList<>(sucList.size());
-		for (BlockNode b : sucList) {
+		List<BlockNode> toRemove = null;
+		int successorsCount = sucList.size();
+		for (int i = 0; i < successorsCount; i++) {
+			BlockNode b = sucList.get(i);
 			if (BlockUtils.isExceptionHandlerPath(b)) {
+				if (toRemove == null) {
+					toRemove = new ArrayList<>(successorsCount);
+				}
 				toRemove.add(b);
 			}
 		}
 		if (block.contains(AFlag.LOOP_END)) {
 			List<LoopInfo> loops = block.getAll(AType.LOOP);
 			for (LoopInfo loop : loops) {
+				if (toRemove == null) {
+					toRemove = new ArrayList<>(loops.size());
+				}
 				toRemove.add(loop.getStart());
 			}
 		}
-		if (toRemove.isEmpty()) {
+		if (toRemove == null) {
 			return sucList;
 		}
 		List<BlockNode> result = new ArrayList<>(sucList);

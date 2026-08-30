@@ -10,6 +10,8 @@ import jadx.core.dex.instructions.args.ArgType;
 public class InfoStorage {
 
 	private final Map<ArgType, ClassInfo> classes = new HashMap<>();
+	private final Map<String, ArgType> types = new HashMap<>();
+	private final Map<String, ClassInfo> classesByInputName = new HashMap<>();
 	private final Map<FieldInfo, FieldInfo> fields = new HashMap<>();
 	// use only one MethodInfo instance
 	private final Map<MethodInfo, MethodInfo> uniqueMethods = new HashMap<>();
@@ -25,6 +27,25 @@ public class InfoStorage {
 	public ClassInfo putCls(ClassInfo cls) {
 		synchronized (classes) {
 			ClassInfo prev = classes.put(cls.getType(), cls);
+			return prev == null ? cls : prev;
+		}
+	}
+
+	public ArgType getType(String type) {
+		synchronized (types) {
+			return types.computeIfAbsent(type, ArgType::parse);
+		}
+	}
+
+	public @Nullable ClassInfo getClsByInputName(String name) {
+		synchronized (classesByInputName) {
+			return classesByInputName.get(name);
+		}
+	}
+
+	public ClassInfo putClsByInputName(String name, ClassInfo cls) {
+		synchronized (classesByInputName) {
+			ClassInfo prev = classesByInputName.putIfAbsent(name, cls);
 			return prev == null ? cls : prev;
 		}
 	}

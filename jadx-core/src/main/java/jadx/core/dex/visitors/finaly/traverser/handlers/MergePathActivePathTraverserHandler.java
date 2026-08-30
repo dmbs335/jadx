@@ -26,6 +26,7 @@ import jadx.core.dex.visitors.finaly.traverser.state.TraverserState;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public final class MergePathActivePathTraverserHandler extends AbstractActivePathTraverserHandler {
+	private static final int MAX_ROOTS_FOR_EXHAUSTIVE_PERMUTATION = 8;
 
 	private static TraverserActivePathState createNonMatchingTerminator(TraverserActivePathState state) {
 		TraverserStateFactory<TerminalTraverserState> finallyStateFactory =
@@ -207,6 +208,9 @@ public final class MergePathActivePathTraverserHandler extends AbstractActivePat
 	}
 
 	public static List<BlockNode[]> getAllPermutationsOfCollection(Collection<BlockNode> elements) {
+		if (elements.size() > MAX_ROOTS_FOR_EXHAUSTIVE_PERMUTATION) {
+			return List.of();
+		}
 		Stack<BlockNode> permutationStack = new Stack<>();
 		List<BlockNode[]> permutations = new ArrayList<>();
 		permutations(permutations, elements, permutationStack, elements.size());

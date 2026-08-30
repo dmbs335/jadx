@@ -79,9 +79,24 @@ public class NameMapper {
 	}
 
 	public static boolean isValidIdentifier(String str) {
-		return notEmpty(str)
-				&& !isReserved(str)
-				&& VALID_JAVA_IDENTIFIER.matcher(str).matches();
+		if (!notEmpty(str) || isReserved(str)) {
+			return false;
+		}
+		int length = str.length();
+		int offset = 0;
+		int codePoint = str.codePointAt(offset);
+		if (!isValidIdentifierStart(codePoint)) {
+			return false;
+		}
+		offset += Character.charCount(codePoint);
+		while (offset < length) {
+			codePoint = str.codePointAt(offset);
+			if (!isValidIdentifierPart(codePoint)) {
+				return false;
+			}
+			offset += Character.charCount(codePoint);
+		}
+		return true;
 	}
 
 	public static boolean isValidFullIdentifier(String str) {

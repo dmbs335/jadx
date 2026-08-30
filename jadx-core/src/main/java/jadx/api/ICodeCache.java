@@ -14,6 +14,15 @@ public interface ICodeCache extends Closeable {
 	@NotNull
 	ICodeInfo get(String clsFullName);
 
+	/**
+	 * Load code metadata while reusing a code string already held by an outer cache layer.
+	 * Implementations without a split code/metadata store can ignore {@code knownCode}.
+	 */
+	@NotNull
+	default ICodeInfo getWithKnownCode(String clsFullName, @Nullable String knownCode) {
+		return get(clsFullName);
+	}
+
 	@Nullable
 	String getCode(String clsFullName);
 

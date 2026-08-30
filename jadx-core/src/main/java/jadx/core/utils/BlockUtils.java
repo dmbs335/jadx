@@ -44,8 +44,34 @@ import jadx.core.utils.blocks.DFSIteration;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public class BlockUtils {
+	private static final int PATH_CACHE_INITIAL_CAPACITY = 64;
+	private static final int PATH_CACHE_MAX_ENTRIES = 16_384;
+
+	private static final ThreadLocal<ArrayDeque<BitSet>> PATH_VISITED_POOL =
+			ThreadLocal.withInitial(ArrayDeque::new);
+	private static final ThreadLocal<PathCache> ACTIVE_PATH_CACHE = new ThreadLocal<>();
+	private static final ThreadLocal<ArrayDeque<PathCache>> PATH_CACHE_POOL =
+			ThreadLocal.withInitial(ArrayDeque::new);
 
 	private BlockUtils() {
+	}
+
+	public static PathCacheScope enterPathCache() {
+		ArrayDeque<PathCache> pool = PATH_CACHE_POOL.get();
+		PathCache cache = pool.pollLast();
+		if (cache == null) {
+			cache = new PathCache();
+		}
+		cache.open(ACTIVE_PATH_CACHE.get());
+		ACTIVE_PATH_CACHE.set(cache);
+		return cache;
+	}
+
+	public static void invalidatePathCache() {
+		PathCache cache = ACTIVE_PATH_CACHE.get();
+		if (cache != null) {
+			cache.clear();
+		}
 	}
 
 	public static BlockNode getBlockByOffset(int offset, Iterable<BlockNode> casesBlocks) {
@@ -712,6 +738,52 @@ public class BlockUtils {
 		return traverseSuccessorsUntil(from, until, visited, clean, b -> true);
 	}
 
+	private static boolean traverseSuccessorsUntilPooled(BlockNode from, BlockNode until, boolean clean) {
+		PathCache cache = ACTIVE_PATH_CACHE.get();
+		long cacheKey = 0;
+		if (cache != null) {
+			cacheKey = pathCacheKey(from, until);
+			byte cached = cache.get(cacheKey, clean);
+			if (cached != PathResultMap.ABSENT) {
+				return cached == PathResultMap.TRUE;
+			}
+		}
+		ArrayDeque<BitSet> pool = PATH_VISITED_POOL.get();
+		BitSet visited = pool.pollLast();
+		if (visited == null) {
+			visited = new BitSet();
+		}
+		try {
+			boolean result = traverseSuccessorsUntil(from, until, visited, clean);
+			if (cache != null) {
+				cache.put(cacheKey, clean, result);
+			}
+			return result;
+		} finally {
+			visited.clear();
+			pool.addLast(visited);
+		}
+	}
+
+	private static long pathCacheKey(BlockNode from, BlockNode until) {
+		return ((long) from.getCId() << 32) | Integer.toUnsignedLong(until.getCId());
+	}
+
+	private static boolean traverseSuccessorsUntilPooled(BlockNode from, BlockNode until, boolean clean,
+			Predicate<BlockNode> pred) {
+		ArrayDeque<BitSet> pool = PATH_VISITED_POOL.get();
+		BitSet visited = pool.pollLast();
+		if (visited == null) {
+			visited = new BitSet();
+		}
+		try {
+			return traverseSuccessorsUntil(from, until, visited, clean, pred);
+		} finally {
+			visited.clear();
+			pool.addLast(visited);
+		}
+	}
+
 	/**
 	 *
 	 * Traverse succcessors until a node is found
@@ -728,7 +800,9 @@ public class BlockUtils {
 	private static boolean traverseSuccessorsUntil(BlockNode from, BlockNode until, BitSet visited, boolean clean,
 			Predicate<BlockNode> pred) {
 		List<BlockNode> nodes = clean ? from.getCleanSuccessors() : from.getSuccessors();
-		for (BlockNode s : nodes) {
+		int nodesCount = nodes.size();
+		for (int i = 0; i < nodesCount; i++) {
+			BlockNode s = nodes.get(i);
 			if (!pred.test(s)) {
 				// Only explore blocks such that the predicate holds
 				continue;
@@ -842,7 +916,7 @@ public class BlockUtils {
 				|| start.getCleanSuccessors().contains(end)) {
 			return true;
 		}
-		return traverseSuccessorsUntil(start, end, new BitSet(), true);
+		return traverseSuccessorsUntilPooled(start, end, true);
 	}
 
 	public static boolean isAnyPathExists(BlockNode start, BlockNode end) {
@@ -851,14 +925,137 @@ public class BlockUtils {
 				|| start.getSuccessors().contains(end)) {
 			return true;
 		}
-		return traverseSuccessorsUntil(start, end, new BitSet(), false);
+		return traverseSuccessorsUntilPooled(start, end, false);
 	}
 
 	public static boolean isPathExists(BlockNode start, BlockNode end, Predicate<BlockNode> pred) {
 		if (start == end) {
 			return true;
 		}
-		return traverseSuccessorsUntil(start, end, new BitSet(), false, pred);
+		return traverseSuccessorsUntilPooled(start, end, false, pred);
+	}
+
+	public interface PathCacheScope extends AutoCloseable {
+		@Override
+		void close();
+	}
+
+	private static final class PathCache implements PathCacheScope {
+		private final PathResultMap cleanPaths = new PathResultMap();
+		private final PathResultMap allPaths = new PathResultMap();
+		private PathCache previous;
+
+		private void open(PathCache previous) {
+			this.previous = previous;
+			clear();
+		}
+
+		private byte get(long key, boolean clean) {
+			return (clean ? cleanPaths : allPaths).get(key);
+		}
+
+		private void put(long key, boolean clean, boolean value) {
+			(clean ? cleanPaths : allPaths).put(key, value);
+		}
+
+		private void clear() {
+			cleanPaths.clear();
+			allPaths.clear();
+		}
+
+		@Override
+		public void close() {
+			if (previous == null) {
+				ACTIVE_PATH_CACHE.remove();
+			} else {
+				ACTIVE_PATH_CACHE.set(previous);
+			}
+			previous = null;
+			PATH_CACHE_POOL.get().addLast(this);
+		}
+	}
+
+	private static final class PathResultMap {
+		private static final byte ABSENT = 0;
+		private static final byte FALSE = 1;
+		private static final byte TRUE = 2;
+
+		private long[] keys = new long[PATH_CACHE_INITIAL_CAPACITY];
+		private byte[] values = new byte[PATH_CACHE_INITIAL_CAPACITY];
+		private int[] stamps = new int[PATH_CACHE_INITIAL_CAPACITY];
+		private int generation = 1;
+		private int size;
+
+		private byte get(long key) {
+			int mask = keys.length - 1;
+			int index = hash(key) & mask;
+			while (stamps[index] == generation) {
+				if (keys[index] == key) {
+					return values[index];
+				}
+				index = (index + 1) & mask;
+			}
+			return ABSENT;
+		}
+
+		private void put(long key, boolean value) {
+			if (size >= PATH_CACHE_MAX_ENTRIES) {
+				return;
+			}
+			if ((size + 1) * 3 >= keys.length * 2) {
+				grow();
+			}
+			insert(key, value ? TRUE : FALSE);
+		}
+
+		private void insert(long key, byte value) {
+			int mask = keys.length - 1;
+			int index = hash(key) & mask;
+			while (stamps[index] == generation) {
+				if (keys[index] == key) {
+					values[index] = value;
+					return;
+				}
+				index = (index + 1) & mask;
+			}
+			keys[index] = key;
+			values[index] = value;
+			stamps[index] = generation;
+			size++;
+		}
+
+		private void grow() {
+			long[] oldKeys = keys;
+			byte[] oldValues = values;
+			int[] oldStamps = stamps;
+			int oldGeneration = generation;
+			keys = new long[oldKeys.length << 1];
+			values = new byte[keys.length];
+			stamps = new int[keys.length];
+			generation = 1;
+			size = 0;
+			for (int i = 0; i < oldKeys.length; i++) {
+				if (oldStamps[i] == oldGeneration) {
+					insert(oldKeys[i], oldValues[i]);
+				}
+			}
+		}
+
+		private void clear() {
+			size = 0;
+			generation++;
+			if (generation == 0) {
+				Arrays.fill(stamps, 0);
+				generation = 1;
+			}
+		}
+
+		private static int hash(long value) {
+			value ^= value >>> 33;
+			value *= 0xff51afd7ed558ccdL;
+			value ^= value >>> 33;
+			return (int) value;
+		}
 	}
 
 	public static BlockNode getTopBlock(List<BlockNode> blocks) {
@@ -1051,6 +1248,7 @@ public class BlockUtils {
 			return oneBlock;
 		}
 		BitSet combinedDF = newBlocksBitSet(mth);
+		BitSetCycleDetector cycleDetector = new BitSetCycleDetector(domFrontBS);
 		int k = mth.getBasicBlocks().size();
 		while (true) {
 			// collect dom frontier blocks from current set until only one block left
@@ -1066,6 +1264,11 @@ public class BlockUtils {
 				return bitSetToOneBlock(mth, combinedDF);
 			}
 			if (cardinality == 0) {
+				return null;
+			}
+			if (cycleDetector.update(combinedDF)) {
+				mth.addDebugComment("Path cross search reached a dominance frontier cycle (length "
+						+ cycleDetector.getCycleLength() + "): " + combinedDF);
 				return null;
 			}
 			if (k-- < 0) {
@@ -1473,11 +1676,15 @@ public class BlockUtils {
 	}
 
 	public static BlockNode getTopSplitterForHandler(BlockNode handlerBlock) {
-		BlockNode block = getBlockWithFlag(handlerBlock.getPredecessors(), AFlag.EXC_TOP_SPLITTER);
+		BlockNode block = findTopSplitterForHandler(handlerBlock);
 		if (block == null) {
 			throw new JadxRuntimeException("Can't find top splitter block for handler:" + handlerBlock);
 		}
 		return block;
+	}
+
+	public static @Nullable BlockNode findTopSplitterForHandler(BlockNode handlerBlock) {
+		return getBlockWithFlag(handlerBlock.getPredecessors(), AFlag.EXC_TOP_SPLITTER);
 	}
 
 	/**
@@ -1492,7 +1699,10 @@ public class BlockUtils {
 	@Nullable
 	public static BlockNode getTryAndHandlerCrossBlock(MethodNode mth, ExceptionHandler handler) {
 		BlockNode start = handler.getHandlerBlock();
-		BlockNode topSplitter = BlockUtils.getTopSplitterForHandler(start);
+		BlockNode topSplitter = BlockUtils.findTopSplitterForHandler(start);
+		if (topSplitter == null) {
+			return null;
+		}
 		List<ExceptionHandler> allHandlers = handler.getTryBlock().getHandlers();
 		List<BlockNode> handlerExitsCandidate = new ArrayList<>(BlockUtils.bitSetToBlocks(mth, start.getDomFrontier()));
 		BitSet visited = newBlocksBitSet(mth);
@@ -1610,6 +1820,34 @@ public class BlockUtils {
 			}
 		}
 		return true;
+	}
+
+	static final class BitSetCycleDetector {
+		private final BitSet checkpoint;
+		private int power = 1;
+		private int length;
+
+		BitSetCycleDetector(BitSet initialState) {
+			this.checkpoint = (BitSet) initialState.clone();
+		}
+
+		boolean update(BitSet nextState) {
+			length++;
+			if (nextState.equals(checkpoint)) {
+				return true;
+			}
+			if (length == power) {
+				checkpoint.clear();
+				checkpoint.or(nextState);
+				power *= 2;
+				length = 0;
+			}
+			return false;
+		}
+
+		int getCycleLength() {
+			return length;
+		}
 	}
 
 	private static boolean isInsnDeepEquals(InsnNode first, InsnNode second) {

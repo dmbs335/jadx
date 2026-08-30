@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 
 import jadx.api.CommentsLevel;
 import jadx.api.JadxArgs;
+import jadx.core.deobf.DeobfPresets;
 import jadx.core.deobf.DeobfuscatorVisitor;
 import jadx.core.deobf.SaveDeobfMapping;
 import jadx.core.dex.attributes.AFlag;
@@ -18,6 +19,7 @@ import jadx.core.dex.visitors.AttachCommentsVisitor;
 import jadx.core.dex.visitors.AttachMethodDetails;
 import jadx.core.dex.visitors.AttachTryCatchVisitor;
 import jadx.core.dex.visitors.CheckCode;
+import jadx.core.dex.visitors.CompactMethodOverrideSets;
 import jadx.core.dex.visitors.ClassModifier;
 import jadx.core.dex.visitors.ConstInlineVisitor;
 import jadx.core.dex.visitors.ConstructorVisitor;
@@ -31,7 +33,9 @@ import jadx.core.dex.visitors.GenericTypesVisitor;
 import jadx.core.dex.visitors.IDexTreeVisitor;
 import jadx.core.dex.visitors.InitCodeVariables;
 import jadx.core.dex.visitors.InlineMethods;
+import jadx.core.dex.visitors.MarkCoroutineStateMachine;
 import jadx.core.dex.visitors.MarkMethodsForInline;
+import jadx.core.dex.visitors.MarkReadOnlyMethods;
 import jadx.core.dex.visitors.MethodInvokeVisitor;
 import jadx.core.dex.visitors.MethodThrowsVisitor;
 import jadx.core.dex.visitors.MethodVisitor;
@@ -43,6 +47,7 @@ import jadx.core.dex.visitors.ProcessAnonymous;
 import jadx.core.dex.visitors.ProcessInstructionsVisitor;
 import jadx.core.dex.visitors.ProcessMethodsForInline;
 import jadx.core.dex.visitors.ReplaceNewArray;
+import jadx.core.dex.visitors.SameSourcePhiMoveVisitor;
 import jadx.core.dex.visitors.ShadowFieldVisitor;
 import jadx.core.dex.visitors.SignatureProcessor;
 import jadx.core.dex.visitors.SimplifyVisitor;
@@ -73,6 +78,7 @@ import jadx.core.dex.visitors.shrink.CodeShrinkVisitor;
 import jadx.core.dex.visitors.ssa.SSATransform;
 import jadx.core.dex.visitors.typeinference.FinishTypeInference;
 import jadx.core.dex.visitors.typeinference.FixTypesVisitor;
+import jadx.core.dex.visitors.typeinference.ReportTypeInferenceWarnings;
 import jadx.core.dex.visitors.typeinference.TypeInferenceVisitor;
 import jadx.core.dex.visitors.usage.UsageInfoVisitor;
 import jadx.core.utils.JadxBuildInfo;
@@ -100,20 +106,22 @@ public class Jadx {
 
 	public static List<IDexTreeVisitor> getPreDecompilePassesList() {
 		List<IDexTreeVisitor> passes = new ArrayList<>();
+		DeobfPresets.ReapplyData deobfReapplyData = new DeobfPresets.ReapplyData();
 		passes.add(new SignatureProcessor());
 		passes.add(new OverrideMethodVisitor());
+		passes.add(new CompactMethodOverrideSets());
 		passes.add(new AddAndroidConstants());
 
 		// rename and deobfuscation
-		passes.add(new DeobfuscatorVisitor());
+		passes.add(new DeobfuscatorVisitor(deobfReapplyData));
 		passes.add(new SourceFileRename());
 		passes.add(new RenameVisitor());
-		passes.add(new SaveDeobfMapping());
 
 		passes.add(new UsageInfoVisitor());
 		passes.add(new CollectConstValues());
 		passes.add(new ProcessAnonymous());
 		passes.add(new ProcessMethodsForInline());
+		passes.add(new SaveDeobfMapping(deobfReapplyData));
 		return passes;
 	}
 
@@ -139,6 +147,7 @@ public class Jadx {
 			passes.add(DotGraphVisitor.dumpRaw());
 		}
 
+		passes.add(new MarkCoroutineStateMachine());
 		passes.add(new SSATransform());
 		passes.add(new MoveInlineVisitor());
 		passes.add(new ConstructorVisitor());
@@ -153,6 +162,7 @@ public class Jadx {
 		}
 		passes.add(new FixTypesVisitor());
 		passes.add(new FinishTypeInference());
+		passes.add(new SameSourcePhiMoveVisitor());
 
 		passes.add(new AdjustForIfMergeVisitor());
 
@@ -170,6 +180,7 @@ public class Jadx {
 		passes.add(new ModVisitor());
 		passes.add(new CodeShrinkVisitor());
 		passes.add(new ReplaceNewArray());
+		passes.add(new MarkReadOnlyMethods());
 		if (args.isCfgOutput()) {
 			passes.add(DotGraphVisitor.dump());
 		}
@@ -204,6 +215,7 @@ public class Jadx {
 		}
 		passes.add(new ProcessVariables());
 		passes.add(new ApplyVariableNames());
+		passes.add(new ReportTypeInferenceWarnings());
 
 		passes.add(new PrepareForCodeGen());
 		if (args.isCfgOutput()) {
@@ -230,6 +242,7 @@ public class Jadx {
 		}
 		passes.add(new MethodVisitor("DisableBlockLock", mth -> mth.add(AFlag.DISABLE_BLOCKS_LOCK)));
 		passes.add(new BlockProcessor());
+		passes.add(new MarkCoroutineStateMachine());
 		passes.add(new SSATransform());
 		passes.add(new MoveInlineVisitor());
 		passes.add(new ConstructorVisitor());
@@ -248,6 +261,7 @@ public class Jadx {
 		passes.add(new ReplaceNewArray());
 		passes.add(new SimplifyVisitor());
 		passes.add(new MethodVisitor("ForceGenerateAll", mth -> mth.remove(AFlag.DONT_GENERATE)));
+		passes.add(new ReportTypeInferenceWarnings());
 		if (args.isCfgOutput()) {
 			passes.add(DotGraphVisitor.dump());
 		}

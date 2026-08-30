@@ -112,7 +112,7 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 				if (cutHandlerBlocks == null) {
 					continue;
 				}
-				if (attemptRemoveImplicitHandlers(cutHandlerBlocks, tryInfo)) {
+				if (attemptRemoveImplicitHandlers(mth, cutHandlerBlocks, tryInfo)) {
 					implicitHandlerRemoved = true;
 				} else {
 					processRequiredTryBlocks.add(tryBlock);
@@ -226,7 +226,7 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 
 		BlockNode bottomBlock = BlockUtils.getBottomBlock(handlerBlocks);
 		if (bottomBlock == null) {
-			mth.addWarn("Bottom block not found for handler: " + handler);
+			LOG.debug("Bottom block not found for handler: {}, skip finally extraction in method: {}", handler, mth);
 			return handlerBlocks;
 		}
 		List<BlockNode> pathExits = BlockUtils.followEmptyUpPathWithinSet(bottomBlock, handlerBlocks);
@@ -242,7 +242,7 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 					&& handlerFinalInsn != null
 					&& bottomBlockLastInsn.getType() == InsnType.THROW
 					&& bottomBlockLastInsn.getArgsCount() > 0
-					&& bottomBlockLastInsn.getArg(0).equals(handlerFinalInsn.getResult());
+					&& isSameThrowableValue(bottomBlockLastInsn.getArg(0), handlerFinalInsn.getResult());
 			if (!isValidPathExit) {
 				return handlerBlocks;
 			}
@@ -256,19 +256,129 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		return cutHandlerBlocks;
 	}
 
+	private static boolean isSameThrowableValue(InsnArg throwArg, RegisterArg catchArg) {
+		if (catchArg == null) {
+			return false;
+		}
+		if (throwArg.equals(catchArg)) {
+			return true;
+		}
+		if (!throwArg.isRegister()) {
+			return false;
+		}
+		SSAVar catchVar = catchArg.getSVar();
+		if (catchVar == null) {
+			return false;
+		}
+		List<RegisterArg> pending = new ArrayList<>();
+		pending.add((RegisterArg) throwArg);
+		Set<SSAVar> visited = new HashSet<>();
+		boolean catchVarFound = false;
+		for (int pos = 0; pos < pending.size(); pos++) {
+			RegisterArg arg = pending.get(pos);
+			SSAVar ssaVar = arg.getSVar();
+			if (ssaVar == null || !visited.add(ssaVar)) {
+				continue;
+			}
+			if (ssaVar == catchVar) {
+				catchVarFound = true;
+			}
+			InsnNode assignInsn = ssaVar.getAssignInsn();
+			if (assignInsn == null) {
+				return false;
+			}
+			switch (assignInsn.getType()) {
+				case MOVE_EXCEPTION:
+					break;
+
+				case MOVE:
+				case PHI:
+					for (InsnArg sourceArg : assignInsn.getArguments()) {
+						if (!sourceArg.isRegister()) {
+							return false;
+						}
+						pending.add((RegisterArg) sourceArg);
+					}
+					break;
+
+				default:
+					return false;
+			}
+		}
+		return catchVarFound;
+	}
+
 	/**
 	 * Attempts to identify and remove an implicit try catch block.
 	 *
 	 * @param cutHandlerBlocks The cut handler blocks of the all handler.
 	 * @return Whether the try block is implicit and has been removed.
 	 */
-	private static boolean attemptRemoveImplicitHandlers(List<BlockNode> cutHandlerBlocks, TryExtractInfo tryInfo) {
-		if (!(cutHandlerBlocks.isEmpty() || BlockUtils.isAllBlocksEmpty(cutHandlerBlocks))) {
+	private static boolean attemptRemoveImplicitHandlers(
+			MethodNode mth, List<BlockNode> cutHandlerBlocks, TryExtractInfo tryInfo) {
+		if (!(cutHandlerBlocks.isEmpty()
+				|| BlockUtils.isAllBlocksEmpty(cutHandlerBlocks)
+				|| isForwardingOnlyHandler(
+						mth, cutHandlerBlocks, tryInfo.tryBlock.getBlocks().size() == 1))) {
+			return false;
+		}
+		if (handlerCanCompleteNormally(tryInfo.finallyHandler.getHandlerBlock())) {
+			// A catch-all which swallows the exception and reaches a normal return is observable
+			// program behavior. Handler-scope recovery can be empty for nested monitor regions,
+			// so an empty cut alone is not sufficient proof that the handler is implicit.
 			return false;
 		}
 		// remove empty catch
 		tryInfo.finallyHandler.getTryBlock().removeHandler(tryInfo.finallyHandler);
 		return true;
+	}
+
+	/**
+	 * A pure exception-forwarding handler is implicit. For a narrow declared-synchronized try, the
+	 * compiler's {@code monitor-exit this} is also implicit because the generated Java method keeps
+	 * the synchronized modifier and releases the same monitor on exceptional exit.
+	 */
+	private static boolean isForwardingOnlyHandler(
+			MethodNode mth, List<BlockNode> handlerBlocks, boolean narrowTry) {
+		for (BlockNode block : handlerBlocks) {
+			for (InsnNode insn : block.getInstructions()) {
+				InsnType type = insn.getType();
+				if (type == InsnType.MOVE || type == InsnType.PHI || type == InsnType.GOTO) {
+					continue;
+				}
+				if (type != InsnType.MONITOR_EXIT
+						|| !narrowTry
+						|| !mth.getAccessFlags().isSynchronized()
+						|| insn.getArgsCount() != 1
+						|| !insn.getArg(0).equals(mth.getThisArg())) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private static boolean handlerCanCompleteNormally(BlockNode handlerBlock) {
+		Set<BlockNode> visited = new HashSet<>();
+		LinkedList<BlockNode> queue = new LinkedList<>();
+		queue.add(handlerBlock);
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (!visited.add(block)) {
+				continue;
+			}
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null) {
+				if (lastInsn.getType() == InsnType.RETURN) {
+					return true;
+				}
+				if (lastInsn.getType() == InsnType.THROW) {
+					continue;
+				}
+			}
+			queue.addAll(block.getCleanSuccessors());
+		}
+		return false;
 	}
 
 	/**

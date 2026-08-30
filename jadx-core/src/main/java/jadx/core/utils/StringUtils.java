@@ -64,9 +64,18 @@ public class StringUtils {
 			return;
 		}
 		if (isEscapeNeededForCodePoint(codePoint)) {
-			res.append("\\u").append(String.format("%04x", codePoint));
+			appendUnicodeEscape(res, codePoint);
 		} else {
 			res.appendCodePoint(codePoint);
+		}
+	}
+
+	private static void appendUnicodeEscape(StringBuilder res, int codePoint) {
+		res.append("\\u");
+		int shift = Math.max(12, (31 - Integer.numberOfLeadingZeros(codePoint)) & ~3);
+		for (; shift >= 0; shift -= 4) {
+			int digit = (codePoint >>> shift) & 0xF;
+			res.append((char) (digit < 10 ? '0' + digit : 'a' + digit - 10));
 		}
 	}
 

@@ -206,13 +206,21 @@ public class BlockExceptionHandler {
 		if (blocksByHandler.isEmpty()) {
 			// no catch blocks -> remove all handlers
 			mth.getExceptionHandlers().forEach(eh -> removeExcHandler(mth, eh));
+			markRemovedHandlerTails(mth);
 		} else {
-			// remove handlers without blocks in catch attribute
-			blocksByHandler.forEach((eh, blocks) -> {
-				if (blocks.isEmpty()) {
+			// The map contains only handlers found on instructions that can still throw.
+			// Remove input handlers absent from it before their temporary entry edge is detached,
+			// otherwise their non-empty handler body becomes an unreachable CFG fragment.
+			boolean[] removedHandler = { false };
+			mth.getExceptionHandlers().forEach(eh -> {
+				if (!blocksByHandler.containsKey(eh)) {
 					removeExcHandler(mth, eh);
+					removedHandler[0] = true;
 				}
 			});
+			if (removedHandler[0]) {
+				markRemovedHandlerTails(mth);
+			}
 		}
 		BlockSplitter.detachMarkedBlocks(mth);
 		mth.clearExceptionHandlers();
@@ -249,6 +257,31 @@ public class BlockExceptionHandler {
 			tryBlocks.forEach(tryBlock -> LOG.debug(" {}", tryBlock));
 		}
 		return tryBlocks;
+	}
+
+	/**
+	 * Exception handlers for non-throwing try bodies can share a common tail. None of the individual
+	 * handlers dominates that tail, so marking the removed handler roots alone leaves the tail as a
+	 * detached non-empty block. Extend the removal set only across blocks whose every incoming edge is
+	 * already being removed. A merge which still has a live predecessor is therefore preserved.
+	 */
+	private static void markRemovedHandlerTails(MethodNode mth) {
+		boolean changed;
+		do {
+			changed = false;
+			for (BlockNode block : mth.getBasicBlocks()) {
+				if (block.contains(AFlag.REMOVE)
+						|| block.contains(AFlag.MTH_ENTER_BLOCK)
+						|| block.contains(AFlag.MTH_EXIT_BLOCK)
+						|| block.getPredecessors().isEmpty()) {
+					continue;
+				}
+				if (block.getPredecessors().stream().allMatch(pred -> pred.contains(AFlag.REMOVE))) {
+					block.add(AFlag.REMOVE);
+					changed = true;
+				}
+			}
+		} while (changed);
 	}
 
 	private static void clearTryBlocks(MethodNode mth, List<TryCatchBlockAttr> tryBlocks) {
@@ -498,6 +531,9 @@ public class BlockExceptionHandler {
 			@Nullable BlockNode bottomSplitterBlock) {
 		for (ExceptionHandler handler : tryCatchBlock.getHandlers()) {
 			BlockNode handlerBlock = handler.getHandlerBlock();
+			if (handlerBlock == null) {
+				continue;
+			}
 			BlockSplitter.connect(topSplitterBlock, handlerBlock);
 			if (bottomSplitterBlock != null) {
 				BlockSplitter.connect(bottomSplitterBlock, handlerBlock);

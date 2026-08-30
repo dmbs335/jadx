@@ -15,6 +15,7 @@ import jadx.api.ICodeWriter;
 import jadx.api.JadxArgs;
 import jadx.api.impl.AnnotatedCodeWriter;
 import jadx.api.impl.SimpleCodeWriter;
+import jadx.api.metadata.ICodeAnnotation;
 import jadx.api.metadata.ICodeMetadata;
 import jadx.api.metadata.annotations.InsnCodeOffset;
 import jadx.core.codegen.ClassGen;
@@ -174,15 +175,27 @@ public class JsonCodeGen {
 		} catch (Exception e) {
 			throw new JadxRuntimeException("Method generation error", e);
 		}
-		ICodeInfo code = cw.finish();
-		String codeStr = code.getCodeStr();
+		String codeStr;
+		Map<Integer, Integer> lineMapping;
+		Map<Integer, ICodeAnnotation> annotations;
+		ICodeMetadata metadata = null;
+		if (cw instanceof AnnotatedCodeWriter) {
+			AnnotatedCodeWriter annotatedWriter = (AnnotatedCodeWriter) cw;
+			codeStr = annotatedWriter.getCodeStr();
+			lineMapping = annotatedWriter.getRawLineMapping();
+			annotations = annotatedWriter.getRawAnnotations();
+		} else {
+			ICodeInfo code = cw.finish();
+			codeStr = code.getCodeStr();
+			metadata = code.getCodeMetadata();
+			lineMapping = metadata.getLineMapping();
+			annotations = Collections.emptyMap();
+		}
 		if (codeStr.isEmpty()) {
 			return Collections.emptyList();
 		}
 
 		String[] lines = codeStr.split(args.getCodeNewLineStr());
-		Map<Integer, Integer> lineMapping = code.getCodeMetadata().getLineMapping();
-		ICodeMetadata metadata = code.getCodeMetadata();
 		long mthCodeOffset = mth.getMethodCodeOffset() + 16;
 
 		int linesCount = lines.length;
@@ -195,7 +208,7 @@ public class JsonCodeGen {
 			JsonCodeLine jsonCodeLine = new JsonCodeLine();
 			jsonCodeLine.setCode(codeLine);
 			jsonCodeLine.setSourceLine(lineMapping.get(line));
-			Object obj = metadata.getAt(lineStartPos);
+			Object obj = metadata == null ? annotations.get(lineStartPos) : metadata.getAt(lineStartPos);
 			if (obj instanceof InsnCodeOffset) {
 				long offset = ((InsnCodeOffset) obj).getOffset();
 				jsonCodeLine.setOffset("0x" + Long.toHexString(mthCodeOffset + offset * 2));

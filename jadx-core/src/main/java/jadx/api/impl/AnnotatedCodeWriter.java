@@ -5,6 +5,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
 
+import org.jetbrains.annotations.ApiStatus;
+
 import jadx.api.ICodeInfo;
 import jadx.api.ICodeWriter;
 import jadx.api.JadxArgs;
@@ -158,5 +160,10 @@ public class AnnotatedCodeWriter extends SimpleCodeWriter implements ICodeWriter
 	@Override
 	public Map<Integer, ICodeAnnotation> getRawAnnotations() {
 		return annotations;
+	}
+
+	@ApiStatus.Internal
+	public Map<Integer, Integer> getRawLineMapping() {
+		return lineMap;
 	}
 }

@@ -2,8 +2,8 @@ package jadx.core.dex.nodes;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -42,6 +42,8 @@ import jadx.core.dex.nodes.utils.TypeUtils;
 import jadx.core.dex.regions.Region;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.visitors.InitCodeVariables;
+import jadx.core.utils.ListUtils;
+import jadx.core.utils.SmallSet;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.DecodeException;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -88,9 +90,11 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 	// Unresolved methods that use this method
 	private List<MethodInfo> unresolvedUsed = Collections.emptyList();
 	// Methods that this method uses
-	private Set<MethodNode> methodsUsed = new HashSet<>();
+	private Set<MethodNode> methodsUsed = Collections.emptySet();
 	// True if this method contains a self call
 	private boolean callsSelf = false;
+	// Keep pass state on the method so methods without checked exceptions don't need an attribute object.
+	private boolean methodThrowsVisited;
 
 	private JavaMethod javaNode;
 
@@ -140,12 +144,13 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 	}
 
 	public void updateTypes(List<ArgType> argTypes, ArgType retType) {
-		this.argTypes = argTypes;
+		this.argTypes = lockList(argTypes);
 		this.retType = retType;
 	}
 
 	public void updateTypeParameters(List<ArgType> typeParameters) {
-		this.typeParameters = typeParameters;
+		this.typeParameters = lockList(typeParameters);
+		remove(AType.METHOD_TYPE_VARS);
 	}
 
 	@Override
@@ -165,6 +170,14 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 
 			this.regsCount = codeReader.getRegistersCount();
 			this.argsStartReg = codeReader.getArgsStartReg();
+			if (argsStartReg != -1) {
+				int requiredRegsCount = getRequiredRegistersCount(argsStartReg, argTypes, accFlags.isStatic());
+				if (regsCount < requiredRegsCount) {
+					addDebugComment("Expanded malformed register frame from " + regsCount
+							+ " to " + requiredRegsCount + " to cover method arguments");
+					regsCount = requiredRegsCount;
+				}
+			}
 			initArguments(this.argTypes);
 
 			if (contains(AType.JADX_ERROR)) {
@@ -185,6 +198,14 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 			throw new DecodeException(this, "Load method exception: "
 					+ e.getClass().getSimpleName() + ": " + e.getMessage(), e);
 		}
+	}
+
+	static int getRequiredRegistersCount(int argsStartReg, List<ArgType> args, boolean isStatic) {
+		int count = argsStartReg + (isStatic ? 0 : 1);
+		for (ArgType arg : args) {
+			count += arg.getRegCount();
+		}
+		return count;
 	}
 
 	public void reload() {
@@ -251,7 +272,7 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 
 	public void updateArgTypes(List<ArgType> newArgTypes, String comment) {
 		this.addDebugComment(comment + ", original types: " + getArgTypes());
-		this.argTypes = Collections.unmodifiableList(newArgTypes);
+		this.argTypes = lockList(newArgTypes);
 		initArguments(newArgTypes);
 	}
 
@@ -490,6 +511,14 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 		return exceptionHandlers.isEmpty();
 	}
 
+	public boolean isMethodThrowsVisited() {
+		return methodThrowsVisited;
+	}
+
+	public void setMethodThrowsVisited(boolean methodThrowsVisited) {
+		this.methodThrowsVisited = methodThrowsVisited;
+	}
+
 	public int getExceptionHandlersCount() {
 		return exceptionHandlers.size();
 	}
@@ -720,22 +749,25 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 
 	// Do not modify passed list after setting
 	public void setUseIn(List<MethodNode> useIn) {
-		this.useIn = useIn;
+		this.useIn = ListUtils.compactList(useIn);
 
 		// Notify all methods (callers) this method (callee) is used in
-		for (MethodNode methodUsedIn : useIn) {
+		for (MethodNode methodUsedIn : this.useIn) {
 			methodUsedIn.addUsed(this);
 		}
 	}
 
 	public void addUsed(MethodNode used) {
 		if (used != null) {
-			this.methodsUsed.add(used);
+			if (methodsUsed.isEmpty()) {
+				methodsUsed = new SmallSet<>();
+			}
+			methodsUsed.add(used);
 		}
 	}
 
 	public void setUsed(List<MethodNode> methodsUsed) {
-		this.methodsUsed = new HashSet<>(methodsUsed);
+		this.methodsUsed = methodsUsed.isEmpty() ? Collections.emptySet() : new SmallSet<>(methodsUsed);
 	}
 
 	public Set<MethodNode> getUsed() {
@@ -743,12 +775,32 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 		return methodsUsed;
 	}
 
+	/**
+	 * Check the usage index without rebuilding its consistency state.
+	 * Suitable for conservative prefilters whose result is validated against the method CFG.
+	 */
+	public boolean referencesMethodNamed(String name) {
+		for (MethodNode used : methodsUsed) {
+			// Usage relations can be refreshed concurrently during class reload.
+			// Treat an incompletely published inline-set slot as an unresolved entry.
+			if (used != null && used.getName().equals(name)) {
+				return true;
+			}
+		}
+		for (MethodInfo used : unresolvedUsed) {
+			if (used.getName().equals(name)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	public List<MethodInfo> getUnresolvedUsed() {
 		return unresolvedUsed;
 	}
 
 	public void setUnresolvedUsed(List<MethodInfo> unresolvedUsed) {
-		this.unresolvedUsed = unresolvedUsed;
+		this.unresolvedUsed = ListUtils.compactList(unresolvedUsed);
 	}
 
 	public void setCallsSelf(boolean callsSelf) {
@@ -759,10 +811,88 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 		return this.callsSelf;
 	}
 
+	void restoreUsageFrom(MethodNode source, Map<MethodNode, MethodNode> replacements) {
+		for (MethodNode caller : source.useIn) {
+			if (!replacements.containsKey(caller)) {
+				caller.replaceUsedMethod(source, this);
+			}
+		}
+		for (MethodNode callee : source.methodsUsed) {
+			if (!replacements.containsKey(callee)) {
+				callee.replaceUseInMethod(source, this);
+			}
+		}
+
+		this.useIn = ListUtils.compactList(remapMethods(source.useIn, replacements));
+		if (source.methodsUsed.isEmpty()) {
+			this.methodsUsed = Collections.emptySet();
+		} else {
+			this.methodsUsed = new SmallSet<>();
+			for (MethodNode callee : source.methodsUsed) {
+				this.methodsUsed.add(replacements.getOrDefault(callee, callee));
+			}
+		}
+		this.unresolvedUsed = source.unresolvedUsed;
+		this.callsSelf = source.callsSelf;
+
+		source.useIn = Collections.emptyList();
+		source.methodsUsed = Collections.emptySet();
+		source.unresolvedUsed = Collections.emptyList();
+	}
+
+	private static List<MethodNode> remapMethods(
+			List<MethodNode> source, Map<MethodNode, MethodNode> replacements) {
+		if (source.isEmpty() || replacements.isEmpty()) {
+			return source;
+		}
+		List<MethodNode> result = new ArrayList<>(source.size());
+		boolean changed = false;
+		for (MethodNode mth : source) {
+			MethodNode replacement = replacements.get(mth);
+			if (replacement == null) {
+				result.add(mth);
+			} else {
+				result.add(replacement);
+				changed = true;
+			}
+		}
+		return changed ? result : source;
+	}
+
+	private synchronized void replaceUsedMethod(MethodNode source, MethodNode replacement) {
+		if (methodsUsed.remove(source)) {
+			methodsUsed.add(replacement);
+		}
+	}
+
+	private synchronized void replaceUseInMethod(MethodNode source, MethodNode replacement) {
+		int count = useIn.size();
+		for (int i = 0; i < count; i++) {
+			if (useIn.get(i) == source) {
+				if (useIn instanceof ArrayList) {
+					// Element replacement is non-structural: iterators remain valid during parallel reloads.
+					useIn.set(i, replacement);
+				} else {
+					// Compact lists with one or two entries are immutable.
+					List<MethodNode> updated = new ArrayList<>(useIn);
+					updated.set(i, replacement);
+					useIn = updated;
+				}
+				return;
+			}
+		}
+	}
+
 	// Remove any methods from the list of used methods (calees) if this method (caller) has been
 	// removed from the calee's list of callers
 	private void removeInvalidMethodsUsed() {
+		if (methodsUsed.isEmpty()) {
+			return;
+		}
 		methodsUsed.removeIf(methodUsed -> !methodUsed.getUseIn().contains(this));
+		if (methodsUsed.isEmpty()) {
+			methodsUsed = Collections.emptySet();
+		}
 	}
 
 	public JavaMethod getJavaNode() {

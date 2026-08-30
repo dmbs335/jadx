@@ -350,8 +350,7 @@ public class ExtractFieldInit extends AbstractVisitor {
 		// check if already ordered
 		boolean ordered = Collections.indexOfSubList(clsFields, orderedFields) != -1;
 		if (!ordered) {
-			clsFields.removeAll(orderedFields);
-			clsFields.addAll(orderedFields);
+			cls.moveFieldsToEnd(orderedFields);
 		}
 	}
 

@@ -134,7 +134,7 @@ public abstract class InsnArg extends Typed {
 		RegisterArg resArg = insn.getResult();
 		InsnArg arg = wrapInsnIntoArg(insn);
 		InsnArg oldArg = parent.getArg(i);
-		if (arg.getType() == ArgType.UNKNOWN) {
+		if (arg.getType() == ArgType.UNKNOWN && oldArg.getType() != ArgType.UNKNOWN) {
 			// restore arg type if wrapped insn missing result
 			arg.setType(oldArg.getType());
 		}

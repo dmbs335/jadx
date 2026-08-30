@@ -1,10 +1,14 @@
 package jadx.core.dex.attributes.nodes;
 
-import jadx.api.plugins.input.data.attributes.IJadxAttribute;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import jadx.api.plugins.input.data.attributes.PinnedAttribute;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.AttrNode;
 
-public class RenameReasonAttr implements IJadxAttribute {
+public class RenameReasonAttr extends PinnedAttribute {
 
 	public static RenameReasonAttr forNode(AttrNode node) {
 		RenameReasonAttr renameReasonAttr = node.get(AType.RENAME_REASON);
@@ -16,22 +20,23 @@ public class RenameReasonAttr implements IJadxAttribute {
 		return newAttr;
 	}
 
-	private String description;
+	private String firstReason;
+	private List<String> additionalReasons = Collections.emptyList();
 
 	public RenameReasonAttr() {
-		this.description = "";
 	}
 
 	public RenameReasonAttr(String description) {
-		this.description = description;
+		append(description);
 	}
 
 	public RenameReasonAttr(AttrNode node) {
 		RenameReasonAttr renameReasonAttr = node.get(AType.RENAME_REASON);
 		if (renameReasonAttr != null) {
-			this.description = renameReasonAttr.description;
-		} else {
-			this.description = "";
+			this.firstReason = renameReasonAttr.firstReason;
+			if (!renameReasonAttr.additionalReasons.isEmpty()) {
+				this.additionalReasons = new ArrayList<>(renameReasonAttr.additionalReasons);
+			}
 		}
 	}
 
@@ -54,16 +59,31 @@ public class RenameReasonAttr implements IJadxAttribute {
 	}
 
 	public RenameReasonAttr append(String reason) {
-		if (description.isEmpty()) {
-			description += reason;
-		} else {
-			description += " and " + reason;
+		if (reason.isEmpty()) {
+			return this;
 		}
+		if (firstReason == null) {
+			firstReason = reason;
+			return this;
+		}
+		if (firstReason.equals(reason) || additionalReasons.contains(reason)) {
+			return this;
+		}
+		if (additionalReasons.isEmpty()) {
+			additionalReasons = new ArrayList<>(1);
+		}
+		additionalReasons.add(reason);
 		return this;
 	}
 
 	public String getDescription() {
-		return description;
+		if (firstReason == null) {
+			return "";
+		}
+		if (additionalReasons.isEmpty()) {
+			return firstReason;
+		}
+		return firstReason + " and " + String.join(" and ", additionalReasons);
 	}
 
 	@Override
@@ -73,6 +93,6 @@ public class RenameReasonAttr implements IJadxAttribute {
 
 	@Override
 	public String toString() {
-		return "RENAME_REASON:" + description;
+		return "RENAME_REASON:" + getDescription();
 	}
 }

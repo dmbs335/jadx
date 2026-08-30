@@ -2,6 +2,7 @@ package jadx.core.dex.visitors;
 
 import java.io.File;
 import java.util.Optional;
+import java.util.function.Predicate;
 import java.util.regex.Matcher;
 
 import jadx.core.dex.nodes.IRegion;
@@ -66,10 +67,19 @@ public class DotGraphVisitor extends AbstractVisitor {
 
 	@Override
 	public void visit(MethodNode mth) {
-		if (mth.isNoCode()) {
+		if (mth.isNoCode() || !isAutomaticOutputEnabled(mth)) {
 			return;
 		}
 		new DotGraphUtils(useRegions, rawInsn, highlightRegion).dumpToFile(mth);
+	}
+
+	private static boolean isAutomaticOutputEnabled(MethodNode mth) {
+		Predicate<String> filter = mth.root().getArgs().getCfgOutputFilter();
+		if (filter == null) {
+			return true;
+		}
+		String topClassName = mth.getParentClass().getTopParentClass().getClassInfo().getFullName();
+		return filter.test(topClassName);
 	}
 
 	public void save(File dir, MethodNode mth) {

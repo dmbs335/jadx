@@ -90,6 +90,10 @@ final class RegionStack {
 		}
 	}
 
+	public boolean addExitIfAbsent(@Nullable BlockNode exit) {
+		return exit != null && curState.exits.add(exit);
+	}
+
 	public void addExits(Collection<BlockNode> exits) {
 		for (BlockNode exit : exits) {
 			addExit(exit);

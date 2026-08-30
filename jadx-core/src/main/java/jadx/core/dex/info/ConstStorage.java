@@ -21,6 +21,11 @@ public class ConstStorage {
 	private static final class ValueStorage {
 		private final Map<Object, IFieldInfoRef> values = new ConcurrentHashMap<>();
 		private final Set<Object> duplicates = new HashSet<>();
+		private final @Nullable Map<ClassNode, Set<Object>> valuesByClass;
+
+		ValueStorage(boolean trackOwners) {
+			this.valuesByClass = trackOwners ? new HashMap<>() : null;
+		}
 
 		Map<Object, IFieldInfoRef> getValues() {
 			return values;
@@ -41,10 +46,39 @@ public class ConstStorage {
 			IFieldInfoRef prev = values.put(value, fld);
 			if (prev != null) {
 				values.remove(value);
+				removeOwner(value, prev);
 				duplicates.add(value);
 				return true;
 			}
+			addOwner(value, fld);
 			return false;
+		}
+
+		private void addOwner(Object value, IFieldInfoRef fld) {
+			Map<ClassNode, Set<Object>> owners = valuesByClass;
+			if (owners != null && fld instanceof FieldNode) {
+				ClassNode owner = ((FieldNode) fld).getParentClass();
+				Set<Object> ownerValues = owners.get(owner);
+				if (ownerValues == null) {
+					ownerValues = new HashSet<>();
+					owners.put(owner, ownerValues);
+				}
+				ownerValues.add(value);
+			}
+		}
+
+		private void removeOwner(Object value, IFieldInfoRef fld) {
+			Map<ClassNode, Set<Object>> owners = valuesByClass;
+			if (owners != null && fld instanceof FieldNode) {
+				ClassNode owner = ((FieldNode) fld).getParentClass();
+				Set<Object> ownerValues = owners.get(owner);
+				if (ownerValues != null) {
+					ownerValues.remove(value);
+					if (ownerValues.isEmpty()) {
+						owners.remove(owner, ownerValues);
+					}
+				}
+			}
 		}
 
 		public boolean contains(Object value) {
@@ -52,18 +86,25 @@ public class ConstStorage {
 		}
 
 		void removeForCls(ClassNode cls) {
-			values.entrySet().removeIf(entry -> {
-				IFieldInfoRef field = entry.getValue();
-				if (field instanceof FieldNode) {
-					return ((FieldNode) field).getParentClass().equals(cls);
+			Map<ClassNode, Set<Object>> owners = valuesByClass;
+			if (owners == null) {
+				return;
+			}
+			Set<Object> ownerValues = owners.remove(cls);
+			if (ownerValues == null) {
+				return;
+			}
+			for (Object value : ownerValues) {
+				IFieldInfoRef field = values.get(value);
+				if (field instanceof FieldNode && ((FieldNode) field).getParentClass().equals(cls)) {
+					values.remove(value, field);
 				}
-				return false;
-			});
+			}
 		}
 	}
 
 	private final boolean replaceEnabled;
-	private final ValueStorage globalValues = new ValueStorage();
+	private final ValueStorage globalValues = new ValueStorage(true);
 	private final Map<ClassNode, ValueStorage> classes = new HashMap<>();
 
 	private Map<Integer, String> resourcesNames = new HashMap<>();
@@ -90,7 +131,7 @@ public class ConstStorage {
 	}
 
 	private ValueStorage getClsValues(ClassNode cls) {
-		return classes.computeIfAbsent(cls, c -> new ValueStorage());
+		return classes.computeIfAbsent(cls, c -> new ValueStorage(false));
 	}
 
 	public @Nullable IFieldInfoRef getConstField(ClassNode cls, Object value, boolean searchGlobal) {

@@ -46,6 +46,7 @@ import jadx.core.dex.visitors.IDexTreeVisitor;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.CodegenException;
 import jadx.core.utils.exceptions.JadxOverflowException;
+import jadx.core.utils.exceptions.JadxTaskCancelledException;
 
 import static jadx.core.codegen.MethodGen.FallbackOption.BLOCK_DUMP;
 import static jadx.core.codegen.MethodGen.FallbackOption.COMMENTED_DUMP;
@@ -228,7 +229,7 @@ public class MethodGen {
 				// occur on decompilation errors
 				argType = mthArg.getInitType();
 			} else {
-				argType = varType;
+				argType = selectMethodArgType(mthArg.getInitType(), varType);
 			}
 			if (argNum == lastArgNum && mth.getAccessFlags().isVarArgs()) {
 				// change last array argument to varargs
@@ -250,6 +251,18 @@ public class MethodGen {
 			}
 			code.add(varName);
 		}
+	}
+
+	private static ArgType selectMethodArgType(ArgType initType, ArgType varType) {
+		if (initType != null
+				&& initType.isObject()
+				&& initType.isGeneric()
+				&& varType.isObject()
+				&& !varType.isGeneric()
+				&& initType.getObject().equals(varType.getObject())) {
+			return initType;
+		}
+		return varType;
 	}
 
 	public void addInstructions(ICodeWriter code) throws CodegenException {
@@ -397,6 +410,8 @@ public class MethodGen {
 				for (IDexTreeVisitor visitor : Jadx.getFallbackPassesList()) {
 					DepthTraversal.visit(visitor, mth);
 				}
+			} catch (JadxTaskCancelledException e) {
+				throw e;
 			} catch (Exception e) {
 				LOG.error("Error reload instructions in fallback mode:", e);
 				code.startLine("// Can't load method instructions: " + e.getMessage());

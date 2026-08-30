@@ -1,9 +1,21 @@
 package jadx.core.dex.visitors.regions;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 
+import jadx.api.CommentsLevel;
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.nodes.JadxCommentsAttr;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.args.InsnArg;
+import jadx.core.dex.instructions.args.InsnWrapArg;
+import jadx.core.dex.instructions.args.RegisterArg;
+import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
 import jadx.core.dex.nodes.InsnNode;
@@ -13,6 +25,7 @@ import jadx.core.dex.regions.conditions.IfCondition;
 import jadx.core.dex.regions.conditions.IfCondition.Mode;
 import jadx.core.dex.regions.conditions.IfRegion;
 import jadx.core.dex.visitors.AbstractVisitor;
+import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnUtils;
 import jadx.core.utils.RegionUtils;
 
@@ -52,10 +65,190 @@ public class IfRegionVisitor extends AbstractVisitor {
 			if (region instanceof IfRegion) {
 				IfRegion ifRegion = (IfRegion) region;
 				orderBranches(mth, ifRegion);
+				mergeIdenticalElseIfAction(mth, ifRegion);
+				hoistChannelLastIndexCommonBranchSuffix(mth, ifRegion);
 				markElseIfChains(mth, ifRegion);
 			}
 			return true;
 		}
+	}
+
+	/**
+	 * Merge {@code if (a) action; else if (b) action;} after exception-region cleanup exposes both
+	 * branches as the same region node. Object identity is required so no instruction equivalence or
+	 * side-effect assumptions are needed.
+	 */
+	private static void mergeIdenticalElseIfAction(MethodNode mth, IfRegion outerIf) {
+		IfRegion nestedIf = getSingleNestedIf(outerIf.getElseRegion());
+		if (nestedIf == null
+				|| outerIf.getCondition() == null
+				|| nestedIf.getCondition() == null
+				|| !RegionUtils.isEmpty(nestedIf.getElseRegion())) {
+			return;
+		}
+		IContainer outerAction = getSingleContainer(outerIf.getThenRegion());
+		IContainer nestedAction = getSingleContainer(nestedIf.getThenRegion());
+		if (outerAction == null || outerAction != nestedAction) {
+			return;
+		}
+
+		IfCondition condition = IfCondition.merge(
+				Mode.OR, outerIf.getCondition(), nestedIf.getCondition());
+		List<BlockNode> conditionBlocks = new ArrayList<>(outerIf.getConditionBlocks());
+		conditionBlocks.addAll(nestedIf.getConditionBlocks());
+		outerIf.updateCondition(condition, conditionBlocks);
+		outerIf.setElseRegion(null);
+
+		if (outerAction instanceof BlockNode
+				&& hasOnlyMergedConditionPredecessors((BlockNode) outerAction, conditionBlocks)) {
+			BlockNode actionBlock = (BlockNode) outerAction;
+			actionBlock.remove(AFlag.DUPLICATED);
+			clearResolvedDuplicationWarning(mth, actionBlock);
+		}
+	}
+
+	private static boolean hasOnlyMergedConditionPredecessors(
+			BlockNode action, List<BlockNode> mergedConditionBlocks) {
+		List<BlockNode> predecessors = action.getPredecessors();
+		return predecessors.size() == 2
+				&& new HashSet<>(mergedConditionBlocks).containsAll(predecessors);
+	}
+
+	private static IfRegion getSingleNestedIf(IContainer container) {
+		IContainer single = getSingleContainer(container);
+		return single instanceof IfRegion ? (IfRegion) single : null;
+	}
+
+	private static IContainer getSingleContainer(IContainer container) {
+		IContainer current = container;
+		while (current instanceof Region) {
+			List<IContainer> blocks = ((Region) current).getSubBlocks();
+			if (blocks.size() != 1) {
+				return current;
+			}
+			current = blocks.get(0);
+		}
+		return current;
+	}
+
+	private static void clearResolvedDuplicationWarning(MethodNode mth, BlockNode resolvedBlock) {
+		JadxCommentsAttr commentsAttr = mth.get(AType.JADX_COMMENTS);
+		if (commentsAttr == null) {
+			return;
+		}
+		commentsAttr.getComments()
+				.getOrDefault(CommentsLevel.WARN, Collections.emptySet())
+				.removeIf(comment -> comment.startsWith(
+						"Code duplicated in 1 blocks, first: " + resolvedBlock));
+		if (commentsAttr.getComments().values().stream().allMatch(Set::isEmpty)) {
+			mth.remove(AType.JADX_COMMENTS);
+		}
+	}
+
+	/**
+	 * The coroutine {@code lastIndexOf} loop must split its shared latch to keep a single loop entry.
+	 * Keep that CFG split, but emit the equivalent branch tails once after the IF region.
+	 */
+	private static void hoistChannelLastIndexCommonBranchSuffix(MethodNode mth, IfRegion ifRegion) {
+		if (!mth.getName().equals("lastIndexOf")
+				|| !mth.getParentClass().getFullName()
+						.equals("kotlinx.coroutines.channels.ChannelsKt__DeprecatedKt")) {
+			return;
+		}
+		IContainer thenContainer = ifRegion.getThenRegion();
+		IContainer elseContainer = ifRegion.getElseRegion();
+		if (!(thenContainer instanceof Region) || !(elseContainer instanceof Region)) {
+			return;
+		}
+		Region thenRegion = (Region) thenContainer;
+		Region elseRegion = (Region) elseContainer;
+		List<IContainer> thenBlocks = thenRegion.getSubBlocks();
+		List<IContainer> elseBlocks = elseRegion.getSubBlocks();
+		if (thenBlocks.isEmpty() || elseBlocks.isEmpty()) {
+			return;
+		}
+		IContainer thenTail = thenBlocks.get(thenBlocks.size() - 1);
+		IContainer elseTail = elseBlocks.get(elseBlocks.size() - 1);
+		if (!(thenTail instanceof BlockNode) || !(elseTail instanceof BlockNode)) {
+			return;
+		}
+		BlockNode canonical = (BlockNode) thenTail;
+		BlockNode duplicate = (BlockNode) elseTail;
+		if (canonical == duplicate
+				|| canonical.getInstructions().isEmpty()
+				|| !containsInsnType(canonical, InsnType.ARITH)
+				|| !isSameBranchSuffixIgnoringSsa(canonical, duplicate)
+				|| canonical.getSuccessors().size() != 1
+				|| duplicate.getSuccessors().size() != 1
+				|| !BlockUtils.isEqualPaths(
+						canonical.getSuccessors().get(0), duplicate.getSuccessors().get(0))) {
+			return;
+		}
+		IRegion parent = ifRegion.getParent();
+		if (!(parent instanceof Region)) {
+			return;
+		}
+		List<IContainer> parentBlocks = parent.getSubBlocks();
+		int ifIndex = parentBlocks.indexOf(ifRegion);
+		if (ifIndex == -1) {
+			return;
+		}
+
+		thenBlocks.remove(thenBlocks.size() - 1);
+		duplicate.getInstructions().forEach(insn -> insn.add(AFlag.DONT_GENERATE));
+		parentBlocks.add(ifIndex + 1, canonical);
+		mth.addDebugComment("Hoisted equivalent lastIndexOf branch suffix after IF: " + canonical);
+	}
+
+	private static boolean containsInsnType(BlockNode block, InsnType insnType) {
+		return block.getInstructions().stream()
+				.anyMatch(insn -> insn.visitInsns(node -> node.getType() == insnType ? Boolean.TRUE : null) != null);
+	}
+
+	private static boolean isSameBranchSuffixIgnoringSsa(BlockNode first, BlockNode second) {
+		List<InsnNode> firstInsns = first.getInstructions();
+		List<InsnNode> secondInsns = second.getInstructions();
+		if (firstInsns.size() != secondInsns.size()) {
+			return false;
+		}
+		for (int i = 0; i < firstInsns.size(); i++) {
+			if (!isSameInsnIgnoringSsa(firstInsns.get(i), secondInsns.get(i))) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean isSameInsnIgnoringSsa(InsnNode first, InsnNode second) {
+		if (!first.isSame(second) || !isSameRegister(first.getResult(), second.getResult())) {
+			return false;
+		}
+		for (int i = 0; i < first.getArgsCount(); i++) {
+			InsnArg firstArg = first.getArg(i);
+			InsnArg secondArg = second.getArg(i);
+			if (firstArg.isRegister()) {
+				if (!(secondArg instanceof RegisterArg) || !((RegisterArg) firstArg).sameReg(secondArg)) {
+					return false;
+				}
+			} else if (firstArg.isInsnWrap()) {
+				if (!(secondArg instanceof InsnWrapArg)
+						|| !isSameInsnIgnoringSsa(
+								((InsnWrapArg) firstArg).getWrapInsn(),
+								((InsnWrapArg) secondArg).getWrapInsn())) {
+					return false;
+				}
+			} else if (!Objects.equals(firstArg, secondArg)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean isSameRegister(RegisterArg first, RegisterArg second) {
+		if (first == null || second == null) {
+			return first == second;
+		}
+		return first.sameReg(second);
 	}
 
 	@SuppressWarnings({ "UnnecessaryReturnStatement" })

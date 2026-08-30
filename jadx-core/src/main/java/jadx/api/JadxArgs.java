@@ -2,6 +2,7 @@ package jadx.api;
 
 import java.io.Closeable;
 import java.io.File;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -57,6 +58,7 @@ public class JadxArgs implements Closeable {
 	public static final String DEFAULT_RES_DIR = "resources";
 
 	private List<File> inputFiles = new ArrayList<>(1);
+	private List<File> dependencyInputFiles = new ArrayList<>();
 
 	private File outDir;
 	private File outDirSrc;
@@ -71,11 +73,13 @@ public class JadxArgs implements Closeable {
 	private IUsageInfoCache usageInfoCache = new InMemoryUsageInfoCache();
 
 	private Function<JadxArgs, ICodeWriter> codeWriterProvider = AnnotatedCodeWriter::new;
+	private IOutputFileListener outputFileListener = IOutputFileListener.NONE;
 
 	private int threadsCount = DEFAULT_THREADS_COUNT;
 
 	private boolean cfgOutput = false;
 	private boolean rawCFGOutput = false;
+	private @Nullable Predicate<String> cfgOutputFilter = null;
 
 	private boolean showInconsistentCode = false;
 
@@ -257,6 +261,49 @@ public class JadxArgs implements Closeable {
 		this.inputFiles = inputFiles;
 	}
 
+	/**
+	 * Standalone DEX inputs used for symbol resolution and dependency processing, but not saved as
+	 * source or resources.
+	 */
+	public List<File> getDependencyInputFiles() {
+		return dependencyInputFiles;
+	}
+
+	public void setDependencyInputFiles(List<File> dependencyInputFiles) {
+		this.dependencyInputFiles = dependencyInputFiles;
+	}
+
+	public List<File> getAllInputFiles() {
+		if (dependencyInputFiles.isEmpty()) {
+			return inputFiles;
+		}
+		List<File> allInputFiles = new ArrayList<>(inputFiles.size() + dependencyInputFiles.size());
+		allInputFiles.addAll(inputFiles);
+		allInputFiles.addAll(dependencyInputFiles);
+		return allInputFiles;
+	}
+
+	public boolean isDependencyInputFile(String inputFileName) {
+		if (dependencyInputFiles.isEmpty()) {
+			return false;
+		}
+		String normalizedInput;
+		try {
+			normalizedInput = normalizedInputPath(Path.of(inputFileName));
+		} catch (InvalidPathException e) {
+			// Some input plugins use a virtual source name, e.g. "<archive>:<entry>".
+			return false;
+		}
+		return dependencyInputFiles.stream()
+				.map(File::toPath)
+				.map(JadxArgs::normalizedInputPath)
+				.anyMatch(normalizedInput::equals);
+	}
+
+	private static String normalizedInputPath(Path path) {
+		return path.toAbsolutePath().normalize().toString();
+	}
+
 	public File getOutDir() {
 		return outDir;
 	}
@@ -303,6 +350,18 @@ public class JadxArgs implements Closeable {
 
 	public void setRawCFGOutput(boolean rawCFGOutput) {
 		this.rawCFGOutput = rawCFGOutput;
+	}
+
+	/**
+	 * Limit automatic CFG file output to matching top-level class full names.
+	 * A {@code null} filter keeps the default behavior and writes all processed classes.
+	 */
+	public @Nullable Predicate<String> getCfgOutputFilter() {
+		return cfgOutputFilter;
+	}
+
+	public void setCfgOutputFilter(@Nullable Predicate<String> cfgOutputFilter) {
+		this.cfgOutputFilter = cfgOutputFilter;
 	}
 
 	public boolean isFallbackMode() {
@@ -700,6 +759,14 @@ public class JadxArgs implements Closeable {
 		this.codeWriterProvider = codeWriterProvider;
 	}
 
+	public IOutputFileListener getOutputFileListener() {
+		return outputFileListener;
+	}
+
+	public void setOutputFileListener(IOutputFileListener outputFileListener) {
+		this.outputFileListener = outputFileListener == null ? IOutputFileListener.NONE : outputFileListener;
+	}
+
 	public IUsageInfoCache getUsageInfoCache() {
 		return usageInfoCache;
 	}
@@ -879,6 +946,7 @@ public class JadxArgs implements Closeable {
 	@Override
 	public String toString() {
 		return "JadxArgs{" + "inputFiles=" + inputFiles
+				+ ", dependencyInputFiles=" + dependencyInputFiles
 				+ ", outDir=" + outDir
 				+ ", outDirSrc=" + outDirSrc
 				+ ", outDirRes=" + outDirRes

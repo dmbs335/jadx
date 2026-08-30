@@ -15,6 +15,7 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.AnonymousClassAttr;
 import jadx.core.dex.attributes.nodes.AnonymousClassAttr.InlineType;
+import jadx.core.dex.attributes.nodes.AnonymousClassOriginAttr;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.ClassNode;
@@ -92,6 +93,7 @@ public class ProcessAnonymous extends AbstractVisitor {
 			outerCls = anonymousConstructor.getUseIn().get(0).getParentClass();
 		}
 		outerCls.addInlinedClass(cls);
+		cls.addAttr(AnonymousClassOriginAttr.INSTANCE);
 		cls.addAttr(new AnonymousClassAttr(outerCls, baseType, inlineType));
 		cls.add(AFlag.DONT_GENERATE);
 		anonymousConstructor.add(AFlag.ANONYMOUS_CONSTRUCTOR);
@@ -101,7 +103,7 @@ public class ProcessAnonymous extends AbstractVisitor {
 		// see ModVisitor.processAnonymousConstructor method
 		ClassNode topOuterCls = outerCls.getTopParentClass();
 		cls.removeDependency(topOuterCls);
-		ListUtils.safeRemove(outerCls.getUseIn(), cls);
+		outerCls.setUseIn(ListUtils.safeRemoveAndTrim(outerCls.getUseIn(), cls));
 
 		// move dependency to codegen stage
 		if (cls.isTopClass()) {
@@ -110,8 +112,11 @@ public class ProcessAnonymous extends AbstractVisitor {
 		}
 	}
 
-	private static void undoAnonymousMark(ClassNode cls) {
+	public static void convertToInner(ClassNode cls) {
 		AnonymousClassAttr attr = cls.get(AType.ANONYMOUS_CLASS);
+		if (attr == null) {
+			return;
+		}
 		ClassNode outerCls = attr.getOuterCls();
 		cls.setDependencies(ListUtils.safeAdd(cls.getDependencies(), outerCls.getTopParentClass()));
 		outerCls.setUseIn(ListUtils.safeAdd(outerCls.getUseIn(), cls));
@@ -176,7 +181,7 @@ public class ProcessAnonymous extends AbstractVisitor {
 		while (true) {
 			if (!added.add(current)) {
 				current.addWarnComment("Loop in anonymous inline: " + current + ", path: " + added);
-				added.forEach(ProcessAnonymous::undoAnonymousMark);
+				added.forEach(ProcessAnonymous::convertToInner);
 				return;
 			}
 			ClassNode next = inlineMap.get(current);
@@ -201,6 +206,9 @@ public class ProcessAnonymous extends AbstractVisitor {
 	}
 
 	private static boolean canBeAnonymous(ClassNode cls) {
+		if (cls.contains(AFlag.DONT_INLINE)) {
+			return false;
+		}
 		if (cls.getAccessFlags().isSynthetic()) {
 			return true;
 		}
@@ -244,6 +252,11 @@ public class ProcessAnonymous extends AbstractVisitor {
 			// exclude usage inside inner classes
 			return null;
 		}
+		if (hasConcreteTypeField(ctrUseCls, cls)) {
+			// The hidden class type escapes through a field declaration.
+			// Keep it as a named inner class so assignments can retain the concrete type.
+			return null;
+		}
 		if (!checkMethodsUsage(cls, ctr, ctrUseMth)) {
 			return null;
 		}
@@ -255,6 +268,12 @@ public class ProcessAnonymous extends AbstractVisitor {
 			}
 		}
 		return InlineType.CONSTRUCTOR;
+	}
+
+	private static boolean hasConcreteTypeField(ClassNode useCls, ClassNode anonymousCls) {
+		ArgType anonymousType = anonymousCls.getClassInfo().getType();
+		return useCls.getFields().stream()
+				.anyMatch(field -> field.getFieldInfo().getType().equals(anonymousType));
 	}
 
 	private static boolean checkMethodsUsage(ClassNode cls, MethodNode ctr, MethodNode ctrUseMth) {

@@ -48,12 +48,12 @@ public class SimpleJavaGradleGenerator implements IExportGradleGenerator {
 	private void saveSettingsGradle() throws IOException {
 		TemplateFile tmpl = loadGradleTemplate("/export/java/settings.gradle.kts.tmpl");
 		tmpl.add("projectName", GradleGeneratorTools.guessProjectName(root));
-		tmpl.save(new File(projectDir, "settings.gradle.kts"));
+		tmpl.save(new File(projectDir, "settings.gradle.kts"), root.getArgs());
 	}
 
 	private void saveBuildGradle() throws IOException {
 		TemplateFile tmpl = loadGradleTemplate("/export/java/build.gradle.kts.tmpl");
-		tmpl.save(new File(appDir, "build.gradle.kts"));
+		tmpl.save(new File(appDir, "build.gradle.kts"), root.getArgs());
 	}
 
 	private TemplateFile loadGradleTemplate(String templatePath) throws FileNotFoundException {

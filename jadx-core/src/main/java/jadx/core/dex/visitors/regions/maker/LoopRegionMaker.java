@@ -1,6 +1,7 @@
 package jadx.core.dex.visitors.regions.maker;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Objects;
@@ -13,7 +14,12 @@ import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.attributes.nodes.LoopLabelAttr;
+import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.PhiInsn;
+import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.LiteralArg;
+import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.Edge;
 import jadx.core.dex.nodes.IRegion;
@@ -133,14 +139,28 @@ final class LoopRegionMaker {
 			BlockNode thenBlock = condInfo.getThenBlock();
 			out = thenBlock == loop.getEnd() || thenBlock == loopStart ? condInfo.getElseBlock() : thenBlock;
 			out = BlockUtils.followEmptyPath(out);
+			BlockNode loopEnd = loop.getEnd();
+			boolean carryTail = loopEnd.contains(AType.COROUTINE_LOOP_CARRY_TAIL)
+					&& !loopEnd.getInstructions().isEmpty()
+					&& loopEnd != condInfo.getFirstIfBlock()
+					&& isLoopCarryOnlyBlock(loopEnd);
 			loopStart.remove(AType.LOOP);
-			loop.getEnd().add(AFlag.ADDED_TO_REGION);
-			stack.addExit(loop.getEnd());
+			loopEnd.add(AFlag.ADDED_TO_REGION);
+			stack.addExit(loopEnd);
 			regionMaker.clearBlockProcessedState(loopStart);
 			Region body = regionMaker.makeRegion(loopStart);
+			if (carryTail && !RegionUtils.isRegionContainsBlock(body, loopEnd)) {
+				// A register-only back-edge tail carries the next-iteration values. Keep these
+				// assignments in the loop body before its condition instead of emitting them
+				// after the loop as an unreachable region.
+				body.add(loopEnd);
+				regionMaker.registerLoopCarryTail(loopEnd);
+			}
 			loopRegion.setBody(body);
 			loopStart.addAttr(AType.LOOP, loop);
-			loop.getEnd().remove(AFlag.ADDED_TO_REGION);
+			if (!carryTail) {
+				loopEnd.remove(AFlag.ADDED_TO_REGION);
+			}
 		} else {
 			out = condInfo.getElseBlock(); // Following Jadx convention, this must be the next synthetic block, not actual (theoretical) out
 											// block
@@ -159,7 +179,16 @@ final class LoopRegionMaker {
 				// empty loop body
 				body = new Region(loopRegion);
 			} else {
-				body = regionMaker.makeRegion(loopBody);
+				// A natural back-edge closes this loop. Treat the current header as a region
+				// boundary so it is not processed recursively as a nested copy of the loop.
+				boolean loopStartAdded = stack.addExitIfAbsent(loopStart);
+				try {
+					body = regionMaker.makeRegion(loopBody);
+				} finally {
+					if (loopStartAdded) {
+						stack.removeExit(loopStart);
+					}
+				}
 			}
 			// add blocks from loop start to first condition block
 			BlockNode conditionBlock = condInfo.getFirstIfBlock();
@@ -254,7 +283,15 @@ final class LoopRegionMaker {
 		if (loopStart.getInstructions().isEmpty() && ListUtils.isSingleElement(loopStart.getSuccessors(), exit)) {
 			return false;
 		}
-		return loopEnd.getInstructions().isEmpty() && ListUtils.isSingleElement(loopEnd.getPredecessors(), exit);
+		return (loopEnd.getInstructions().isEmpty()
+				|| loopEnd.contains(AType.COROUTINE_LOOP_CARRY_TAIL)
+						&& isLoopCarryOnlyBlock(loopEnd))
+				&& ListUtils.isSingleElement(loopEnd.getPredecessors(), exit);
+	}
+
+	private static boolean isLoopCarryOnlyBlock(BlockNode block) {
+		return block.getInstructions().stream()
+				.allMatch(insn -> insn.getType() == InsnType.MOVE);
 	}
 
 	/*
@@ -533,6 +570,8 @@ final class LoopRegionMaker {
 		stack.push(loopRegion);
 
 		BlockNode out = null;
+		boolean sharedReturnBreaks = false;
+		boolean nestedSplitExits = false;
 		// insert 'break' for exits
 		List<Edge> exitEdges = loop.getExitEdges();
 		if (exitEdges.size() == 1) {
@@ -546,7 +585,23 @@ final class LoopRegionMaker {
 				}
 			}
 		} else {
+			out = splitNestedLoopExits(stack, loop, exitEdges);
+			if (out == null) {
+				BlockNode commonOut = findCommonPostDominator(exitEdges);
+				PhiListAttr phiList = commonOut == null ? null : commonOut.get(AType.PHI_LIST);
+				if (commonOut != null
+						&& !loop.getLoopBlocks().contains(commonOut)
+						&& ArgType.STRING.equals(mth.getReturnType())
+						&& hasStringBuilderPhi(phiList)) {
+					insertBreaksAtJoin(stack, loop, exitEdges, commonOut);
+					out = commonOut;
+				}
+			}
+			nestedSplitExits = out != null;
 			loop0: for (Edge exitEdge : exitEdges) {
+				if (out != null) {
+					break;
+				}
 				BlockNode exit = exitEdge.getTarget();
 				List<BlockNode> blocks = BlockUtils.bitSetToBlocks(mth, BlockUtils.getDomFrontierThroughEdge(exitEdge));
 
@@ -572,9 +627,12 @@ final class LoopRegionMaker {
 				}
 			}
 
+			sharedReturnBreaks = nestedSplitExits
+					|| insertSharedSyntheticBridgeBreaks(loop, out)
+					|| insertSharedReturnBreaks(loop, out);
 			// Add breaks
 			stack.addExit(out);
-			if (out != null && out != mth.getExitBlock()) {
+			if (!sharedReturnBreaks && out != null && out != mth.getExitBlock()) {
 				// Add a break on every incoming edge where the predecessor is reachable from the loop
 				for (BlockNode predecessor : out.getPredecessors()) {
 					for (Edge exitEdge : loop.getExitEdges()) {
@@ -587,7 +645,7 @@ final class LoopRegionMaker {
 			}
 		}
 
-		Region body = regionMaker.makeRegion(loopStart);
+		Region body = regionMaker.makeRegionAfterRemovingLoop(loopStart);
 		BlockNode loopEnd = loop.getEnd();
 		if (!RegionUtils.isRegionContainsBlock(body, loopEnd)
 				&& !loopEnd.contains(AType.EXC_HANDLER)
@@ -603,6 +661,162 @@ final class LoopRegionMaker {
 		stack.pop();
 		loopStart.addAttr(AType.LOOP, loop);
 		return out;
+	}
+
+	private BlockNode splitNestedLoopExits(RegionStack stack, LoopInfo loop, List<Edge> exitEdges) {
+		LoopInfo parentLoop = loop.getParentLoop();
+		if (parentLoop == null || exitEdges.size() < 2 || !mth.contains(AFlag.COMPUTE_POST_DOM)) {
+			return null;
+		}
+		List<Edge> exitsInsideParent = new ArrayList<>();
+		List<Edge> exitsOutsideParent = new ArrayList<>();
+		for (Edge exitEdge : exitEdges) {
+			if (parentLoop.getLoopBlocks().contains(exitEdge.getTarget())) {
+				exitsInsideParent.add(exitEdge);
+			} else {
+				exitsOutsideParent.add(exitEdge);
+			}
+		}
+		if (exitsInsideParent.size() != 1 || exitsOutsideParent.size() < 2) {
+			return null;
+		}
+		BlockNode parentCommonOut = findCommonPostDominator(parentLoop.getExitEdges());
+		PhiListAttr parentOutPhi = parentCommonOut == null ? null : parentCommonOut.get(AType.PHI_LIST);
+		if (!ArgType.STRING.equals(mth.getReturnType()) || !hasStringBuilderPhi(parentOutPhi)) {
+			return null;
+		}
+		BlockNode localOut = BlockUtils.followEmptyPath(exitsInsideParent.get(0).getTarget());
+		BlockNode parentOut = findCommonPostDominator(exitsOutsideParent);
+		if (localOut == null
+				|| parentOut == null
+				|| localOut == parentOut
+				|| !parentLoop.getLoopBlocks().contains(localOut)
+				|| parentLoop.getLoopBlocks().contains(parentOut)) {
+			return null;
+		}
+		insertBreaksAtJoin(stack, loop, exitsInsideParent, localOut);
+		insertBreaksAtJoin(stack, loop, exitsOutsideParent, parentOut);
+		return localOut;
+	}
+
+	private BlockNode findCommonPostDominator(List<Edge> exitEdges) {
+		if (exitEdges.isEmpty()) {
+			return null;
+		}
+		BlockNode candidate = exitEdges.get(0).getTarget();
+		while (candidate != null) {
+			if (candidate != mth.getExitBlock()
+					&& candidate.getPredecessors().size() > 1
+					&& isPostDominatorOfAllExits(candidate, exitEdges)) {
+				return candidate;
+			}
+			candidate = candidate.getIPostDom();
+		}
+		return null;
+	}
+
+	private void insertBreaksAtJoin(
+			RegionStack stack, LoopInfo loop, List<Edge> exitEdges, BlockNode out) {
+		stack.addExit(out);
+		for (BlockNode predecessor : out.getPredecessors()) {
+			for (Edge exitEdge : exitEdges) {
+				BlockNode target = exitEdge.getTarget();
+				boolean reachesPredecessor = target == out
+						? exitEdge.getSource() == predecessor
+						: BlockUtils.isPathExists(target, predecessor);
+				if (reachesPredecessor) {
+					InsnNode breakInsn = new InsnNode(InsnType.BREAK, 0);
+					breakInsn.addAttr(AType.LOOP, loop);
+					EdgeInsnAttr.addEdgeInsn(new Edge(predecessor, out), breakInsn);
+					addBreakLabel(exitEdge.getSource(), out, breakInsn);
+					break;
+				}
+			}
+		}
+	}
+
+	private static boolean isPostDominatorOfAllExits(BlockNode candidate, List<Edge> exitEdges) {
+		for (Edge exitEdge : exitEdges) {
+			BlockNode target = exitEdge.getTarget();
+			if (target == candidate) {
+				continue;
+			}
+			if (target.getPostDoms() == null || !target.getPostDoms().get(candidate.getPos())) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean hasStringBuilderPhi(PhiListAttr phiList) {
+		if (phiList == null) {
+			return false;
+		}
+		return phiList.getList().stream().anyMatch(phiInsn -> {
+			ArgType type = phiInsn.getResult().getType();
+			return type.isObject() && type.getObject().equals("java.lang.StringBuilder");
+		});
+	}
+
+	private boolean insertSharedSyntheticBridgeBreaks(LoopInfo loop, BlockNode out) {
+		ArgType returnType = mth.getReturnType();
+		if (out == null
+				|| out == mth.getExitBlock()
+				|| !returnType.isPrimitive()
+				|| ArgType.VOID.equals(returnType)) {
+			return false;
+		}
+		List<Edge> bridgeExits = new ArrayList<>();
+		for (Edge exitEdge : loop.getExitEdges()) {
+			BlockNode bridge = exitEdge.getTarget();
+			BlockNode bridgeOut = BlockUtils.followEmptyPath(bridge);
+			if (bridgeOut == mth.getExitBlock() || bridgeOut.isReturnBlock()) {
+				continue;
+			}
+			if (!bridge.contains(AFlag.SYNTHETIC)
+					|| !bridge.getInstructions().isEmpty()
+					|| !ListUtils.isSingleElement(bridge.getPredecessors(), exitEdge.getSource())
+					|| bridgeOut != out) {
+				return false;
+			}
+			bridgeExits.add(exitEdge);
+		}
+		if (bridgeExits.size() < 2) {
+			return false;
+		}
+		for (Edge exitEdge : bridgeExits) {
+			InsnNode breakInsn = new InsnNode(InsnType.BREAK, 0);
+			breakInsn.addAttr(AType.LOOP, loop);
+			EdgeInsnAttr.addEdgeInsn(exitEdge, breakInsn);
+			addBreakLabel(exitEdge.getSource(), out, breakInsn);
+		}
+		return true;
+	}
+
+	private boolean insertSharedReturnBreaks(LoopInfo loop, BlockNode out) {
+		if (out == null || !out.isReturnBlock()) {
+			return false;
+		}
+		List<Edge> exitEdges = loop.getExitEdges();
+		if (exitEdges.size() < 2) {
+			return false;
+		}
+		for (Edge exitEdge : exitEdges) {
+			BlockNode bridge = exitEdge.getTarget();
+			if (!bridge.contains(AFlag.SYNTHETIC)
+					|| !bridge.getInstructions().isEmpty()
+					|| !ListUtils.isSingleElement(bridge.getPredecessors(), exitEdge.getSource())
+					|| BlockUtils.followEmptyPath(bridge) != out) {
+				return false;
+			}
+		}
+		for (Edge exitEdge : exitEdges) {
+			InsnNode breakInsn = new InsnNode(InsnType.BREAK, 0);
+			breakInsn.addAttr(AType.LOOP, loop);
+			EdgeInsnAttr.addEdgeInsn(exitEdge, breakInsn);
+			addBreakLabel(exitEdge.getSource(), out, breakInsn);
+		}
+		return true;
 	}
 
 	private boolean inExceptionHandlerBlocks(BlockNode loopEnd) {
@@ -710,45 +924,97 @@ final class LoopRegionMaker {
 	 * @param breakInsn a break instruction
 	 */
 	private void addBreakLabel(BlockNode blockOnLoop, BlockNode exit, InsnNode breakInsn) {
-		List<LoopInfo> exitLoop = mth.getAllLoopsForBlock(exit);
-		if (!exitLoop.isEmpty()) {
-			return;
-		}
 		List<LoopInfo> inLoops = mth.getAllLoopsForBlock(blockOnLoop);
 		if (inLoops.size() < 2) {
 			return;
 		}
-		// search for parent loop
-		LoopInfo parentLoop = null;
-		for (LoopInfo loop : inLoops) {
-			if (loop.getParentLoop() == null) {
-				parentLoop = loop;
-				break;
-			}
-		}
-		if (parentLoop == null) {
+		Set<LoopInfo> exitLoops = new HashSet<>(mth.getAllLoopsForBlock(exit));
+		List<LoopInfo> exitedLoops = inLoops.stream()
+				.filter(loop -> !exitLoops.contains(loop))
+				.toList();
+		if (exitedLoops.size() < 2) {
 			return;
 		}
-		if (parentLoop.getEnd() != exit && !parentLoop.getExitNodes().contains(exit)) {
-			LoopLabelAttr labelAttr = new LoopLabelAttr(parentLoop);
-			breakInsn.addAttr(labelAttr);
-			parentLoop.getStart().addAttr(labelAttr);
+		// An unlabeled break exits only the innermost loop. Select the outermost loop actually
+		// crossed by this edge, even when the destination remains inside a still larger ancestor.
+		// The previous exitLoops.isEmpty shortcut lost this case and turned `break outer` into a
+		// one-level break, leaving PHI carry assignments reachable with uninitialized Java locals.
+		LoopInfo labelLoop = null;
+		for (LoopInfo loop : exitedLoops) {
+			LoopInfo parent = loop.getParentLoop();
+			if (parent == null || !exitedLoops.contains(parent)) {
+				if (labelLoop != null) {
+					return; // malformed/non-nested overlap: don't guess a label
+				}
+				labelLoop = loop;
+			}
 		}
+		if (labelLoop == null) {
+			return;
+		}
+		for (LoopInfo loop : exitedLoops) {
+			if (loop != labelLoop && !loop.hasParent(labelLoop)) {
+				return; // malformed/non-nested overlap: don't guess a label
+			}
+		}
+		LoopLabelAttr labelAttr = new LoopLabelAttr(labelLoop);
+		breakInsn.addAttr(labelAttr);
+		labelLoop.getStart().addAttr(labelAttr);
 	}
 
 	private static void insertContinue(LoopInfo loop) {
 		BlockNode loopEnd = loop.getEnd();
+		if (isLoopPhiCarryTail(loop)) {
+			// A continue on an incoming synthetic bridge would jump over these assignments.
+			// Leave the bridge structural so region generation owns the carry tail.
+			return;
+		}
 		List<BlockNode> predecessors = loopEnd.getPredecessors();
 		if (predecessors.size() <= 1) {
 			return;
 		}
 		Set<BlockNode> loopExitNodes = loop.getExitNodes();
 		for (BlockNode pred : predecessors) {
-			if (canInsertContinue(pred, predecessors, loopEnd, loopExitNodes)) {
+			boolean nestedStateReset = isStateResetBridge(pred);
+			if (nestedStateReset || canInsertContinue(pred, predecessors, loopEnd, loopExitNodes)) {
 				InsnNode cont = new InsnNode(InsnType.CONTINUE, 0);
+				if (nestedStateReset) {
+					LoopLabelAttr labelAttr = new LoopLabelAttr(loop);
+					cont.addAttr(labelAttr);
+					loop.getStart().addAttr(labelAttr);
+				}
 				pred.getInstructions().add(cont);
 			}
 		}
+	}
+
+	private static boolean isLoopPhiCarryTail(LoopInfo loop) {
+		BlockNode loopEnd = loop.getEnd();
+		if (loopEnd.getInstructions().isEmpty() || !isLoopCarryOnlyBlock(loopEnd)) {
+			return false;
+		}
+		PhiListAttr phiList = loop.getStart().get(AType.PHI_LIST);
+		if (phiList == null || phiList.getList().isEmpty()) {
+			return false;
+		}
+		for (InsnNode moveInsn : loopEnd.getInstructions()) {
+			RegisterArg result = moveInsn.getResult();
+			if (result == null) {
+				return false;
+			}
+			boolean feedsLoopPhi = false;
+			for (PhiInsn phi : phiList.getList()) {
+				RegisterArg carryArg = phi.getArgByBlock(loopEnd);
+				if (carryArg != null && result.sameRegAndSVar(carryArg)) {
+					feedsLoopPhi = true;
+					break;
+				}
+			}
+			if (!feedsLoopPhi) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private static boolean canInsertContinue(BlockNode pred, List<BlockNode> predecessors, BlockNode loopEnd,
@@ -762,7 +1028,7 @@ final class LoopRegionMaker {
 			return false;
 		}
 		BlockNode codePred = preds.get(0);
-		if (codePred.contains(AFlag.ADDED_TO_REGION)) {
+		if (codePred.contains(AFlag.ADDED_TO_REGION) && !isStateResetBridge(pred)) {
 			return false;
 		}
 		if (loopEnd.isDominator(codePred)
@@ -773,10 +1039,12 @@ final class LoopRegionMaker {
 			return false;
 		}
 		if (!pred.getAll(AType.EDGE_INSN).isEmpty()) {
-			// if we've already inserted a break, don't also insert a continue in the same spot
+			// An explicit edge instruction already owns this control-flow edge. Adding an
+			// instruction to the synthetic bridge as well leaves an unowned code block.
 			List<EdgeInsnAttr> insns = pred.getAll(AType.EDGE_INSN);
 			for (EdgeInsnAttr insn : insns) {
-				if (insn.getInsn().getType() == InsnType.BREAK) {
+				InsnType type = insn.getInsn().getType();
+				if (type == InsnType.BREAK || type == InsnType.CONTINUE) {
 					return false;
 				}
 			}
@@ -789,6 +1057,17 @@ final class LoopRegionMaker {
 			}
 		}
 		return gotoExit;
+	}
+
+	private static boolean isStateResetBridge(BlockNode block) {
+		if (!block.contains(AFlag.SYNTHETIC) || block.getInstructions().size() != 1) {
+			return false;
+		}
+		InsnNode insn = block.getInstructions().get(0);
+		return insn.getType() == InsnType.CONST
+				&& insn.getArgsCount() == 1
+				&& insn.getArg(0).isLiteral()
+				&& ((LiteralArg) insn.getArg(0)).getLiteral() == 0;
 	}
 
 	private static boolean isDominatedOnBlocks(BlockNode dom, List<BlockNode> blocks) {

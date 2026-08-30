@@ -1,16 +1,21 @@
 package jadx.core.dex.visitors.regions;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.AType;
 import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.IfOp;
+import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.InvokeType;
@@ -36,6 +41,8 @@ import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.dex.visitors.JadxVisitor;
 import jadx.core.dex.visitors.regions.variables.ProcessVariables;
 import jadx.core.dex.visitors.shrink.CodeShrinkVisitor;
+import jadx.core.dex.visitors.typeinference.BoundEnum;
+import jadx.core.dex.visitors.typeinference.ITypeBound;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnRemover;
 import jadx.core.utils.InsnUtils;
@@ -49,6 +56,7 @@ import jadx.core.utils.exceptions.JadxOverflowException;
 )
 public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor {
 	private static final Logger LOG = LoggerFactory.getLogger(LoopRegionVisitor.class);
+	private static final ArgType ITERABLE_TYPE = ArgType.object("java.lang.Iterable");
 
 	@Override
 	public void visit(MethodNode mth) {
@@ -72,13 +80,20 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 			return false;
 		}
 		IfCondition condition = loopRegion.getCondition();
-		if (condition == null) {
+		if (condition == null
+				|| mth.contains(AType.NORMALIZED_COROUTINE_LOOP) && containsDuplicatedBlock(loopRegion)) {
 			return false;
 		}
 		if (checkForIndexedLoop(mth, loopRegion, condition)) {
 			return true;
 		}
 		return checkIterableForEach(mth, loopRegion, condition);
+	}
+
+	private static boolean containsDuplicatedBlock(LoopRegion loopRegion) {
+		Set<IBlock> blocks = Collections.newSetFromMap(new IdentityHashMap<>());
+		RegionUtils.getAllRegionBlocks(loopRegion, blocks);
+		return blocks.stream().anyMatch(block -> block.contains(AFlag.DUPLICATED));
 	}
 
 	/**
@@ -206,6 +221,7 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 		if (!arrayArg.equals(arrGetInsn.getArg(0))) {
 			return null;
 		}
+		BlockNode lenBlock = BlockUtils.getBlockByInsn(mth, len);
 		RegisterArg iterVar = arrGetInsn.getResult();
 		if (iterVar != null) {
 			if (!usedOnlyInLoop(mth, loopRegion, iterVar)) {
@@ -237,7 +253,13 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 		ForEachLoop forEachLoop = new ForEachLoop(iterVar, len.getArg(0));
 		forEachLoop.injectFakeInsns(loopRegion);
 		if (InsnUtils.dontGenerateIfNotUsed(len)) {
-			InsnRemover.remove(mth, len);
+			if (lenBlock != null && lenBlock.contains(AFlag.DUPLICATED)) {
+				InsnRemover remover = new InsnRemover(mth);
+				remover.addWithoutUnbind(len);
+				remover.performWithoutDuplicatedBlockWarning();
+			} else {
+				InsnRemover.remove(mth, len);
+			}
 		}
 		CodeShrinkVisitor.shrinkMethod(mth);
 		return forEachLoop;
@@ -266,6 +288,13 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 		InsnNode nextCall = itUseList.get(1).getParentInsn();
 		if (!checkInvoke(hasNextCall, "java.util.Iterator", "hasNext()Z")
 				|| !checkInvoke(nextCall, "java.util.Iterator", "next()Ljava/lang/Object;")) {
+			return false;
+		}
+		ArgType iterableType = iterableArg.getType();
+		if (!isKnownIterableInterface(iterableType)
+				&& !ArgType.isInstanceOf(mth.root(), iterableType, ITERABLE_TYPE)) {
+			// A custom iterator() method is valid Java but its receiver can't be used
+			// as the expression of an enhanced-for loop unless it implements Iterable.
 			return false;
 		}
 		List<InsnNode> toSkip = new ArrayList<>();
@@ -355,13 +384,58 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 				iterVar.setType(gType);
 				return true;
 			}
+			if (isExactIteratorElementCast(iterVar, gType)) {
+				// The explicit cast directly following Iterator.next() is stronger evidence
+				// than a later subtype inferred from branch-local register reuse. Keep the
+				// declared iterable element type. Keep the iterator form as well: converting
+				// it to an enhanced-for can consume a branch-local CHECK_CAST which reuses the
+				// same physical register and leave an uncast subtype consumer in Java output.
+				preserveNarrowInvokeCasts(mth, iterVar, gType);
+				iterVar.setType(gType);
+				return false;
+			}
+			if (isSameRawObjectType(gType, varType)) {
+				if (iterVar.getImmutableType() == null) {
+					iterVar.setType(gType);
+				}
+				return true;
+			}
 			if (ArgType.isInstanceOf(mth.root(), gType, varType)) {
 				return true;
 			}
+			if (canCheckKnownNarrowingType(gType, varType)
+					&& ArgType.isInstanceOf(mth.root(), varType, gType)) {
+				// The loop body performs a valid narrowing cast. It can't be converted
+				// to an enhanced-for loop, but the generic types are not inconsistent.
+				return false;
+			}
+			if (isUnknownObjectWildcardType(gType)) {
+				// An unbounded wildcard does not declare a conflicting element type.
+				// Keep the original iterator loop because its body can narrow the value.
+				return false;
+			}
 			ArgType wildcardType = gType.getWildcardType();
 			if (wildcardType != null
-					&& gType.getWildcardBound() == ArgType.WildcardBound.EXTENDS
-					&& ArgType.isInstanceOf(mth.root(), wildcardType, varType)) {
+					&& gType.getWildcardBound() == ArgType.WildcardBound.EXTENDS) {
+				if (isSameRawExtendsWildcardType(gType, varType)
+						|| isSameRawBoundedWildcardType(gType, varType)) {
+					// The erased cast type is compatible, but converting a loop whose element type
+					// lost its generic arguments can invalidate reused/duplicated regions. Keep the
+					// original iterator loop without reporting a false type mismatch.
+					return false;
+				}
+				if (ArgType.isInstanceOf(mth.root(), wildcardType, varType)) {
+					return true;
+				}
+			}
+			if (isExactSingleGenericUpperBound(gType, varType)) {
+				// Assigning the iterable element to a bounded type variable requires
+				// the explicit cast already present in the iterator loop.
+				return false;
+			}
+			ArgType consumerLoopType = findConsumerSuperLoopType(iterVar, gType);
+			if (consumerLoopType != null && iterVar.getImmutableType() == null) {
+				iterVar.setType(consumerLoopType);
 				return true;
 			}
 			LOG.warn("Generic type differs: '{}' and '{}' in {}", gType, varType, mth);
@@ -381,6 +455,167 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 		}
 		iterableArg.setType(genericType);
 		return true;
+	}
+
+	private static boolean isExactIteratorElementCast(RegisterArg iterVar, ArgType iterableElementType) {
+		InsnNode assignInsn = iterVar.getAssignInsn();
+		return assignInsn instanceof IndexInsnNode
+				&& assignInsn.getType() == InsnType.CHECK_CAST
+				&& ((IndexInsnNode) assignInsn).getIndexAsType().equals(iterableElementType);
+	}
+
+	private static void preserveNarrowInvokeCasts(
+			MethodNode mth, RegisterArg iterVar, ArgType iterableElementType) {
+		SSAVar ssaVar = iterVar.getSVar();
+		if (ssaVar == null) {
+			return;
+		}
+		for (RegisterArg use : new ArrayList<>(ssaVar.getUseList())) {
+			InsnNode useInsn = use.getParentInsn();
+			if (!(useInsn instanceof InvokeNode)) {
+				continue;
+			}
+			InvokeNode invoke = (InvokeNode) useInsn;
+			if (invoke.getInstanceArg() == use) {
+				continue;
+			}
+			int argIndex = invoke.getArgIndex(use) - invoke.getFirstArgOffset();
+			List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+			if (argIndex < 0 || argIndex >= argTypes.size()) {
+				continue;
+			}
+			ArgType formalType = argTypes.get(argIndex);
+			if (formalType.equals(iterableElementType)
+					|| !formalType.equals(use.getType())
+					|| !formalType.isObject()) {
+				continue;
+			}
+			IndexInsnNode castInsn = new IndexInsnNode(InsnType.CHECK_CAST, formalType, 1);
+			RegisterArg castSource = use.duplicate();
+			castSource.forceSetInitType(iterableElementType);
+			castInsn.addArg(castSource);
+			castInsn.add(AFlag.SYNTHETIC);
+			castInsn.add(AFlag.EXPLICIT_CAST);
+			InsnArg castArg = InsnArg.wrapInsnIntoArg(castInsn);
+			castArg.setType(formalType);
+			if (useInsn.replaceArg(use, castArg)) {
+				InsnRemover.unbindArgUsage(mth, use);
+			}
+		}
+	}
+
+	static boolean isSameRawObjectType(ArgType first, ArgType second) {
+		return first.isObject()
+				&& second.isObject()
+				&& first.getObject().equals(second.getObject());
+	}
+
+	static boolean isSameRawExtendsWildcardType(ArgType genericType, ArgType rawType) {
+		ArgType wildcardType = genericType.getWildcardType();
+		return genericType.getWildcardBound() == ArgType.WildcardBound.EXTENDS
+				&& wildcardType != null
+				&& wildcardType.isGeneric()
+				&& !rawType.isGeneric()
+				&& isSameRawObjectType(wildcardType, rawType);
+	}
+
+	static boolean isSameRawBoundedWildcardType(ArgType genericType, ArgType rawType) {
+		ArgType wildcardType = genericType.getWildcardType();
+		if (genericType.getWildcardBound() != ArgType.WildcardBound.EXTENDS
+				|| wildcardType == null
+				|| !wildcardType.isGenericType()
+				|| rawType.isGeneric()) {
+			return false;
+		}
+		List<ArgType> extendTypes = wildcardType.getExtendTypes();
+		return extendTypes.size() == 1
+				&& extendTypes.get(0).isGeneric()
+				&& isSameRawObjectType(extendTypes.get(0), rawType);
+	}
+
+	static boolean isUnknownObjectWildcardType(ArgType type) {
+		ArgType wildcardType = type.getWildcardType();
+		if (!ArgType.OBJECT.equals(wildcardType)) {
+			return false;
+		}
+		ArgType.WildcardBound bound = type.getWildcardBound();
+		return bound == ArgType.WildcardBound.UNBOUND
+				|| bound == ArgType.WildcardBound.EXTENDS;
+	}
+
+	static boolean canCheckKnownNarrowingType(ArgType iterableType, ArgType varType) {
+		return !iterableType.isGeneric()
+				&& !iterableType.isGenericType()
+				&& !varType.isGeneric()
+				&& !varType.isGenericType();
+	}
+
+	private static ArgType findConsumerSuperLoopType(RegisterArg iterVar, ArgType iterableElementType) {
+		SSAVar ssaVar = iterVar.getSVar();
+		if (ssaVar == null) {
+			return null;
+		}
+		ArgType result = null;
+		for (ITypeBound bound : ssaVar.getTypeInfo().getBounds()) {
+			if (bound.getBound() != BoundEnum.USE) {
+				continue;
+			}
+			ArgType useType = bound.getType();
+			if (useType.getWildcardBound() != ArgType.WildcardBound.SUPER) {
+				continue;
+			}
+			ArgType candidate = resolveConsumerSuperLoopType(iterableElementType, useType.getWildcardType());
+			if (candidate == null) {
+				continue;
+			}
+			if (result != null && !result.equals(candidate)) {
+				return null;
+			}
+			result = candidate;
+		}
+		return result;
+	}
+
+	static ArgType resolveConsumerSuperLoopType(ArgType iterableElementType, ArgType consumerType) {
+		if (consumerType == null) {
+			return null;
+		}
+		if (iterableElementType.getWildcardBound() == ArgType.WildcardBound.EXTENDS
+				&& consumerType.equals(iterableElementType.getWildcardType())) {
+			return consumerType;
+		}
+		if (isSameRawObjectType(iterableElementType, consumerType)) {
+			return iterableElementType;
+		}
+		return null;
+	}
+
+	static boolean isExactSingleGenericUpperBound(ArgType iterableElementType, ArgType variableType) {
+		if (!variableType.isGenericType()) {
+			return false;
+		}
+		List<ArgType> extendTypes = variableType.getExtendTypes();
+		return extendTypes.size() == 1 && iterableElementType.equals(extendTypes.get(0));
+	}
+
+	static boolean isKnownIterableInterface(ArgType type) {
+		if (!type.isObject()) {
+			return false;
+		}
+		switch (type.getObject()) {
+			case "java.lang.Iterable":
+			case "java.util.Collection":
+			case "java.util.List":
+			case "java.util.Set":
+			case "java.util.SortedSet":
+			case "java.util.NavigableSet":
+			case "java.util.Queue":
+			case "java.util.Deque":
+				return true;
+
+			default:
+				return false;
+		}
 	}
 
 	/**
@@ -405,6 +640,19 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 	}
 
 	private static boolean assignOnlyInLoop(MethodNode mth, LoopRegion loopRegion, RegisterArg arg) {
+		Set<SSAVar> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+		return assignOnlyInLoop(mth, loopRegion, arg, visited);
+	}
+
+	private static boolean assignOnlyInLoop(
+			MethodNode mth, LoopRegion loopRegion, RegisterArg arg, Set<SSAVar> visited) {
+		SSAVar ssaVar = arg.getSVar();
+		if (ssaVar != null && !visited.add(ssaVar)) {
+			// A phi cycle only brings us back to an assignment already checked in this
+			// traversal. Treat the back-edge as satisfied and keep checking the other
+			// incoming values instead of recursing until the Java stack overflows.
+			return true;
+		}
 		InsnNode assignInsn = arg.getAssignInsn();
 		if (assignInsn == null) {
 			return true;
@@ -415,7 +663,7 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 		if (assignInsn instanceof PhiInsn) {
 			PhiInsn phiInsn = (PhiInsn) assignInsn;
 			for (InsnArg phiArg : phiInsn.getArguments()) {
-				if (!assignOnlyInLoop(mth, loopRegion, (RegisterArg) phiArg)) {
+				if (!assignOnlyInLoop(mth, loopRegion, (RegisterArg) phiArg, visited)) {
 					return false;
 				}
 			}

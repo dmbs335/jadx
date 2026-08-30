@@ -7,6 +7,8 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import jadx.core.Consts;
 import jadx.core.dex.attributes.AFlag;
@@ -32,6 +34,7 @@ import static jadx.core.utils.ListUtils.allMatch;
  * can be used while iterating over instructions list
  */
 public class InsnRemover {
+	private static final Logger LOG = LoggerFactory.getLogger(InsnRemover.class);
 
 	private final MethodNode mth;
 	private final List<InsnNode> toRemove;
@@ -64,12 +67,24 @@ public class InsnRemover {
 	}
 
 	public void perform() {
+		perform(true);
+	}
+
+	/**
+	 * Use only for a local replacement which intentionally updates every region referencing the
+	 * same duplicated block. All regular removals must keep the duplicated-block warning enabled.
+	 */
+	public void performWithoutDuplicatedBlockWarning() {
+		perform(false);
+	}
+
+	private void perform(boolean warnOnDuplicatedBlock) {
 		if (toRemove.isEmpty()) {
 			return;
 		}
 		if (instrList == null) {
 			for (InsnNode remInsn : toRemove) {
-				remove(mth, remInsn);
+				remove(mth, remInsn, warnOnDuplicatedBlock);
 			}
 		} else {
 			unbindInsns(mth, toRemove);
@@ -126,7 +141,11 @@ public class InsnRemover {
 		if (mth != null) {
 			SSAVar ssaVar = r.getSVar();
 			if (ssaVar != null && ssaVar.getAssignInsn() == insn /* can be already reassigned */) {
-				removeSsaVar(mth, ssaVar);
+				try {
+					removeSsaVar(mth, ssaVar);
+				} catch (JadxRuntimeException e) {
+					LOG.debug("Keep SSA var from removed instruction because it is still in use: {}", ssaVar, e);
+				}
 			}
 		}
 		insn.setResult(null);
@@ -203,6 +222,10 @@ public class InsnRemover {
 	}
 
 	public static void remove(MethodNode mth, @Nullable InsnNode insn) {
+		remove(mth, insn, true);
+	}
+
+	private static void remove(MethodNode mth, @Nullable InsnNode insn, boolean warnOnDuplicatedBlock) {
 		if (insn == null) {
 			return;
 		}
@@ -212,7 +235,7 @@ public class InsnRemover {
 		}
 		BlockNode block = BlockUtils.getBlockByInsn(mth, insn);
 		if (block != null) {
-			remove(mth, block, insn);
+			remove(mth, block, insn, warnOnDuplicatedBlock);
 		} else {
 			insn.add(AFlag.DONT_GENERATE);
 			mth.addWarnComment("Not found block with instruction: " + insn);
@@ -220,7 +243,11 @@ public class InsnRemover {
 	}
 
 	public static void remove(MethodNode mth, BlockNode block, InsnNode insn) {
-		if (block.contains(AFlag.DUPLICATED)) {
+		remove(mth, block, insn, true);
+	}
+
+	private static void remove(MethodNode mth, BlockNode block, InsnNode insn, boolean warnOnDuplicatedBlock) {
+		if (warnOnDuplicatedBlock && block.contains(AFlag.DUPLICATED)) {
 			mth.addWarnComment("Instruction removed from duplicated block: " + block + ", please report this as an issue");
 		}
 		unbindInsn(mth, insn);

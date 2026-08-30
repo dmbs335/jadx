@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.function.Predicate;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -388,6 +389,80 @@ public class FileUtils {
 		return new File(file.getParentFile(), name);
 	}
 
+	/**
+	 * Convert a validated, host-independent archive path into a path that can be materialized on all
+	 * supported host file systems. ZIP uses '/' as a separator and permits characters such as ':'
+	 * that Windows does not. Percent escaping keeps the mapping deterministic and collision-free.
+	 */
+	public static String toSafeFilePath(String archivePath) {
+		String normalizedPath = archivePath.replace('\\', '/');
+		String[] segments = normalizedPath.split("/", -1);
+		StringBuilder result = new StringBuilder(normalizedPath.length());
+		for (int i = 0; i < segments.length; i++) {
+			if (i != 0) {
+				result.append('/');
+			}
+			result.append(escapeFileNameSegment(segments[i]));
+		}
+		return result.toString();
+	}
+
+	private static String escapeFileNameSegment(String segment) {
+		StringBuilder result = new StringBuilder(segment.length());
+		int lastIndex = segment.length() - 1;
+		for (int i = 0; i < segment.length(); i++) {
+			char ch = segment.charAt(i);
+			boolean trailingDotOrSpace = i == lastIndex && (ch == '.' || ch == ' ');
+			if (ch == '%' || ch < 0x20 || "<>:\"|?*".indexOf(ch) != -1 || trailingDotOrSpace) {
+				appendPercentEncoded(result, ch);
+			} else {
+				result.append(ch);
+			}
+		}
+		if (isWindowsReservedName(segment)) {
+			String escaped = result.toString();
+			result.setLength(0);
+			appendPercentEncoded(result, segment.charAt(0));
+			result.append(escaped, 1, escaped.length());
+		}
+		return result.toString();
+	}
+
+	private static boolean isWindowsReservedName(String segment) {
+		if (segment.isEmpty()) {
+			return false;
+		}
+		int end = segment.length();
+		while (end > 0 && (segment.charAt(end - 1) == '.' || segment.charAt(end - 1) == ' ')) {
+			end--;
+		}
+		String normalized = segment.substring(0, end);
+		int dot = normalized.indexOf('.');
+		String baseName = normalized.substring(0, dot == -1 ? normalized.length() : dot).stripTrailing()
+				.toUpperCase(Locale.ROOT);
+		if (baseName.equals("CON") || baseName.equals("PRN") || baseName.equals("AUX") || baseName.equals("NUL")) {
+			return true;
+		}
+		return baseName.length() == 4
+				&& (baseName.startsWith("COM") || baseName.startsWith("LPT"))
+				&& baseName.charAt(3) >= '1'
+				&& baseName.charAt(3) <= '9';
+	}
+
+	private static void appendPercentEncoded(StringBuilder result, char ch) {
+		result.append('%');
+		int value = ch;
+		if (value > 0xFF) {
+			result.append('u');
+			for (int shift = 12; shift >= 0; shift -= 4) {
+				result.append((char) HEX_ARRAY[(value >>> shift) & 0xF]);
+			}
+		} else {
+			result.append((char) HEX_ARRAY[(value >>> 4) & 0xF]);
+			result.append((char) HEX_ARRAY[value & 0xF]);
+		}
+	}
+
 	private static final byte[] HEX_ARRAY = "0123456789abcdef".getBytes(StandardCharsets.US_ASCII);
 
 	public static String bytesToHex(byte[] bytes) {
@@ -502,6 +577,139 @@ public class FileUtils {
 		}
 	}
 
+	public static String sha256Sum(String str) {
+		return sha256Sum(str.getBytes(StandardCharsets.UTF_8));
+	}
+
+	public static String sha256Sum(byte[] data) {
+		try {
+			MessageDigest md = MessageDigest.getInstance("SHA-256");
+			md.update(data);
+			return bytesToHex(md.digest());
+		} catch (Exception e) {
+			throw new JadxRuntimeException("Failed to build SHA-256 hash", e);
+		}
+	}
+
+	public static String sha256Sum(Path file) {
+		try {
+			MessageDigest md = MessageDigest.getInstance("SHA-256");
+			byte[] buffer = new byte[64 * 1024];
+			try (InputStream input = Files.newInputStream(file)) {
+				int read;
+				while ((read = input.read(buffer)) != -1) {
+					md.update(buffer, 0, read);
+				}
+			}
+			return bytesToHex(md.digest());
+		} catch (Exception e) {
+			throw new JadxRuntimeException("Failed to build SHA-256 hash for: " + file, e);
+		}
+	}
+
+	/**
+	 * Exact, order-sensitive content hash for semantic cache invalidation.
+	 *
+	 * <p>
+	 * Unlike {@link #buildInputsHash(List)}, this method never relies on timestamps. Top-level
+	 * input name and directory-relative entry names are included because input order and split roles
+	 * can affect generated output. Parent directories are intentionally excluded so moving an
+	 * unchanged input does not invalidate reusable results.
+	 * </p>
+	 */
+	public static String buildInputsContentHash(List<Path> inputPaths) {
+		return buildInputsContentHash(inputPaths, null);
+	}
+
+	/**
+	 * Build the same path/order-sensitive aggregate while substituting a verified SHA-256 for each
+	 * file body. The provider is responsible for returning exactly 32 bytes. File size is checked
+	 * before and after the lookup so a concurrent replacement cannot silently enter the aggregate.
+	 */
+	public static String buildInputsContentHash(
+			List<Path> inputPaths, @Nullable FileContentHashProvider hashProvider) {
+		try {
+			MessageDigest md = MessageDigest.getInstance("SHA-256");
+			updateDigestInt(md, inputPaths.size());
+			for (int i = 0; i < inputPaths.size(); i++) {
+				Path input = inputPaths.get(i).toAbsolutePath().normalize();
+				updateDigestInt(md, i);
+				Path fileName = input.getFileName();
+				updateDigestString(md, fileName == null ? "" : fileName.toString());
+				if (Files.isDirectory(input)) {
+					updateDigestString(md, "directory");
+					List<Path> files;
+					try (Stream<Path> walk = Files.walk(input)) {
+						files = walk.filter(Files::isRegularFile)
+								.sorted((first, second) -> input.relativize(first).toString()
+										.compareTo(input.relativize(second).toString()))
+								.collect(Collectors.toList());
+					}
+					updateDigestInt(md, files.size());
+					for (Path file : files) {
+						updateDigestString(md, input.relativize(file).toString());
+						updateDigestFile(md, file, hashProvider);
+					}
+				} else {
+					updateDigestString(md, "file");
+					updateDigestFile(md, input, hashProvider);
+				}
+			}
+			return bytesToHex(md.digest());
+		} catch (Exception e) {
+			throw new JadxRuntimeException("Failed to build content hash for inputs", e);
+		}
+	}
+
+	private static void updateDigestFile(MessageDigest md, Path file) throws IOException {
+		updateDigestFile(md, file, null);
+	}
+
+	private static void updateDigestFile(
+			MessageDigest md, Path file, @Nullable FileContentHashProvider hashProvider) throws IOException {
+		BasicFileAttributes before = Files.readAttributes(file, BasicFileAttributes.class);
+		updateDigestLong(md, before.size());
+		if (hashProvider == null) {
+			byte[] buffer = new byte[64 * 1024];
+			try (InputStream input = Files.newInputStream(file)) {
+				int read;
+				while ((read = input.read(buffer)) != -1) {
+					md.update(buffer, 0, read);
+				}
+			}
+		} else {
+			byte[] contentHash = hashProvider.hash(file);
+			if (contentHash.length != 32) {
+				throw new IOException("Expected a SHA-256 content hash for: " + file);
+			}
+			md.update(contentHash);
+		}
+		BasicFileAttributes after = Files.readAttributes(file, BasicFileAttributes.class);
+		if (before.size() != after.size()
+				|| !before.lastModifiedTime().equals(after.lastModifiedTime())
+				|| !java.util.Objects.equals(before.fileKey(), after.fileKey())) {
+			throw new IOException("Input changed while hashing: " + file);
+		}
+	}
+
+	private static void updateDigestString(MessageDigest md, String value) {
+		byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+		updateDigestInt(md, bytes.length);
+		md.update(bytes);
+	}
+
+	private static void updateDigestInt(MessageDigest md, int value) {
+		md.update((byte) (value >>> 24));
+		md.update((byte) (value >>> 16));
+		md.update((byte) (value >>> 8));
+		md.update((byte) value);
+	}
+
+	private static void updateDigestLong(MessageDigest md, long value) {
+		updateDigestInt(md, (int) (value >>> 32));
+		updateDigestInt(md, (int) value);
+	}
+
 	/**
 	 * Hash timestamps of input files
 	 */
@@ -520,5 +728,10 @@ public class FileUtils {
 		} catch (Exception e) {
 			throw new JadxRuntimeException("Failed to build hash for inputs", e);
 		}
+	}
+
+	@FunctionalInterface
+	public interface FileContentHashProvider {
+		byte[] hash(Path file) throws IOException;
 	}
 }

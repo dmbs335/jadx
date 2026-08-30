@@ -86,7 +86,7 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 		}
 		ClassNode cls = mth.getParentClass();
 		String signature = mth.getMethodInfo().makeSignature(false);
-		List<IMethodDetails> overrideList = new ArrayList<>();
+		List<IMethodDetails> overrideList = new ArrayList<>(2);
 		Set<IMethodDetails> baseMethods = new HashSet<>();
 		for (ArgType superType : superData.getSuperTypes()) {
 			ClassNode classNode = mth.root().resolveClass(superType);
@@ -168,12 +168,12 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 		}
 		if (attr == null) {
 			// traced to base method
-			List<IMethodDetails> cleanOverrideList = overrideList.stream().distinct().collect(Collectors.toList());
+			List<IMethodDetails> cleanOverrideList = overrideList.stream().distinct().collect(Collectors.toUnmodifiableList());
 			return applyOverrideAttr(mth, cleanOverrideList, baseMethods, false);
 		}
 		// trace stopped at already processed method -> start merging
 		List<IMethodDetails> mergedOverrideList = Utils.mergeLists(overrideList, attr.getOverrideList());
-		List<IMethodDetails> cleanOverrideList = mergedOverrideList.stream().distinct().collect(Collectors.toList());
+		List<IMethodDetails> cleanOverrideList = mergedOverrideList.stream().distinct().collect(Collectors.toUnmodifiableList());
 		Set<IMethodDetails> mergedBaseMethods = Utils.mergeSets(baseMethods, attr.getBaseMethods());
 		return applyOverrideAttr(mth, cleanOverrideList, mergedBaseMethods, true);
 	}
@@ -190,7 +190,7 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 				MethodOverrideAttr ovrdAttr = mthNode.get(AType.METHOD_OVERRIDE);
 				if (ovrdAttr != null) {
 					// use one of already allocated sets
-					relatedMethods = ovrdAttr.getRelatedMthNodes();
+					relatedMethods = getMutableRelatedMethods(ovrdAttr);
 					break;
 				}
 			}
@@ -233,6 +233,21 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 			depth++;
 		}
 		return new MethodOverrideAttr(overrideList, relatedMethods, baseMethods);
+	}
+
+	private static SortedSet<MethodNode> getMutableRelatedMethods(MethodOverrideAttr attr) {
+		SortedSet<MethodNode> previous = attr.getRelatedMthNodes();
+		if (previous instanceof TreeSet) {
+			return previous;
+		}
+		SortedSet<MethodNode> mutable = new TreeSet<>(previous);
+		for (MethodNode relatedMth : previous) {
+			MethodOverrideAttr relatedAttr = relatedMth.get(AType.METHOD_OVERRIDE);
+			if (relatedAttr != null && relatedAttr.getRelatedMthNodes() == previous) {
+				relatedAttr.setRelatedMthNodes(mutable);
+			}
+		}
+		return mutable;
 	}
 
 	@NotNull
@@ -437,7 +452,9 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 				if (otherSignature.equals(newSignature)) {
 					if (rename) {
 						if (otherMth.contains(AFlag.DONT_RENAME) || otherMth.contains(AType.METHOD_OVERRIDE)) {
-							otherMth.addWarnComment("Can't rename method to resolve collision");
+							if (!isCompilerBridge(mth)) {
+								otherMth.addWarnComment("Can't rename method to resolve collision");
+							}
 						} else {
 							otherMth.getMethodInfo().setAlias(makeNewAlias(otherMth));
 							otherMth.addAttr(new RenameReasonAttr("avoid collision after fix types in other method"));
@@ -448,6 +465,10 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 				}
 			}
 		}
+	}
+
+	private static boolean isCompilerBridge(MethodNode mth) {
+		return mth.getAccessFlags().isBridge() && mth.getAccessFlags().isSynthetic();
 	}
 
 	// TODO: at this point deobfuscator is not available and map file already saved

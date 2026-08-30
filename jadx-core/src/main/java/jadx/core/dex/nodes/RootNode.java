@@ -61,6 +61,7 @@ import jadx.core.utils.StringUtils;
 import jadx.core.utils.Utils;
 import jadx.core.utils.android.AndroidResourcesUtils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
+import jadx.core.utils.exceptions.JadxTaskCancelledException;
 import jadx.core.xmlgen.IResTableParser;
 import jadx.core.xmlgen.ManifestAttributes;
 import jadx.core.xmlgen.ResourceStorage;
@@ -375,8 +376,11 @@ public class RootNode extends AttrNode {
 			long start = debugEnabled ? System.currentTimeMillis() : 0;
 			try {
 				pass.init(this);
+			} catch (JadxTaskCancelledException e) {
+				throw e;
 			} catch (Exception e) {
-				LOG.error("Visitor init failed: {}", pass.getClass().getSimpleName(), e);
+				errorsCounter.addGlobalError(
+						"Visitor init failed: " + pass.getClass().getSimpleName(), e);
 			}
 			for (ClassNode cls : classes) {
 				if (cls.isInner()) {

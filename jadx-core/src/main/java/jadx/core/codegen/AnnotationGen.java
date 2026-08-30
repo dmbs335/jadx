@@ -2,8 +2,6 @@ package jadx.core.codegen;
 
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -57,10 +55,10 @@ public class AnnotationGen {
 		if (aList == null || aList.isEmpty()) {
 			return;
 		}
-		for (IAnnotation a : aList.getAll()) {
+		aList.forEach((type, a) -> {
 			formatAnnotation(code, a);
 			code.add(' ');
-		}
+		});
 	}
 
 	private void add(IAttributeNode node, ICodeWriter code) {
@@ -68,13 +66,13 @@ public class AnnotationGen {
 		if (aList == null || aList.isEmpty()) {
 			return;
 		}
-		for (IAnnotation a : aList.getAll()) {
+		aList.forEach((type, a) -> {
 			String aCls = a.getAnnotationClass();
 			if (!aCls.equals(Consts.OVERRIDE_ANNOTATION)) {
 				code.startLine();
 				formatAnnotation(code, a);
 			}
-		}
+		});
 	}
 
 	private void formatAnnotation(ICodeWriter code, IAnnotation a) {
@@ -86,23 +84,23 @@ public class AnnotationGen {
 			classGen.useClass(code, a.getAnnotationClass());
 		}
 
-		Map<String, EncodedValue> vl = a.getValues();
-		if (!vl.isEmpty()) {
+		int valuesCount = a.getValuesCount();
+		if (valuesCount != 0) {
 			code.add('(');
-			for (Iterator<Entry<String, EncodedValue>> it = vl.entrySet().iterator(); it.hasNext();) {
-				Entry<String, EncodedValue> e = it.next();
-				String paramName = getParamName(annCls, e.getKey());
-				if (paramName.equals("value") && vl.size() == 1) {
+			int[] remaining = { valuesCount };
+			a.forEachValue((name, value) -> {
+				String paramName = getParamName(annCls, name);
+				if (paramName.equals("value") && valuesCount == 1) {
 					// don't add "value = " if no other parameters
 				} else {
 					code.add(paramName);
 					code.add(" = ");
 				}
-				encodeValue(cls.root(), code, e.getValue());
-				if (it.hasNext()) {
+				encodeValue(cls.root(), code, value);
+				if (--remaining[0] != 0) {
 					code.add(", ");
 				}
-			}
+			});
 			code.add(')');
 		}
 	}

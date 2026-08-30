@@ -36,6 +36,11 @@ public class JadxClasspathTest {
 	public void test() {
 		ArgType objExc = object(JAVA_LANG_EXCEPTION);
 		ArgType objThr = object(JAVA_LANG_THROWABLE);
+		assertThat(clsp.getClsType(JAVA_LANG_EXCEPTION)).isEqualTo(objExc);
+		assertThat(clsp.getClsType(JAVA_LANG_EXCEPTION)).isSameAs(clsp.getClsType(JAVA_LANG_EXCEPTION));
+		assertThat(clsp.getClsType("missing.Type")).isNull();
+		assertThat(clsp.getImplementations(JAVA_LANG_THROWABLE)).contains(JAVA_LANG_EXCEPTION);
+		assertThat(clsp.getImplementationTypes(JAVA_LANG_THROWABLE)).contains(objExc);
 
 		assertThat(clsp.isImplements(JAVA_LANG_EXCEPTION, JAVA_LANG_THROWABLE)).isTrue();
 		assertThat(clsp.isImplements(JAVA_LANG_THROWABLE, JAVA_LANG_EXCEPTION)).isFalse();

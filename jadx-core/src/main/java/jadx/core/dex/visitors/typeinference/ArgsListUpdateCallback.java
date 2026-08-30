@@ -1,6 +1,5 @@
 package jadx.core.dex.visitors.typeinference;
 
-import java.util.Iterator;
 import java.util.List;
 import java.util.function.Predicate;
 
@@ -8,6 +7,7 @@ import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
+import jadx.core.dex.instructions.args.SSAVar;
 
 import static jadx.core.dex.visitors.typeinference.TypeUpdateResult.CHANGED;
 import static jadx.core.dex.visitors.typeinference.TypeUpdateResult.REJECT;
@@ -17,30 +17,64 @@ import static jadx.core.dex.visitors.typeinference.TypeUpdateResult.SAME;
  * Type update callback to set same type for args from list.
  */
 public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCallback {
-	private final TypeUpdate typeUpdate;
-	private final TypeUpdateInfo updateInfo;
-	private final Iterator<T> argsIterator;
-	private final ArgType candidateType;
-	private final boolean direct;
+	private TypeUpdate typeUpdate;
+	private TypeUpdateInfo updateInfo;
+	private List<T> args;
+	private int argsIndex;
+	private ArgType candidateType;
+	private boolean direct;
 
 	private @Nullable Predicate<T> argsFilter;
 	private @Nullable ITypeUpdateCallback finalResultCallback;
+	private @Nullable SSAVar rollbackSsaVarOnReject;
 	private boolean ignoreReject = false;
 
 	private boolean allSame = true;
 	private boolean firstQueue = false;
+	private int activeCalls;
+	private boolean releasePending;
+	private @Nullable ArgsListUpdateCallback<?> nextFree;
 
 	public ArgsListUpdateCallback(TypeUpdate typeUpdate, TypeUpdateInfo updateInfo,
 			List<T> args, ArgType candidateType, boolean direct) {
+		init(typeUpdate, updateInfo, args, candidateType, direct);
+	}
+
+	void init(TypeUpdate typeUpdate, TypeUpdateInfo updateInfo,
+			List<T> args, ArgType candidateType, boolean direct) {
 		this.typeUpdate = typeUpdate;
 		this.updateInfo = updateInfo;
-		this.argsIterator = args.iterator();
+		this.args = args;
 		this.candidateType = candidateType;
 		this.direct = direct;
+		this.argsIndex = 0;
+		this.argsFilter = null;
+		this.finalResultCallback = null;
+		this.rollbackSsaVarOnReject = null;
+		this.ignoreReject = false;
+		this.allSame = true;
+		this.firstQueue = false;
+		this.activeCalls = 0;
+		this.releasePending = false;
+		this.nextFree = null;
 	}
 
 	@Override
 	public @Nullable TypeUpdateResult updateCallback(TypeUpdateResult result) {
+		activeCalls++;
+		try {
+			return processUpdate(result);
+		} finally {
+			activeCalls--;
+			if (activeCalls == 0 && releasePending) {
+				TypeUpdateInfo info = updateInfo;
+				releasePending = false;
+				info.releaseArgsListUpdateCallback(this);
+			}
+		}
+	}
+
+	private @Nullable TypeUpdateResult processUpdate(TypeUpdateResult result) {
 		while (true) {
 			if (!ignoreReject) {
 				if (result == REJECT) {
@@ -85,6 +119,10 @@ public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCal
 		this.finalResultCallback = finalResultCallback;
 	}
 
+	public void setRollbackSsaVarOnReject(SSAVar rollbackSsaVarOnReject) {
+		this.rollbackSsaVarOnReject = rollbackSsaVarOnReject;
+	}
+
 	public void setArgsFilter(@Nullable Predicate<T> argsFilter) {
 		this.argsFilter = argsFilter;
 	}
@@ -94,24 +132,52 @@ public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCal
 	}
 
 	private @Nullable TypeUpdateResult finalResult(TypeUpdateResult result) {
-		if (finalResultCallback != null) {
-			return finalResultCallback.updateCallback(result);
+		SSAVar rollbackSsaVar = rollbackSsaVarOnReject;
+		if (result == REJECT && rollbackSsaVar != null) {
+			updateInfo.rollbackUpdate(rollbackSsaVar.getAssign());
+			List<? extends InsnArg> useList = rollbackSsaVar.getUseList();
+			int useCount = useList.size();
+			for (int i = 0; i < useCount; i++) {
+				updateInfo.rollbackUpdate(useList.get(i));
+			}
 		}
-		return result;
+		TypeUpdateResult finalResult = finalResultCallback == null
+				? result
+				: finalResultCallback.updateCallback(result);
+		if (finalResult != null) {
+			// queueTypeUpdate can call this callback recursively when verification returns immediately.
+			// Keep the state alive until the outermost invocation has finished using it.
+			releasePending = true;
+		}
+		return finalResult;
+	}
+
+	void recycle(@Nullable ArgsListUpdateCallback<?> nextFree) {
+		typeUpdate = null;
+		updateInfo = null;
+		args = null;
+		candidateType = null;
+		argsFilter = null;
+		finalResultCallback = null;
+		rollbackSsaVarOnReject = null;
+		this.nextFree = nextFree;
+	}
+
+	@Nullable
+	ArgsListUpdateCallback<?> getNextFree() {
+		return nextFree;
 	}
 
 	private @Nullable T getNextArg() {
-		Iterator<T> it = argsIterator;
 		Predicate<T> filter = argsFilter;
-		while (true) {
-			if (!it.hasNext()) {
-				return null;
-			}
-			T next = it.next();
+		int argsCount = args.size();
+		while (argsIndex < argsCount) {
+			T next = args.get(argsIndex++);
 			if (filter == null || filter.test(next)) {
 				return next;
 			}
 		}
+		return null;
 	}
 
 	@Override

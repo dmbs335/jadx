@@ -28,6 +28,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
+import jadx.core.dex.instructions.args.PrimitiveType;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.instructions.mods.ConstructorInsn;
@@ -256,7 +257,16 @@ public class SimplifyVisitor extends AbstractVisitor {
 		if (parentInsn != null
 				&& parentInsn.getType() == InsnType.ARITH
 				&& argType.isPrimitive() && castToType.isPrimitive()) {
-			return castToType.getRegCount() > argType.getRegCount();
+			if (castToType.getRegCount() > argType.getRegCount()) {
+				return true;
+			}
+			PrimitiveType from = argType.getPrimitiveType();
+			PrimitiveType to = castToType.getPrimitiveType();
+			// int-to-float and long-to-double don't increase the DEX register count,
+			// but removing them changes Java binary numeric promotion and therefore
+			// the arithmetic result (most visibly for division before Math.ceil).
+			return (to == PrimitiveType.FLOAT || to == PrimitiveType.DOUBLE)
+					&& from != PrimitiveType.FLOAT && from != PrimitiveType.DOUBLE;
 		}
 		return false;
 	}
@@ -520,7 +530,7 @@ public class SimplifyVisitor extends AbstractVisitor {
 				insnRemover.addAndUnbind(insnNode);
 			}
 		}
-		insnRemover.perform();
+		insnRemover.performWithoutDuplicatedBlockWarning();
 	}
 
 	private static List<InsnNode> flattenInsnChainUntil(InsnNode insn, InsnType insnType) {

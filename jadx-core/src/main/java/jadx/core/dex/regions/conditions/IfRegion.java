@@ -1,8 +1,10 @@
 package jadx.core.dex.regions.conditions;
 
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.RandomAccess;
 
 import jadx.api.ICodeWriter;
 import jadx.core.codegen.RegionGen;
@@ -15,6 +17,7 @@ import jadx.core.utils.exceptions.CodegenException;
 public final class IfRegion extends ConditionRegion implements IBranchRegion {
 	private IContainer thenRegion;
 	private IContainer elseRegion;
+	private final List<IContainer> subBlocks = Collections.unmodifiableList(new SubBlocksList());
 
 	public IfRegion(IRegion parent) {
 		super(parent);
@@ -50,16 +53,39 @@ public final class IfRegion extends ConditionRegion implements IBranchRegion {
 
 	@Override
 	public List<IContainer> getSubBlocks() {
-		List<BlockNode> conditionBlocks = getConditionBlocks();
-		List<IContainer> all = new ArrayList<>(conditionBlocks.size() + 2);
-		all.addAll(conditionBlocks);
-		if (thenRegion != null) {
-			all.add(thenRegion);
+		return subBlocks;
+	}
+
+	private final class SubBlocksList extends AbstractList<IContainer> implements RandomAccess {
+		@Override
+		public IContainer get(int index) {
+			List<BlockNode> conditionBlocks = getConditionBlocks();
+			int conditionsCount = conditionBlocks.size();
+			if (index < 0) {
+				throw new IndexOutOfBoundsException("Index: " + index);
+			}
+			if (index < conditionsCount) {
+				return conditionBlocks.get(index);
+			}
+			index -= conditionsCount;
+			if (thenRegion != null) {
+				if (index == 0) {
+					return thenRegion;
+				}
+				index--;
+			}
+			if (elseRegion != null && index == 0) {
+				return elseRegion;
+			}
+			throw new IndexOutOfBoundsException("Index: " + index);
 		}
-		if (elseRegion != null) {
-			all.add(elseRegion);
+
+		@Override
+		public int size() {
+			return getConditionBlocks().size()
+					+ (thenRegion == null ? 0 : 1)
+					+ (elseRegion == null ? 0 : 1);
 		}
-		return Collections.unmodifiableList(all);
 	}
 
 	@Override

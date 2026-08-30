@@ -9,6 +9,7 @@ import org.jetbrains.annotations.Nullable;
 import jadx.core.Consts;
 import jadx.core.deobf.NameMapper;
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.AType;
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.InvokeNode;
@@ -129,7 +130,9 @@ public class ApplyVariableNames extends AbstractVisitor {
 			case CONSTRUCTOR:
 				ConstructorInsn co = (ConstructorInsn) insn;
 				MethodNode callMth = root.getMethodUtils().resolveMethod(co);
-				if (callMth != null && callMth.contains(AFlag.ANONYMOUS_CONSTRUCTOR)) {
+				if (callMth != null
+						&& (callMth.contains(AFlag.ANONYMOUS_CONSTRUCTOR)
+								|| callMth.getParentClass().contains(AType.ANONYMOUS_CLASS_ORIGIN))) {
 					// don't use name of anonymous class
 					return null;
 				}

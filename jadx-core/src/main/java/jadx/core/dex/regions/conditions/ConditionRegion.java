@@ -53,6 +53,12 @@ public abstract class ConditionRegion extends AbstractRegion implements IConditi
 		return false;
 	}
 
+	public void markConditionShared() {
+		if (condition != null) {
+			condition = IfCondition.copyForSharedView(condition);
+		}
+	}
+
 	@Override
 	public int getConditionSourceLine() {
 		for (BlockNode block : conditionBlocks) {

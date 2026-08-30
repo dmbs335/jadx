@@ -3,9 +3,12 @@ package jadx.core.dex.visitors;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -18,6 +21,8 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.EnumClassAttr;
 import jadx.core.dex.attributes.nodes.EnumClassAttr.EnumField;
+import jadx.core.dex.attributes.nodes.EnumClassAttr.EnumRegionValueHelper;
+import jadx.core.dex.attributes.nodes.EnumClassAttr.EnumValueHelper;
 import jadx.core.dex.attributes.nodes.RenameReasonAttr;
 import jadx.core.dex.attributes.nodes.SkipMethodArgsAttr;
 import jadx.core.dex.info.AccessInfo;
@@ -29,6 +34,7 @@ import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.InvokeType;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -37,11 +43,13 @@ import jadx.core.dex.instructions.mods.ConstructorInsn;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
+import jadx.core.dex.nodes.IBlock;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
 import jadx.core.dex.regions.Region;
+import jadx.core.dex.regions.conditions.IfRegion;
 import jadx.core.dex.visitors.regions.CheckRegions;
 import jadx.core.dex.visitors.regions.IfRegionVisitor;
 import jadx.core.dex.visitors.shrink.CodeShrinkVisitor;
@@ -50,6 +58,7 @@ import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnRemover;
 import jadx.core.utils.InsnUtils;
 import jadx.core.utils.ListUtils;
+import jadx.core.utils.RegionUtils;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxException;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -101,7 +110,9 @@ public class EnumVisitor extends AbstractVisitor {
 			try {
 				converted = convertToEnum(cls);
 			} catch (Exception e) {
-				cls.addWarnComment("Enum visitor error", e);
+				cls.addInfoComment("Enum visitor error"
+						+ cls.root().getArgs().getCodeNewLineStr()
+						+ Utils.getStackTrace(e));
 				converted = false;
 			}
 			if (!converted) {
@@ -168,6 +179,8 @@ public class EnumVisitor extends AbstractVisitor {
 
 		// all checks complete, perform transform
 		EnumClassAttr attr = new EnumClassAttr(enumFields);
+		attr.setValueHelpers(data.valueHelpers);
+		attr.setRegionValueHelpers(data.regionValueHelpers);
 		attr.setStaticMethod(classInitMth);
 		cls.addAttr(attr);
 
@@ -185,7 +198,11 @@ public class EnumVisitor extends AbstractVisitor {
 		}
 		data.valuesField.add(AFlag.DONT_GENERATE);
 		InsnRemover.removeAllAndUnbind(classInitMth, data.toRemove);
-		if (classInitMth.countInsns() == 0) {
+		if (!data.regionValueHelpers.isEmpty()) {
+			// Region helpers retain their original structured IR for code generation. Suppress the
+			// residual <clinit> so the lifted value calculation is not executed a second time.
+			classInitMth.add(AFlag.DONT_GENERATE);
+		} else if (classInitMth.countInsns() == 0) {
 			classInitMth.add(AFlag.DONT_GENERATE);
 		} else if (!data.toRemove.isEmpty()) {
 			CodeShrinkVisitor.shrinkMethod(classInitMth);
@@ -242,6 +259,14 @@ public class EnumVisitor extends AbstractVisitor {
 
 		// search "$VALUES" array init and collect enum fields
 		BlockInsnPair valuesInitPair = getValuesInitInsn(data);
+		if (valuesInitPair == null && data.staticBlocks.size() < data.classInitMth.getBasicBlocks().size()) {
+			// A conditional enum argument can leave an IfRegion in <clinit>, so the linear region prefix
+			// ends before the enum constants and $VALUES initialization. Retry lookup over the method CFG;
+			// conversion still performs all regular enum-field checks below.
+			data.staticBlocks.clear();
+			data.staticBlocks.addAll(data.classInitMth.getBasicBlocks());
+			valuesInitPair = getValuesInitInsn(data);
+		}
 		if (valuesInitPair == null) {
 			return false;
 		}
@@ -457,7 +482,7 @@ public class EnumVisitor extends AbstractVisitor {
 		}
 		if (constrCls.equals(cls)) {
 			// allow same class
-		} else if (constrCls.contains(AType.ANONYMOUS_CLASS)) {
+		} else if (constrCls.contains(AType.ANONYMOUS_CLASS) || isDirectEnumSubclass(constrCls, cls)) {
 			// allow external class already marked as anonymous
 		} else {
 			return null;
@@ -480,7 +505,7 @@ public class EnumVisitor extends AbstractVisitor {
 			List<RegisterArg> regs = new ArrayList<>();
 			co.getRegisterArgs(regs);
 			if (!regs.isEmpty()) {
-				ConstructorInsn replacedCo = inlineExternalRegs(data, co);
+				ConstructorInsn replacedCo = inlineExternalRegs(data, enumFieldNode, co);
 				if (replacedCo == null) {
 					throw new JadxRuntimeException("Init of enum field '" + enumFieldNode.getName() + "' uses external variables");
 				}
@@ -489,6 +514,15 @@ public class EnumVisitor extends AbstractVisitor {
 			}
 		}
 		return new EnumField(enumFieldNode, co, nameStr);
+	}
+
+	private static boolean isDirectEnumSubclass(ClassNode candidate, ClassNode enumCls) {
+		ArgType superType = candidate.getSuperClass();
+		ArgType enumType = enumCls.getType();
+		return superType != null
+				&& superType.isObject()
+				&& enumType.isObject()
+				&& superType.getObject().equals(enumType.getObject());
 	}
 
 	private @Nullable ConstructorInsn searchEnumSuperCtrInsn(MethodNode ctrMth) {
@@ -507,22 +541,621 @@ public class EnumVisitor extends AbstractVisitor {
 		return null;
 	}
 
-	private ConstructorInsn inlineExternalRegs(EnumData data, ConstructorInsn co) {
+	private ConstructorInsn inlineExternalRegs(EnumData data, FieldNode enumFieldNode, ConstructorInsn co) {
 		ConstructorInsn resCo = co.copyWithoutResult();
+		inlineRepeatedSelectorExpression(data, enumFieldNode, resCo);
+		inlinePhiRegionExpression(data, enumFieldNode, resCo);
 		List<RegisterArg> regs = new ArrayList<>();
 		resCo.getRegisterArgs(regs);
 		for (RegisterArg reg : regs) {
 			FieldInfo enumField = checkExternalRegUsage(data, reg);
-			if (enumField == null) {
-				return null;
+			InsnArg replacement;
+			if (enumField != null) {
+				InsnNode enumUse = new IndexInsnNode(InsnType.SGET, enumField, 0);
+				replacement = InsnArg.wrapArg(enumUse);
+			} else {
+				replacement = inlineSimpleExternalValue(data, reg, resCo);
+				if (replacement == null) {
+					replacement = inlineEnumValueExpression(data, reg);
+					if (replacement == null) {
+						InsnNode assignInsn = reg.getAssignInsn();
+						if (assignInsn == null || !isSafeNestedEnumExpression(assignInsn)) {
+							InsnRemover.unbindInsn(null, resCo);
+							return null;
+						}
+						Set<InsnNode> pendingRemovals = new HashSet<>();
+						InsnNode copyUseInsn = Objects.requireNonNullElse(reg.getParentInsn(), resCo);
+						replacement = inlineSingleUseEnumExpression(
+								reg, copyUseInsn, new HashSet<>(), pendingRemovals);
+						if (replacement == null) {
+							InsnRemover.unbindInsn(null, resCo);
+							return null;
+						}
+						data.toRemove.addAll(pendingRemovals);
+					}
+				}
 			}
-			InsnNode enumUse = new IndexInsnNode(InsnType.SGET, enumField, 0);
-			boolean replaced = resCo.replaceArg(reg, InsnArg.wrapArg(enumUse));
+			boolean replaced = resCo.replaceArg(reg, replacement);
 			if (!replaced) {
+				InsnRemover.unbindInsn(null, resCo);
 				return null;
 			}
 		}
 		return resCo;
+	}
+
+	/**
+	 * Lift a structured branch that computes one enum constructor argument into a helper. This
+	 * keeps PHI-backed null fallback logic intact instead of duplicating calls while forcing it into
+	 * a single expression.
+	 */
+	private static boolean inlinePhiRegionExpression(
+			EnumData data, FieldNode enumFieldNode, ConstructorInsn co) {
+		for (int argIndex = 0; argIndex < co.getArgsCount(); argIndex++) {
+			InsnArg enumArg = co.getArg(argIndex);
+			if (!enumArg.isRegister()) {
+				continue;
+			}
+			RegisterArg resultArg = (RegisterArg) enumArg;
+			SSAVar resultVar = resultArg.getSVar();
+			InsnNode phiInsn = resultVar == null ? null : resultVar.getAssignInsn();
+			if (phiInsn == null || phiInsn.getType() != InsnType.PHI) {
+				continue;
+			}
+			BlockNode joinBlock = BlockUtils.getBlockByInsn(data.classInitMth, phiInsn);
+			IfRegion body = findPrecedingIfRegion(data.classInitMth, joinBlock);
+			if (body == null || !isPhiProducedByRegion(data.classInitMth, phiInsn, body)) {
+				continue;
+			}
+
+			List<InsnNode> prefixInsns = collectRegionExternalDependencies(data.classInitMth, body);
+			if (prefixInsns == null || prefixInsns.isEmpty()) {
+				continue;
+			}
+			List<CodeVar> declarations = collectRegionDeclarations(
+					body, prefixInsns, resultVar.getCodeVar());
+			ArgType returnType = enumArg.getType();
+			if (returnType == null || !returnType.isTypeKnown()) {
+				List<ArgType> argTypes = co.getCallMth().getArgumentsTypes();
+				if (argIndex >= argTypes.size()) {
+					continue;
+				}
+				returnType = argTypes.get(argIndex);
+			}
+			String helperName = makeEnumValueHelperName(data, enumFieldNode);
+			EnumRegionValueHelper helper = new EnumRegionValueHelper(
+					helperName,
+					returnType,
+					declarations,
+					prefixInsns,
+					body,
+					resultArg.duplicate());
+			MethodInfo helperMth = MethodInfo.fromDetails(
+					data.cls.root(),
+					data.cls.getClassInfo(),
+					helperName,
+					Collections.emptyList(),
+					returnType);
+			if (!co.replaceArg(enumArg, InsnArg.wrapArg(new InvokeNode(helperMth, InvokeType.STATIC, 0)))) {
+				return false;
+			}
+			data.regionValueHelpers.add(helper);
+			return true;
+		}
+		return false;
+	}
+
+	private static @Nullable IfRegion findPrecedingIfRegion(MethodNode mth, @Nullable BlockNode joinBlock) {
+		if (joinBlock == null || !(mth.getRegion() instanceof Region)) {
+			return null;
+		}
+		List<IContainer> containers = ((Region) mth.getRegion()).getSubBlocks();
+		for (int i = 1; i < containers.size(); i++) {
+			if (RegionUtils.isRegionContainsBlock(containers.get(i), joinBlock)
+					&& containers.get(i - 1) instanceof IfRegion) {
+				return (IfRegion) containers.get(i - 1);
+			}
+		}
+		return null;
+	}
+
+	private static boolean isPhiProducedByRegion(MethodNode mth, InsnNode phiInsn, IfRegion region) {
+		for (InsnArg arg : phiInsn.getArguments()) {
+			if (!arg.isRegister()) {
+				return false;
+			}
+			InsnNode assignInsn = ((RegisterArg) arg).getAssignInsn();
+			BlockNode assignBlock = BlockUtils.getBlockByInsn(mth, assignInsn);
+			if (assignBlock == null || !RegionUtils.isRegionContainsBlock(region, assignBlock)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static @Nullable List<InsnNode> collectRegionExternalDependencies(
+			MethodNode mth, IfRegion region) {
+		Set<IBlock> regionBlocks = new HashSet<>();
+		RegionUtils.getAllRegionBlocks(region, regionBlocks);
+		Set<InsnNode> dependencies = new HashSet<>();
+		for (IBlock block : regionBlocks) {
+			for (InsnNode insn : block.getInstructions()) {
+				List<RegisterArg> regs = new ArrayList<>();
+				insn.getRegisterArgs(regs);
+				for (RegisterArg reg : regs) {
+					if (!collectExternalDependency(mth, regionBlocks, dependencies, reg, new HashSet<>())) {
+						return null;
+					}
+				}
+			}
+		}
+		List<InsnNode> result = new ArrayList<>(dependencies);
+		result.sort(Comparator.comparingInt(InsnNode::getOffset));
+		return result;
+	}
+
+	private static boolean collectExternalDependency(
+			MethodNode mth,
+			Set<IBlock> regionBlocks,
+			Set<InsnNode> dependencies,
+			RegisterArg reg,
+			Set<SSAVar> visiting) {
+		SSAVar ssaVar = reg.getSVar();
+		if (ssaVar == null || !visiting.add(ssaVar)) {
+			return ssaVar != null;
+		}
+		try {
+			InsnNode assignInsn = ssaVar.getAssignInsn();
+			if (assignInsn == null) {
+				return false;
+			}
+			BlockNode assignBlock = BlockUtils.getBlockByInsn(mth, assignInsn);
+			if (assignBlock == null || regionBlocks.contains(assignBlock)) {
+				return true;
+			}
+			if (assignInsn.getType() != InsnType.SGET && assignInsn.getType() != InsnType.INVOKE) {
+				return false;
+			}
+			if (!dependencies.add(assignInsn)) {
+				return true;
+			}
+			List<RegisterArg> assignRegs = new ArrayList<>();
+			assignInsn.getRegisterArgs(assignRegs);
+			for (RegisterArg assignReg : assignRegs) {
+				if (!collectExternalDependency(mth, regionBlocks, dependencies, assignReg, visiting)) {
+					return false;
+				}
+			}
+			return true;
+		} finally {
+			visiting.remove(ssaVar);
+		}
+	}
+
+	private static List<CodeVar> collectRegionDeclarations(
+			IfRegion region, List<InsnNode> prefixInsns, CodeVar resultVar) {
+		List<CodeVar> declarations = new ArrayList<>();
+		Set<CodeVar> referencedVars = collectRegionCodeVars(region);
+		for (CodeVar referencedVar : referencedVars) {
+			if (referencedVar.getType() != null
+					&& referencedVar.getType().isTypeKnown()
+					&& !isDeclaredByHelperInsn(region, prefixInsns, referencedVar)) {
+				declarations.add(referencedVar);
+			}
+		}
+		if (!declarations.contains(resultVar)) {
+			declarations.add(resultVar);
+		}
+		return declarations;
+	}
+
+	private static boolean isDeclaredByHelperInsn(
+			IfRegion region, List<InsnNode> prefixInsns, CodeVar codeVar) {
+		Set<IBlock> regionBlocks = new HashSet<>();
+		RegionUtils.getAllRegionBlocks(region, regionBlocks);
+		if (codeVar.getSsaVars().stream()
+				.map(SSAVar::getAssignInsn)
+				.filter(Objects::nonNull)
+				.anyMatch(assignInsn -> assignInsn.contains(AFlag.FORCE_ASSIGN_INLINE))) {
+			// Assignment expressions such as "(value = call())" need a declaration that dominates
+			// every branch, even if another SSA version is assigned by a root ternary later.
+			return false;
+		}
+		for (SSAVar ssaVar : codeVar.getSsaVars()) {
+			InsnNode assignInsn = ssaVar.getAssignInsn();
+			if (assignInsn == null) {
+				continue;
+			}
+			if (prefixInsns.contains(assignInsn)) {
+				return true;
+			}
+			for (IBlock block : regionBlocks) {
+				if (block.getInstructions().contains(assignInsn)
+						&& assignInsn.getType() != InsnType.PHI
+						&& assignInsn.getType() != InsnType.MOVE) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static Set<CodeVar> collectRegionCodeVars(IfRegion region) {
+		Set<IBlock> regionBlocks = new HashSet<>();
+		RegionUtils.getAllRegionBlocks(region, regionBlocks);
+		Set<CodeVar> codeVars = new HashSet<>();
+		for (IBlock block : regionBlocks) {
+			for (InsnNode insn : block.getInstructions()) {
+				insn.visitInsns((java.util.function.Consumer<InsnNode>) nestedInsn -> {
+					RegisterArg result = nestedInsn.getResult();
+					if (result != null && result.getSVar() != null && result.getSVar().isCodeVarSet()) {
+						codeVars.add(result.getSVar().getCodeVar());
+					}
+					List<RegisterArg> regs = new ArrayList<>();
+					nestedInsn.getRegisterArgs(regs);
+					for (RegisterArg reg : regs) {
+						if (reg.getSVar() != null && reg.getSVar().isCodeVarSet()) {
+							codeVars.add(reg.getSVar().getCodeVar());
+						}
+					}
+				});
+			}
+		}
+		return codeVars;
+	}
+
+	/**
+	 * Preserve single evaluation for a selector used several times by one enum argument. Inlining
+	 * the selector at every use would duplicate getter calls and array access. Lift the self-contained
+	 * selector and its enclosing expression into a generated private static helper instead.
+	 */
+	private static boolean inlineRepeatedSelectorExpression(
+			EnumData data, FieldNode enumFieldNode, ConstructorInsn co) {
+		for (int argIndex = 0; argIndex < co.getArgsCount(); argIndex++) {
+			InsnArg enumArg = co.getArg(argIndex);
+			InsnNode expression = enumArg.unwrap();
+			if (expression == null || expression.getType() != InsnType.TERNARY) {
+				continue;
+			}
+			List<RegisterArg> expressionRegs = new ArrayList<>();
+			expression.getRegisterArgs(expressionRegs);
+			if (expressionRegs.size() < 2) {
+				continue;
+			}
+			SSAVar selectorVar = expressionRegs.get(0).getSVar();
+			if (selectorVar == null
+					|| expressionRegs.stream().anyMatch(reg -> reg.getSVar() != selectorVar)) {
+				continue;
+			}
+			InsnNode selectorInsn = selectorVar.getAssignInsn();
+			if (selectorInsn == null || selectorInsn.getType() != InsnType.AGET) {
+				continue;
+			}
+			List<RegisterArg> selectorRegs = new ArrayList<>();
+			selectorInsn.getRegisterArgs(selectorRegs);
+			if (!selectorRegs.isEmpty() || !isUsedOnlyInExpression(selectorVar, expression)) {
+				continue;
+			}
+
+			ArgType returnType = enumArg.getType();
+			if (returnType == null || !returnType.isTypeKnown()) {
+				List<ArgType> argTypes = co.getCallMth().getArgumentsTypes();
+				if (argIndex >= argTypes.size()) {
+					continue;
+				}
+				returnType = argTypes.get(argIndex);
+			}
+			EnumValueHelper helper = buildEnumValueHelper(
+					data, enumFieldNode, selectorInsn, selectorVar, expression, returnType);
+			if (helper == null) {
+				continue;
+			}
+			MethodInfo helperMth = MethodInfo.fromDetails(
+					data.cls.root(),
+					data.cls.getClassInfo(),
+					helper.getName(),
+					Collections.emptyList(),
+					returnType);
+			InvokeNode helperInvoke = new InvokeNode(helperMth, InvokeType.STATIC, 0);
+			if (!co.replaceArg(enumArg, InsnArg.wrapArg(helperInvoke))) {
+				return false;
+			}
+			data.toRemove.add(selectorInsn);
+			data.valueHelpers.add(helper);
+			return true;
+		}
+		return false;
+	}
+
+	private static boolean isUsedOnlyInExpression(SSAVar selectorVar, InsnNode expression) {
+		Set<InsnNode> expressionInsns = new HashSet<>();
+		expression.visitInsns((java.util.function.Consumer<InsnNode>) expressionInsns::add);
+		for (RegisterArg use : selectorVar.getUseList()) {
+			if (!expressionInsns.contains(use.getParentInsn())) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static @Nullable EnumValueHelper buildEnumValueHelper(
+			EnumData data,
+			FieldNode enumFieldNode,
+			InsnNode selectorInsn,
+			SSAVar selectorVar,
+			InsnNode expression,
+			ArgType returnType) {
+		ArgType selectorType = selectorVar.getTypeInfo().getType();
+		if (selectorType == null || !selectorType.isTypeKnown()) {
+			return null;
+		}
+		RegisterArg helperAssign = new RegisterArg(selectorVar.getRegNum(), selectorType);
+		SSAVar helperVar = new SSAVar(selectorVar.getRegNum(), selectorVar.getVersion(), helperAssign);
+		helperVar.forceSetType(selectorType);
+		CodeVar codeVar = new CodeVar();
+		codeVar.setName("selector");
+		codeVar.setType(selectorType);
+		helperVar.setCodeVar(codeVar);
+
+		InsnNode selectorCopy = selectorInsn.copyWithoutResult();
+		selectorCopy.setResult(helperAssign);
+		selectorCopy.add(AFlag.DECLARE_VAR);
+
+		InsnNode expressionCopy = expression.copyWithoutResult();
+		List<RegisterArg> regs = new ArrayList<>();
+		expressionCopy.getRegisterArgs(regs);
+		for (RegisterArg reg : regs) {
+			if (reg.getSVar() != selectorVar
+					|| !expressionCopy.replaceArg(reg, helperAssign.duplicate())) {
+				InsnRemover.unbindInsn(null, selectorCopy);
+				InsnRemover.unbindInsn(null, expressionCopy);
+				return null;
+			}
+		}
+		String helperName = makeEnumValueHelperName(data, enumFieldNode);
+		return new EnumValueHelper(
+				helperName, returnType, selectorCopy, InsnArg.wrapArg(expressionCopy));
+	}
+
+	private static String makeEnumValueHelperName(EnumData data, FieldNode enumFieldNode) {
+		String baseName = "$enumArg$" + enumFieldNode.getName();
+		String name = baseName;
+		int index = 2;
+		while (hasEnumValueHelperName(data, name)) {
+			name = baseName + '$' + index++;
+		}
+		return name;
+	}
+
+	private static boolean hasEnumValueHelperName(EnumData data, String name) {
+		return data.cls.getMethods().stream().anyMatch(mth -> mth.getName().equals(name))
+				|| data.valueHelpers.stream().anyMatch(helper -> helper.getName().equals(name))
+				|| data.regionValueHelpers.stream().anyMatch(helper -> helper.getName().equals(name));
+	}
+
+	/**
+	 * Inline a single-use expression tree used only to build an enum constant. This covers Kotlin
+	 * collection factories fed by temporary data objects without duplicating shared computations.
+	 * Arbitrary calls and multi-use intermediate values are intentionally rejected.
+	 */
+	private static @Nullable InsnArg inlineSingleUseEnumExpression(
+			RegisterArg reg, InsnNode parentCopy, Set<SSAVar> visiting, Set<InsnNode> pendingRemovals) {
+		SSAVar ssaVar = reg.getSVar();
+		if (ssaVar == null || !visiting.add(ssaVar)) {
+			return null;
+		}
+		try {
+			InsnNode assignInsn = ssaVar.getAssignInsn();
+			if (assignInsn == null) {
+				return null;
+			}
+			InsnType type = assignInsn.getType();
+			if (type == InsnType.CONST) {
+				if (hasSingleUseExcludingCopy(ssaVar, parentCopy)) {
+					pendingRemovals.add(assignInsn);
+				}
+				return assignInsn.getArg(0).duplicate();
+			}
+			if (type == InsnType.CONST_STR || type == InsnType.CONST_CLASS || type == InsnType.SGET) {
+				if (hasSingleUseExcludingCopy(ssaVar, parentCopy)) {
+					pendingRemovals.add(assignInsn);
+				}
+				return InsnArg.wrapArg(assignInsn.copyWithoutResult());
+			}
+			if (!hasSingleUseExcludingCopy(ssaVar, parentCopy) || !isSafeNestedEnumExpression(assignInsn)) {
+				return null;
+			}
+			InsnNode copy = assignInsn.copyWithoutResult();
+			List<RegisterArg> args = new ArrayList<>();
+			copy.getRegisterArgs(args);
+			for (RegisterArg arg : args) {
+				InsnNode argParent = arg.getParentInsn();
+				if (argParent == null) {
+					InsnRemover.unbindInsn(null, copy);
+					return null;
+				}
+				InsnArg replacement = inlineSingleUseEnumExpression(
+						arg, argParent, visiting, pendingRemovals);
+				if (replacement == null || !argParent.replaceArg(arg, replacement)) {
+					InsnRemover.unbindInsn(null, copy);
+					return null;
+				}
+			}
+			pendingRemovals.add(assignInsn);
+			return InsnArg.wrapArg(copy);
+		} finally {
+			visiting.remove(ssaVar);
+		}
+	}
+
+	private static boolean isSafeNestedEnumExpression(InsnNode insn) {
+		switch (insn.getType()) {
+			case CONSTRUCTOR:
+			case FILLED_NEW_ARRAY:
+				return true;
+
+			case INVOKE:
+				InvokeNode invoke = (InvokeNode) insn;
+				if (invoke.getInvokeType() == InvokeType.STATIC) {
+					return true;
+				}
+				if (invoke.getInvokeType() != InvokeType.VIRTUAL || invoke.getArgsCount() == 0) {
+					return false;
+				}
+				InsnArg instanceArg = invoke.getArg(0);
+				return instanceArg.isRegister()
+						&& ((RegisterArg) instanceArg).getAssignInsn() != null
+						&& ((RegisterArg) instanceArg).getAssignInsn().getType() == InsnType.SGET;
+
+			default:
+				return false;
+		}
+	}
+
+	private static @Nullable InsnArg inlineEnumValueExpression(EnumData data, RegisterArg reg) {
+		SSAVar ssaVar = reg.getSVar();
+		InsnNode assignInsn = ssaVar.getAssignInsn();
+		if (assignInsn == null || assignInsn.getType() != InsnType.ARITH || ssaVar.getUseCount() != 1) {
+			return null;
+		}
+		InsnNode copy = assignInsn.copyWithoutResult();
+		List<RegisterArg> regs = new ArrayList<>();
+		copy.getRegisterArgs(regs);
+		for (RegisterArg arg : regs) {
+			FieldInfo enumField = checkExternalRegUsage(data, arg);
+			if (enumField == null) {
+				InsnRemover.unbindInsn(null, copy);
+				return null;
+			}
+			InsnNode enumUse = new IndexInsnNode(InsnType.SGET, enumField, 0);
+			if (!copy.replaceArg(arg, InsnArg.wrapArg(enumUse))) {
+				InsnRemover.unbindInsn(null, copy);
+				return null;
+			}
+		}
+		data.toRemove.add(assignInsn);
+		return InsnArg.wrapArg(copy);
+	}
+
+	private static @Nullable InsnArg inlineSimpleExternalValue(
+			EnumData data, RegisterArg reg, InsnNode copyUseInsn) {
+		SSAVar ssaVar = reg.getSVar();
+		InsnNode assignInsn = ssaVar.getAssignInsn();
+		if (assignInsn == null) {
+			return null;
+		}
+		switch (assignInsn.getType()) {
+			case CONST:
+				if (ssaVar.getUseCount() == 1) {
+					data.toRemove.add(assignInsn);
+				}
+				return assignInsn.getArg(0).duplicate();
+
+			case CONST_STR:
+			case CONST_CLASS:
+			case SGET:
+				if (ssaVar.getUseCount() == 1) {
+					data.toRemove.add(assignInsn);
+				}
+				return InsnArg.wrapArg(assignInsn.copyWithoutResult());
+
+			case TERNARY:
+				List<RegisterArg> ternaryRegs = new ArrayList<>();
+				assignInsn.getRegisterArgs(ternaryRegs);
+				if (!ternaryRegs.isEmpty()) {
+					return null;
+				}
+				if (ssaVar.getUseCount() == 1) {
+					data.toRemove.add(assignInsn);
+				}
+				return InsnArg.wrapArg(assignInsn.copyWithoutResult());
+
+			case INVOKE:
+				InvokeNode invoke = (InvokeNode) assignInsn;
+				InsnArg singletonGetter = inlineSingleUseSingletonGetter(data, ssaVar, invoke, copyUseInsn);
+				if (singletonGetter != null) {
+					return singletonGetter;
+				}
+				return inlineSingleUsePrimitiveBoxing(data, ssaVar, invoke, copyUseInsn);
+
+			default:
+				return null;
+		}
+	}
+
+	private static @Nullable InsnArg inlineSingleUseSingletonGetter(
+			EnumData data, SSAVar ssaVar, InvokeNode invoke, InsnNode copyUseInsn) {
+		if (!hasSingleUseExcludingCopy(ssaVar, copyUseInsn)
+				|| invoke.getInvokeType() == InvokeType.STATIC
+				|| invoke.getArgsCount() != 1) {
+			return null;
+		}
+		RegisterArg receiver = invoke.getArg(0).isRegister() ? (RegisterArg) invoke.getArg(0) : null;
+		if (receiver == null) {
+			return null;
+		}
+		InsnNode receiverAssign = receiver.getAssignInsn();
+		if (receiverAssign == null || receiverAssign.getType() != InsnType.SGET) {
+			return null;
+		}
+		InvokeNode copy = invoke.copyWithoutResult();
+		RegisterArg receiverCopy = copy.getArg(0).isRegister() ? (RegisterArg) copy.getArg(0) : null;
+		if (receiverCopy == null
+				|| !copy.replaceArg(receiverCopy, InsnArg.wrapArg(receiverAssign.copyWithoutResult()))) {
+			InsnRemover.unbindInsn(null, copy);
+			return null;
+		}
+		data.toRemove.add(invoke);
+		return InsnArg.wrapArg(copy);
+	}
+
+	private static boolean hasSingleUseExcludingCopy(SSAVar ssaVar, InsnNode copyInsn) {
+		int actualUseCount = 0;
+		for (RegisterArg use : ssaVar.getUseList()) {
+			InsnNode parentInsn = use.getParentInsn();
+			if (parentInsn != copyInsn && ++actualUseCount > 1) {
+				return false;
+			}
+		}
+		return actualUseCount == 1;
+	}
+
+	private static @Nullable InsnArg inlineSingleUsePrimitiveBoxing(
+			EnumData data, SSAVar ssaVar, InvokeNode invoke, InsnNode copyUseInsn) {
+		if (!hasSingleUseExcludingCopy(ssaVar, copyUseInsn)
+				|| invoke.getInvokeType() != InvokeType.STATIC
+				|| invoke.getArgsCount() != 1
+				|| !isPrimitiveBoxingValueOf(invoke)) {
+			return null;
+		}
+		InsnArg arg = invoke.getArg(0);
+		if (arg.isRegister()) {
+			return null;
+		}
+		data.toRemove.add(invoke);
+		return InsnArg.wrapArg(invoke.copyWithoutResult());
+	}
+
+	private static boolean isPrimitiveBoxingValueOf(InvokeNode invoke) {
+		MethodInfo callMth = invoke.getCallMth();
+		if (!callMth.getName().equals("valueOf")
+				|| callMth.getArgumentsTypes().size() != 1
+				|| !callMth.getArgumentsTypes().get(0).isPrimitive()) {
+			return false;
+		}
+		switch (callMth.getDeclClass().getFullName()) {
+			case "java.lang.Boolean":
+			case "java.lang.Byte":
+			case "java.lang.Character":
+			case "java.lang.Short":
+			case "java.lang.Integer":
+			case "java.lang.Long":
+			case "java.lang.Float":
+			case "java.lang.Double":
+				return true;
+			default:
+				return false;
+		}
 	}
 
 	private static FieldInfo checkExternalRegUsage(EnumData data, RegisterArg reg) {
@@ -561,26 +1194,72 @@ public class EnumVisitor extends AbstractVisitor {
 					InsnNode unwrapped = valuesArg.unwrap();
 					if (unwrapped != null) {
 						if (unwrapped != useInsn) {
-							return null;
+							if (!useInsn.contains(AFlag.WRAPPED) && !isUseInEnumConstructor(data, useInsn)) {
+								return null;
+							}
 						}
 					} else if (valuesArg.isRegister()) {
 						InsnNode valuesAssign = ((RegisterArg) valuesArg).getAssignInsn();
 						if (valuesAssign != useInsn) {
-							return null;
+							if (!useInsn.contains(AFlag.WRAPPED) && !isUseInEnumConstructor(data, useInsn)) {
+								return null;
+							}
 						}
 					} else {
 						return null;
 					}
 					break;
 				}
-				default:
-					return null;
+				default: {
+					if (!useInsn.contains(AFlag.WRAPPED) && !isUseInEnumConstructor(data, useInsn)) {
+						return null;
+					}
+					break;
+				}
 			}
 		}
 		if (enumField != null) {
 			data.toRemove.add(assignInsn);
 		}
 		return enumField;
+	}
+
+	private static boolean isUseInEnumConstructor(EnumData data, InsnNode useInsn) {
+		return isInsnFlowToEnumConstructor(data, useInsn, new HashSet<>());
+	}
+
+	private static boolean isInsnFlowToEnumConstructor(EnumData data, InsnNode insn, Set<InsnNode> visited) {
+		InsnNode rootInsn = findRootInsn(data, insn);
+		if (rootInsn == null || !visited.add(rootInsn)) {
+			return false;
+		}
+		ClassInfo enumCls = data.cls.getClassInfo();
+		if (rootInsn instanceof ConstructorInsn
+				&& ((ConstructorInsn) rootInsn).getClassType().equals(enumCls)) {
+			return true;
+		}
+		RegisterArg result = rootInsn.getResult();
+		if (result == null || result.getSVar() == null || result.getSVar().getUseList().isEmpty()) {
+			return false;
+		}
+		for (RegisterArg useArg : result.getSVar().getUseList()) {
+			InsnNode use = useArg.getParentInsn();
+			if (use == null || !isInsnFlowToEnumConstructor(data, use, visited)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static @Nullable InsnNode findRootInsn(EnumData data, InsnNode searchInsn) {
+		for (BlockNode block : data.staticBlocks) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.visitInsns(innerInsn -> innerInsn == searchInsn ? Boolean.TRUE : null) != null) {
+					return insn;
+				}
+			}
+		}
+		return null;
 	}
 
 	@Nullable
@@ -746,10 +1425,10 @@ public class EnumVisitor extends AbstractVisitor {
 			}
 		}
 		field.setCls(innerCls);
+		innerCls.add(AFlag.DONT_GENERATE);
 		if (!innerCls.getParentClass().equals(cls)) {
 			// not inner
 			cls.addInlinedClass(innerCls);
-			innerCls.add(AFlag.DONT_GENERATE);
 		}
 	}
 
@@ -791,6 +1470,8 @@ public class EnumVisitor extends AbstractVisitor {
 		final MethodNode classInitMth;
 		final List<BlockNode> staticBlocks;
 		final List<InsnNode> toRemove = new ArrayList<>();
+		final List<EnumValueHelper> valueHelpers = new ArrayList<>();
+		final List<EnumRegionValueHelper> regionValueHelpers = new ArrayList<>();
 		FieldNode valuesField;
 		InsnNode valuesInitInsn;
 

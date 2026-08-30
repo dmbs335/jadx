@@ -1,6 +1,8 @@
 package jadx.core.dex.visitors.ssa;
 
+import java.util.ArrayDeque;
 import java.util.BitSet;
+import java.util.Deque;
 import java.util.List;
 
 import org.slf4j.Logger;
@@ -22,6 +24,7 @@ public class LiveVarAnalysis {
 	private BitSet[] defs;
 	private BitSet[] liveIn;
 	private BitSet[] assignBlocks;
+	private BitSet[] undefinedReachable;
 
 	public LiveVarAnalysis(MethodNode mth) {
 		this.mth = mth;
@@ -53,13 +56,61 @@ public class LiveVarAnalysis {
 		return isLive(block.getId(), regNum);
 	}
 
+	public boolean isDefinedOnAllPaths(BlockNode block, int regNum) {
+		RegisterArg thisArg = mth.getThisArg();
+		if (thisArg != null && thisArg.getRegNum() == regNum) {
+			return true;
+		}
+		for (RegisterArg arg : mth.getArgRegs()) {
+			if (arg.getRegNum() == regNum) {
+				return true;
+			}
+		}
+		if (undefinedReachable == null) {
+			undefinedReachable = new BitSet[mth.getRegsCount()];
+		}
+		BitSet reachable = undefinedReachable[regNum];
+		if (reachable == null) {
+			reachable = collectUndefinedReachable(regNum);
+			undefinedReachable[regNum] = reachable;
+		}
+		return !reachable.get(block.getId());
+	}
+
+	private BitSet collectUndefinedReachable(int regNum) {
+		BitSet reachable = new BitSet(mth.getBasicBlocks().size());
+		Deque<BlockNode> queue = new ArrayDeque<>();
+		queue.add(mth.getEnterBlock());
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			int blockId = block.getId();
+			if (reachable.get(blockId)) {
+				continue;
+			}
+			reachable.set(blockId);
+			if (defs[blockId].get(regNum)) {
+				continue;
+			}
+			queue.addAll(block.getSuccessors());
+		}
+		return reachable;
+	}
+
 	private void fillBasicBlockInfo() {
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		int blocksCount = blocks.size();
+		for (int blockIndex = 0; blockIndex < blocksCount; blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
 			int blockId = block.getId();
 			BitSet gen = uses[blockId];
 			BitSet kill = defs[blockId];
-			for (InsnNode insn : block.getInstructions()) {
-				for (InsnArg arg : insn.getArguments()) {
+			List<InsnNode> insns = block.getInstructions();
+			int insnsCount = insns.size();
+			for (int insnIndex = 0; insnIndex < insnsCount; insnIndex++) {
+				InsnNode insn = insns.get(insnIndex);
+				int argsCount = insn.getArgsCount();
+				for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+					InsnArg arg = insn.getArg(argIndex);
 					if (arg.isRegister()) {
 						int regNum = ((RegisterArg) arg).getRegNum();
 						if (!kill.get(regNum)) {
@@ -84,15 +135,20 @@ public class LiveVarAnalysis {
 		List<BlockNode> blocks = mth.getBasicBlocks();
 		int blocksCount = blocks.size();
 		int iterationsLimit = blocksCount * 10;
+		BitSet newIn = new BitSet(regsCount);
 		boolean changed;
 		int k = 0;
 		do {
 			changed = false;
-			for (BlockNode block : blocks) {
+			for (int blockIndex = 0; blockIndex < blocksCount; blockIndex++) {
+				BlockNode block = blocks.get(blockIndex);
 				int blockId = block.getId();
 				BitSet prevIn = liveInBlocks[blockId];
-				BitSet newIn = new BitSet(regsCount);
-				for (BlockNode successor : block.getSuccessors()) {
+				newIn.clear();
+				List<BlockNode> successors = block.getSuccessors();
+				int successorsCount = successors.size();
+				for (int successorIndex = 0; successorIndex < successorsCount; successorIndex++) {
+					BlockNode successor = successors.get(successorIndex);
 					newIn.or(liveInBlocks[successor.getId()]);
 				}
 				newIn.andNot(defs[blockId]);
@@ -100,6 +156,7 @@ public class LiveVarAnalysis {
 				if (!prevIn.equals(newIn)) {
 					changed = true;
 					liveInBlocks[blockId] = newIn;
+					newIn = prevIn;
 				}
 			}
 			if (k++ > iterationsLimit) {

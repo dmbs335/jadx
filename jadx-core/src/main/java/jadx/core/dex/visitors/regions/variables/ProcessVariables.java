@@ -1,7 +1,8 @@
 package jadx.core.dex.visitors.regions.variables;
 
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -15,6 +16,8 @@ import org.slf4j.LoggerFactory;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.DeclareVariablesAttr;
+import jadx.core.dex.attributes.nodes.InitAtDeclareVarsAttr;
+import jadx.core.dex.attributes.nodes.SkipMethodArgsAttr;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.CodeVar;
@@ -39,13 +42,18 @@ import jadx.core.utils.exceptions.JadxException;
 
 public class ProcessVariables extends AbstractVisitor {
 	private static final Logger LOG = LoggerFactory.getLogger(ProcessVariables.class);
+	// Expected size 11 selects the same initial table as IdentityHashMap's default constructor.
+	private static final int IDENTITY_MAP_DEFAULT_EXPECTED_SIZE = 11;
 
 	@Override
 	public void visit(MethodNode mth) throws JadxException {
-		if (mth.isNoCode() || mth.getSVars().isEmpty()) {
+		if (mth.isNoCode()) {
 			return;
 		}
 		removeUnusedResults(mth);
+		if (mth.getSVars().isEmpty()) {
+			return;
+		}
 
 		List<CodeVar> codeVars = collectCodeVars(mth);
 		if (codeVars.isEmpty()) {
@@ -70,15 +78,27 @@ public class ProcessVariables extends AbstractVisitor {
 	}
 
 	private static void removeUnusedResults(MethodNode mth) {
+		int varCount = mth.getSVars().size();
+		int initialSize = varCount <= 2 ? varCount : IDENTITY_MAP_DEFAULT_EXPECTED_SIZE;
+		Set<SSAVar> knownVars = Collections.newSetFromMap(new IdentityHashMap<>(initialSize));
+		knownVars.addAll(mth.getSVars());
 		DepthRegionTraversal.traverse(mth, new AbstractRegionVisitor() {
+			private final List<RegisterArg> args = new ArrayList<>();
+
 			@Override
 			public void processBlock(MethodNode mth, IBlock container) {
 				for (InsnNode insn : container.getInstructions()) {
+					if (!insn.contains(AFlag.DONT_GENERATE) && !insn.contains(AFlag.REMOVE)) {
+						initOrphanCodeVars(insn);
+					}
 					RegisterArg resultArg = insn.getResult();
 					if (resultArg == null) {
 						continue;
 					}
 					SSAVar ssaVar = resultArg.getSVar();
+					if (ssaVar == null) {
+						continue;
+					}
 					if (isVarUnused(mth, ssaVar)) {
 						boolean remove = false;
 						if (insn.canRemoveResult()) {
@@ -98,6 +118,17 @@ public class ProcessVariables extends AbstractVisitor {
 							}
 						}
 					}
+				}
+			}
+
+			private void initOrphanCodeVars(InsnNode insn) {
+				insn.visitInsns(innerInsn -> {
+					initOrphanSsaVar(knownVars, innerInsn.getResult());
+				});
+				args.clear();
+				insn.getRegisterArgs(args);
+				for (RegisterArg arg : args) {
+					initOrphanSsaVar(knownVars, arg);
 				}
 			}
 
@@ -141,21 +172,39 @@ public class ProcessVariables extends AbstractVisitor {
 						&& parentInsn.getType() == InsnType.CONSTRUCTOR
 						&& parentInsn.contains(AType.METHOD_DETAILS)) {
 					MethodNode resolveMth = mth.root().getMethodUtils().resolveMethod(((ConstructorInsn) parentInsn));
-					if (resolveMth != null && resolveMth.contains(AType.SKIP_MTH_ARGS)) {
+					if (resolveMth != null) {
+						SkipMethodArgsAttr skipArgs = resolveMth.get(AType.SKIP_MTH_ARGS);
 						int insnPos = parentInsn.getArgIndex(arg);
-						List<RegisterArg> mthArgs = resolveMth.getArgRegs();
-						if (0 <= insnPos && insnPos < mthArgs.size()) {
-							RegisterArg mthArg = mthArgs.get(insnPos);
-							if (mthArg.contains(AFlag.REMOVE) && arg.sameType(mthArg)) {
-								arg.add(AFlag.DONT_GENERATE);
-								return true;
-							}
+						if (skipArgs != null && skipArgs.isRemovedArg(insnPos, arg.getType())) {
+							arg.add(AFlag.DONT_GENERATE);
+							return true;
 						}
 					}
 				}
 				return false;
 			}
 		});
+	}
+
+	private static void initOrphanSsaVar(Set<SSAVar> knownVars, @Nullable RegisterArg arg) {
+		if (arg == null || arg.contains(AFlag.DONT_GENERATE)) {
+			return;
+		}
+		SSAVar ssaVar = arg.getSVar();
+		if (ssaVar != null && knownVars.add(ssaVar)) {
+			initOrphanRegionSsaVar(ssaVar);
+		}
+	}
+
+	static void initOrphanRegionSsaVar(SSAVar ssaVar) {
+		if (!ssaVar.isCodeVarSet()) {
+			ssaVar.setCodeVar(new CodeVar());
+		}
+		ArgType type = ssaVar.getAssign().getType();
+		ArgType codeVarType = ssaVar.getCodeVar().getType();
+		if ((codeVarType == null || !codeVarType.isTypeKnown()) && type.isTypeKnown()) {
+			ssaVar.getCodeVar().setType(type);
+		}
 	}
 
 	private void checkCodeVars(MethodNode mth, List<CodeVar> codeVars) {
@@ -212,6 +261,7 @@ public class ProcessVariables extends AbstractVisitor {
 
 	private List<CodeVar> collectCodeVars(MethodNode mth) {
 		Map<CodeVar, List<SSAVar>> codeVars = new LinkedHashMap<>();
+		InitAtDeclareVarsAttr initVars = mth.get(AType.INIT_AT_DECLARE_VARS);
 		for (SSAVar ssaVar : mth.getSVars()) {
 			if (ssaVar.getCodeVar().isThis()) {
 				continue;
@@ -234,6 +284,9 @@ public class ProcessVariables extends AbstractVisitor {
 				}
 			}
 			codeVar.setSsaVars(list);
+			if (initVars != null && list.stream().anyMatch(s -> initVars.contains(s.getRegNum()))) {
+				codeVar.setInitAtDeclaration(true);
+			}
 		}
 		return new ArrayList<>(codeVars.keySet());
 	}
@@ -288,24 +341,65 @@ public class ProcessVariables extends AbstractVisitor {
 	/**
 	 * Check if all {@code usePlaces} are after {@code checkPlace}
 	 */
-	private static boolean isAllUseAfter(UsePlace checkPlace, List<UsePlace> usePlaces) {
-
+	static boolean isAllUseAfter(UsePlace checkPlace, List<UsePlace> usePlaces) {
 		IRegion region = checkPlace.getRegion();
 		IBlock block = checkPlace.getBlock();
-		Set<UsePlace> toCheck = new HashSet<>(usePlaces);
-		boolean blockFound = false;
-		for (IContainer subBlock : region.getSubBlocks()) {
-			if (!blockFound && subBlock == block) {
-				blockFound = true;
+		List<IContainer> subBlocks = region.getSubBlocks();
+		int subBlocksCount = subBlocks.size();
+		int blockIndex = -1;
+		for (int i = 0; i < subBlocksCount; i++) {
+			if (subBlocks.get(i) == block) {
+				blockIndex = i;
+				break;
 			}
-			if (blockFound) {
-				toCheck.removeIf(usePlace -> isContainerContainsUsePlace(subBlock, usePlace));
-				if (toCheck.isEmpty()) {
-					return true;
-				}
+		}
+		if (blockIndex == -1) {
+			return false;
+		}
+		int usePlacesCount = usePlaces.size();
+		for (int i = 0; i < usePlacesCount; i++) {
+			IContainer directContainer = resolveDirectContainer(region, subBlocks, usePlaces.get(i));
+			if (directContainer == null || !containsIdentity(subBlocks, blockIndex, directContainer)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean containsIdentity(List<IContainer> containers, int fromIndex, IContainer target) {
+		int count = containers.size();
+		for (int i = fromIndex; i < count; i++) {
+			if (containers.get(i) == target) {
+				return true;
 			}
 		}
 		return false;
+	}
+
+	private static IContainer resolveDirectContainer(
+			IRegion region, List<IContainer> subBlocks, UsePlace usePlace) {
+		IRegion useRegion = usePlace.getRegion();
+		if (useRegion == region) {
+			return usePlace.getBlock();
+		}
+		IRegion current = useRegion;
+		while (current != null) {
+			IRegion parent = current.getParent();
+			if (parent == region) {
+				return current;
+			}
+			current = parent;
+		}
+		// Exception-handler regions can have no single parent, use the full containment check as a
+		// fallback.
+		int subBlocksCount = subBlocks.size();
+		for (int i = 0; i < subBlocksCount; i++) {
+			IContainer subBlock = subBlocks.get(i);
+			if (isContainerContainsUsePlace(subBlock, usePlace)) {
+				return subBlock;
+			}
+		}
+		return null;
 	}
 
 	private static boolean isContainerContainsUsePlace(IContainer subBlock, UsePlace usePlace) {

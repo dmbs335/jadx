@@ -42,6 +42,7 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 	}
 
 	private static void initJumps(MethodNode mth, InsnNode[] insnByOffset) {
+		FillArrayRepair fillArrayRepair = findFillArrayRepair(insnByOffset);
 		for (int offset = 0; offset < insnByOffset.length; offset++) {
 			InsnNode insn = insnByOffset[offset];
 			if (insn == null) {
@@ -103,6 +104,12 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 
 				case FILL_ARRAY:
 					FillArrayInsn fillArrayInsn = (FillArrayInsn) insn;
+					if (fillArrayRepair != null && fillArrayRepair.insn == fillArrayInsn) {
+						fillArrayInsn.setArrayData(fillArrayRepair.data);
+						removeInsn(insnByOffset, fillArrayRepair.data);
+						mth.addWarnComment("Repaired invalid fill-array reference using the unique payload in this method");
+						break;
+					}
 					int target = fillArrayInsn.getTarget();
 					InsnNode arrDataInsn = getInsnAtOffset(insnByOffset, target);
 					if (arrDataInsn != null && arrDataInsn.getType() == InsnType.FILL_ARRAY_DATA) {
@@ -116,6 +123,49 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 				default:
 					break;
 			}
+		}
+	}
+
+	private static @Nullable FillArrayRepair findFillArrayRepair(InsnNode[] insnByOffset) {
+		FillArrayData solePayload = null;
+		for (InsnNode insn : insnByOffset) {
+			if (insn != null && insn.getType() == InsnType.FILL_ARRAY_DATA) {
+				if (solePayload != null) {
+					return null;
+				}
+				solePayload = (FillArrayData) insn;
+			}
+		}
+		if (solePayload == null) {
+			return null;
+		}
+		FillArrayInsn invalidFill = null;
+		for (InsnNode insn : insnByOffset) {
+			if (insn == null || insn.getType() != InsnType.FILL_ARRAY) {
+				continue;
+			}
+			FillArrayInsn fillArrayInsn = (FillArrayInsn) insn;
+			InsnNode targetInsn = getInsnAtOffset(insnByOffset, fillArrayInsn.getTarget());
+			if (targetInsn == solePayload) {
+				return null;
+			}
+			if (targetInsn == null || targetInsn.getType() != InsnType.FILL_ARRAY_DATA) {
+				if (invalidFill != null) {
+					return null;
+				}
+				invalidFill = fillArrayInsn;
+			}
+		}
+		return invalidFill == null ? null : new FillArrayRepair(invalidFill, solePayload);
+	}
+
+	private static final class FillArrayRepair {
+		private final FillArrayInsn insn;
+		private final FillArrayData data;
+
+		private FillArrayRepair(FillArrayInsn insn, FillArrayData data) {
+			this.insn = insn;
+			this.data = data;
 		}
 	}
 

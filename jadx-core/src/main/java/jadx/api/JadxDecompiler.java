@@ -37,10 +37,12 @@ import jadx.api.plugins.pass.types.JadxPassType;
 import jadx.api.utils.tasks.ITaskExecutor;
 import jadx.core.Jadx;
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.AType;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.PackageNode;
+import jadx.core.dex.nodes.ProcessState;
 import jadx.core.dex.nodes.RootNode;
 import jadx.core.dex.visitors.SaveCode;
 import jadx.core.export.ExportGradle;
@@ -48,6 +50,7 @@ import jadx.core.export.OutDirs;
 import jadx.core.plugins.JadxPluginManager;
 import jadx.core.plugins.PluginContext;
 import jadx.core.plugins.events.JadxEventsImpl;
+import jadx.core.utils.AnalysisFingerprint;
 import jadx.core.utils.DecompilerScheduler;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -85,11 +88,15 @@ import jadx.zip.ZipReader;
  */
 public final class JadxDecompiler implements Closeable {
 	private static final Logger LOG = LoggerFactory.getLogger(JadxDecompiler.class);
+	private static final int OUTPUT_WAVE_SIZE = 4_096;
 
 	private final JadxArgs args;
 	private final JadxPluginManager pluginManager;
 	private final List<ICodeLoader> loadedInputs = new ArrayList<>();
+	private final List<PendingInputError> pendingInputErrors = new ArrayList<>();
+	private final List<PendingInputError> pendingInputExclusions = new ArrayList<>();
 	private final ZipReader zipReader;
+	private Set<String> dependencyInputFileNames = Collections.emptySet();
 
 	private RootNode root;
 	private List<JavaClass> classes;
@@ -104,6 +111,7 @@ public final class JadxDecompiler implements Closeable {
 	private final List<Closeable> closeableList = new ArrayList<>();
 
 	private IJadxEvents events = new JadxEventsImpl();
+	private @Nullable String analysisFingerprint;
 
 	public JadxDecompiler() {
 		this(new JadxArgs());
@@ -125,6 +133,7 @@ public final class JadxDecompiler implements Closeable {
 		loadInputFiles();
 
 		root = new RootNode(this);
+		flushPendingInputErrors();
 		root.init();
 		// load classes and resources
 		root.loadClasses(loadedInputs);
@@ -152,13 +161,20 @@ public final class JadxDecompiler implements Closeable {
 		root.mergePasses(customPasses);
 		root.restartVisitors();
 		root.initPasses();
+		analysisFingerprint = null;
 		loadFinished();
 	}
 
 	private void loadInputFiles() {
 		loadedInputs.clear();
-		List<Path> inputPaths = Utils.collectionMap(args.getInputFiles(), File::toPath);
-		List<Path> inputFiles = FileUtils.expandDirs(inputPaths);
+		List<Path> primaryInputPaths = Utils.collectionMap(args.getInputFiles(), File::toPath);
+		List<Path> dependencyInputPaths = Utils.collectionMap(args.getDependencyInputFiles(), File::toPath);
+		List<Path> inputFiles = new ArrayList<>(FileUtils.expandDirs(primaryInputPaths));
+		List<Path> dependencyInputFiles = FileUtils.expandDirs(dependencyInputPaths);
+		inputFiles.addAll(dependencyInputFiles);
+		dependencyInputFileNames = dependencyInputFiles.stream()
+				.map(JadxDecompiler::normalizedInputPath)
+				.collect(Collectors.toSet());
 		long start = System.currentTimeMillis();
 		for (PluginContext plugin : pluginManager.getResolvedPluginContexts()) {
 			for (JadxCodeInput codeLoader : plugin.getCodeInputs()) {
@@ -183,16 +199,76 @@ public final class JadxDecompiler implements Closeable {
 		root = null;
 		classes = null;
 		resources = null;
+		analysisFingerprint = null;
+		pendingInputErrors.clear();
+		pendingInputExclusions.clear();
 		events.reset();
+	}
+
+	/**
+	 * Exact fingerprint for semantic result reuse. The value is computed after plugins are resolved
+	 * and cached for this loaded decompiler lifecycle.
+	 */
+	public synchronized String getAnalysisFingerprint() {
+		if (analysisFingerprint == null) {
+			analysisFingerprint = AnalysisFingerprint.build(args, this);
+		}
+		return analysisFingerprint;
+	}
+
+	public synchronized void reportInputError(String message, @Nullable Throwable error) {
+		reportInputError("input-load", message, error);
+	}
+
+	public synchronized void reportInputError(String category, String message, @Nullable Throwable error) {
+		if (root == null) {
+			pendingInputErrors.add(new PendingInputError(category, message, error));
+		} else {
+			root.getErrorsCounter().addAnalysisLoss(category, message, error);
+		}
+	}
+
+	public synchronized void reportInputExclusion(String category, String message, @Nullable Throwable error) {
+		if (root == null) {
+			pendingInputExclusions.add(new PendingInputError(category, message, error));
+		} else {
+			root.getErrorsCounter().addAnalysisExclusion(category, message, error);
+		}
+	}
+
+	private synchronized void flushPendingInputErrors() {
+		for (PendingInputError error : pendingInputErrors) {
+			root.getErrorsCounter().addAnalysisLoss(error.category, error.message, error.cause);
+		}
+		pendingInputErrors.clear();
+		for (PendingInputError exclusion : pendingInputExclusions) {
+			root.getErrorsCounter().addAnalysisExclusion(
+					exclusion.category, exclusion.message, exclusion.cause);
+		}
+		pendingInputExclusions.clear();
+	}
+
+	private static final class PendingInputError {
+		private final String category;
+		private final String message;
+		private final Throwable cause;
+
+		private PendingInputError(String category, String message, @Nullable Throwable cause) {
+			this.category = category;
+			this.message = message;
+			this.cause = cause;
+		}
 	}
 
 	@Override
 	public void close() {
-		reset();
+		// Input and resource loaders can retain files owned by their plugin (for example, APKs
+		// extracted from an XAPK). Release all consumers before plugin unload removes those files.
 		closeAll(loadedInputs);
 		closeAll(customCodeLoaders);
 		closeAll(customResourcesLoaders);
 		closeAll(closeableList);
+		reset();
 		FileUtils.deleteDirIfExists(args.getFilesGetter().getTempDir());
 		args.close();
 		FileUtils.clearTempRootDir();
@@ -368,7 +444,7 @@ public final class JadxDecompiler implements Closeable {
 			}
 			tasks.add(new ResourcesSaver(this, outDir, resourceFile));
 		}
-		executor.addParallelTasks(tasks);
+		addOutputTaskWaves(executor, tasks);
 	}
 
 	private Set<String> collectCodeSources() {
@@ -397,28 +473,97 @@ public final class JadxDecompiler implements Closeable {
 	private void appendSourcesSave(ITaskExecutor executor, File outDir) {
 		List<JavaClass> classes = getClasses();
 		List<JavaClass> processQueue = filterClasses(classes);
+		processDependencyInputs(processQueue);
 		List<List<JavaClass>> batches;
 		try {
 			batches = decompileScheduler.buildBatches(processQueue);
+			if (!dependencyInputFileNames.isEmpty()) {
+				batches = batches.stream()
+						.map(batch -> batch.stream()
+								.filter(cls -> !isDependencyInputClass(cls.getClassNode()))
+								.collect(Collectors.toList()))
+						.filter(batch -> !batch.isEmpty())
+						.collect(Collectors.toList());
+			}
 		} catch (Exception e) {
 			throw new JadxRuntimeException("Decompilation batches build failed", e);
 		}
 		List<Runnable> decompileTasks = new ArrayList<>(batches.size());
+		List<Integer> batchSizes = new ArrayList<>(batches.size());
 		for (List<JavaClass> decompileBatch : batches) {
+			batchSizes.add(decompileBatch.size());
 			decompileTasks.add(() -> {
 				for (JavaClass cls : decompileBatch) {
 					try {
 						ClassNode clsNode = cls.getClassNode();
 						ICodeInfo code = clsNode.getCode();
-						SaveCode.save(outDir, clsNode, code);
+						if (!isDependencyInputClass(clsNode)) {
+							SaveCode.save(outDir, clsNode, code);
+						}
 					} catch (Exception e) {
 						LOG.error("Error saving class: {}", cls, e);
 					}
-				}
+			}
 
 			});
 		}
-		executor.addParallelTasks(decompileTasks);
+		addOutputTaskWaves(executor, decompileTasks, batchSizes);
+	}
+
+	private void addOutputTaskWaves(ITaskExecutor executor, List<? extends Runnable> tasks) {
+		if (!args.getOutputFileListener().useWaveCheckpoints()) {
+			executor.addParallelTasks(tasks);
+			return;
+		}
+		for (int start = 0; start < tasks.size(); start += OUTPUT_WAVE_SIZE) {
+			int end = Math.min(start + OUTPUT_WAVE_SIZE, tasks.size());
+			executor.addParallelTasks(tasks.subList(start, end));
+			executor.addSequentialTask(() -> SaveCode.notifyOutputCheckpoint(args));
+		}
+	}
+
+	private void addOutputTaskWaves(ITaskExecutor executor, List<? extends Runnable> tasks, List<Integer> weights) {
+		if (!args.getOutputFileListener().useWaveCheckpoints()) {
+			executor.addParallelTasks(tasks);
+			return;
+		}
+		int start = 0;
+		int waveWeight = 0;
+		for (int i = 0; i < tasks.size(); i++) {
+			int weight = weights.get(i);
+			if (i > start && waveWeight + weight > OUTPUT_WAVE_SIZE) {
+				addOutputWave(executor, tasks.subList(start, i));
+				start = i;
+				waveWeight = 0;
+			}
+			waveWeight += weight;
+		}
+		if (start < tasks.size()) {
+			addOutputWave(executor, tasks.subList(start, tasks.size()));
+		}
+	}
+
+	private void addOutputWave(ITaskExecutor executor, List<? extends Runnable> tasks) {
+		executor.addParallelTasks(tasks);
+		executor.addSequentialTask(() -> SaveCode.notifyOutputCheckpoint(args));
+	}
+
+	private void processDependencyInputs(List<JavaClass> processQueue) {
+		if (dependencyInputFileNames.isEmpty()) {
+			return;
+		}
+		Set<ClassNode> dependencyClasses = new HashSet<>();
+		for (JavaClass cls : processQueue) {
+			for (ClassNode dependency : cls.getClassNode().getDependencies()) {
+				ClassNode topDependency = dependency.getTopParentClass();
+				if (isDependencyInputClass(topDependency)) {
+					dependencyClasses.add(topDependency);
+				}
+			}
+		}
+		dependencyClasses.stream()
+				.sorted()
+				.forEach(root.getProcessClasses()::forceProcess);
 	}
 
 	private List<JavaClass> filterClasses(List<JavaClass> classes) {
@@ -427,6 +572,9 @@ public final class JadxDecompiler implements Closeable {
 		for (JavaClass cls : classes) {
 			ClassNode clsNode = cls.getClassNode();
 			if (clsNode.contains(AFlag.DONT_GENERATE)) {
+				continue;
+			}
+			if (isDependencyInputClass(clsNode)) {
 				continue;
 			}
 			if (classFilter != null && !classFilter.test(clsNode.getClassInfo().getFullName())) {
@@ -438,6 +586,15 @@ public final class JadxDecompiler implements Closeable {
 			list.add(cls);
 		}
 		return list;
+	}
+
+	private boolean isDependencyInputClass(ClassNode clsNode) {
+		return !dependencyInputFileNames.isEmpty()
+				&& dependencyInputFileNames.contains(normalizedInputPath(Path.of(clsNode.getInputFileName())));
+	}
+
+	private static String normalizedInputPath(Path path) {
+		return path.toAbsolutePath().normalize().toString();
 	}
 
 	public synchronized List<JavaClass> getClasses() {
@@ -455,6 +612,53 @@ public final class JadxDecompiler implements Closeable {
 			classes = Collections.unmodifiableList(clsList);
 		}
 		return classes;
+	}
+
+	/**
+	 * Release transient class decompilation data after a completed task while keeping generated
+	 * code in the configured code cache. A later cache miss rebuilds the class from its input.
+	 *
+	 * <p>This method must only be called at a task boundary, when no decompiler worker is running.
+	 * It is intentionally not used between parallel decompilation batches because dependencies can
+	 * still reference the current class graph until the whole task has completed.</p>
+	 *
+	 * @return number of top-level classes whose transient data was released
+	 */
+	public synchronized int unloadClasses() {
+		if (root == null) {
+			return 0;
+		}
+		List<ClassNode> rootClasses = root.getClasses();
+		for (ClassNode cls : rootClasses) {
+			// Anonymous-class field replacements can point back into a method SSA graph. They are
+			// regenerated by the prepare passes after CLASS_DEEP_RELOAD, so retaining them at a
+			// completed task boundary only prevents MethodNode.unload() from releasing the IR.
+			for (FieldNode field : cls.getFields()) {
+				if (field.contains(AType.FIELD_REPLACE)) {
+					field.remove(AType.FIELD_REPLACE);
+				}
+			}
+		}
+
+		int unloaded = 0;
+		for (ClassNode cls : rootClasses) {
+			ProcessState clsState = cls.getState();
+			if (clsState != ProcessState.GENERATED_AND_UNLOADED
+					&& clsState != ProcessState.NOT_LOADED) {
+				cls.unload();
+				cls.setState(clsState == ProcessState.PROCESS_COMPLETE
+						? ProcessState.GENERATED_AND_UNLOADED
+						: ProcessState.NOT_LOADED);
+				if (!cls.isInner()) {
+					unloaded++;
+				}
+			}
+			if (!cls.isInner() && clsState != ProcessState.NOT_LOADED) {
+				// Rebuild raw and prepare-pass metadata only if the cached code is later evicted.
+				cls.add(AFlag.CLASS_DEEP_RELOAD);
+			}
+		}
+		return unloaded;
 	}
 
 	public List<JavaClass> getClassesWithInners() {
@@ -480,6 +684,41 @@ public final class JadxDecompiler implements Closeable {
 			return 0;
 		}
 		return root.getErrorsCounter().getErrorCount();
+	}
+
+	public List<String> getGlobalErrors() {
+		if (root == null) {
+			return Collections.emptyList();
+		}
+		return root.getErrorsCounter().getGlobalErrors();
+	}
+
+	public Map<String, Integer> getAnalysisLossCounts() {
+		if (root == null) {
+			return Collections.emptyMap();
+		}
+		return root.getErrorsCounter().getAnalysisLossCounts();
+	}
+
+	public Map<String, List<String>> getAnalysisLossSamples() {
+		if (root == null) {
+			return Collections.emptyMap();
+		}
+		return root.getErrorsCounter().getAnalysisLossSamples();
+	}
+
+	public Map<String, Integer> getAnalysisExclusionCounts() {
+		if (root == null) {
+			return Collections.emptyMap();
+		}
+		return root.getErrorsCounter().getAnalysisExclusionCounts();
+	}
+
+	public Map<String, List<String>> getAnalysisExclusionSamples() {
+		if (root == null) {
+			return Collections.emptyMap();
+		}
+		return root.getErrorsCounter().getAnalysisExclusionSamples();
 	}
 
 	public int getWarnsCount() {

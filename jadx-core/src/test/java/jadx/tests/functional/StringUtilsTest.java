@@ -29,6 +29,8 @@ class StringUtilsTest {
 		checkStringUnescape("\\", "\\\\");
 		checkStringUnescape("\"", "\\\"");
 		checkStringUnescape("\u1234", "\\u1234");
+		checkStringUnescape("\u00af", "\\u00af");
+		checkStringUnescape("\ud83d\ude00", "\\u1f600");
 	}
 
 	private void checkStringUnescape(String input, String result) {

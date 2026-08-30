@@ -23,7 +23,8 @@ public class MethodOverrideAttr extends PinnedAttribute {
 
 	private final Set<IMethodDetails> baseMethods;
 
-	public MethodOverrideAttr(List<IMethodDetails> overrideList, SortedSet<MethodNode> relatedMthNodes, Set<IMethodDetails> baseMethods) {
+	public MethodOverrideAttr(List<IMethodDetails> overrideList, SortedSet<MethodNode> relatedMthNodes,
+			Set<IMethodDetails> baseMethods) {
 		this.overrideList = overrideList;
 		this.relatedMthNodes = relatedMthNodes;
 		this.baseMethods = baseMethods;

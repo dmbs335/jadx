@@ -1,6 +1,7 @@
 package jadx.core.dex.attributes;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import jadx.api.plugins.input.data.attributes.IJadxAttrType;
@@ -13,6 +14,7 @@ public class AttrList<T> implements IJadxAttribute {
 
 	private final IJadxAttrType<AttrList<T>> type;
 	private final List<T> list;
+	private volatile List<T> readOnlyList;
 
 	public AttrList(IJadxAttrType<AttrList<T>> type, List<T> attrList) {
 		this.type = type;
@@ -26,6 +28,15 @@ public class AttrList<T> implements IJadxAttribute {
 
 	public List<T> getList() {
 		return list;
+	}
+
+	public List<T> getReadOnlyList() {
+		List<T> view = readOnlyList;
+		if (view == null) {
+			view = Collections.unmodifiableList(list);
+			readOnlyList = view;
+		}
+		return view;
 	}
 
 	@Override

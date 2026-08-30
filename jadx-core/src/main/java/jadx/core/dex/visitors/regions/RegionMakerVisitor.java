@@ -8,6 +8,7 @@ import jadx.core.dex.visitors.regions.maker.ExcHandlersRegionMaker;
 import jadx.core.dex.visitors.regions.maker.RegionMaker;
 import jadx.core.dex.visitors.regions.maker.SynchronizedRegionMaker;
 import jadx.core.dex.visitors.shrink.CodeShrinkVisitor;
+import jadx.core.utils.BlockUtils;
 import jadx.core.utils.exceptions.JadxException;
 
 @JadxVisitor(
@@ -21,10 +22,12 @@ public class RegionMakerVisitor extends AbstractVisitor {
 		if (mth.isNoCode() || mth.getBasicBlocks().isEmpty()) {
 			return;
 		}
-		RegionMaker rm = new RegionMaker(mth);
-		mth.setRegion(rm.makeMthRegion());
-		if (!mth.isNoExceptionHandlers()) {
-			new ExcHandlersRegionMaker(mth, rm).process();
+		try (BlockUtils.PathCacheScope ignored = BlockUtils.enterPathCache()) {
+			RegionMaker rm = new RegionMaker(mth);
+			mth.setRegion(rm.makeMthRegion());
+			if (!mth.isNoExceptionHandlers()) {
+				new ExcHandlersRegionMaker(mth, rm).process();
+			}
 		}
 		processForceInlineInsns(mth);
 		ProcessTryCatchRegions.process(mth);

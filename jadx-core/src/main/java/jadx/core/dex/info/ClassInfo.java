@@ -40,7 +40,13 @@ public final class ClassInfo implements Comparable<ClassInfo> {
 	}
 
 	public static ClassInfo fromName(RootNode root, String clsName) {
-		return fromType(root, ArgType.object(clsName));
+		InfoStorage storage = root.getInfoStorage();
+		ClassInfo cached = storage.getClsByInputName(clsName);
+		if (cached != null) {
+			return cached;
+		}
+		ClassInfo cls = fromType(root, ArgType.object(clsName));
+		return storage.putClsByInputName(clsName, cls);
 	}
 
 	public static ClassInfo fromNameWithoutCache(RootNode root, String fullClsName, boolean canBeInner) {

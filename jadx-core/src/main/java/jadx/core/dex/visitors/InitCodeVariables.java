@@ -70,7 +70,6 @@ public class InitCodeVariables extends AbstractVisitor {
 		if (assignArg.contains(AFlag.METHOD_ARGUMENT) || assignArg.contains(AFlag.CUSTOM_DECLARE)) {
 			codeVar.setDeclared(true);
 		}
-
 		setCodeVar(ssaVar, codeVar);
 	}
 
@@ -104,7 +103,17 @@ public class InitCodeVariables extends AbstractVisitor {
 			if (imCount == 1) {
 				codeVar.setType(imTypes.get(0));
 			} else if (imCount > 1) {
-				throw new JadxRuntimeException("Several immutable types in one variable: " + imTypes + ", vars: " + vars);
+				boolean referenceJoin = imTypes.stream()
+						.allMatch(type -> type.getPrimitiveType().isObjectOrArray());
+				if (referenceJoin) {
+					// A valid DEX register can join distinct reference types at a phi (for example
+					// Guava selects byte[], short[] or int[] for one hash-table Object field).
+					// Preserve the common Java assignment type instead of treating the concrete
+					// immutable input types as a broken SSA variable.
+					codeVar.setType(ArgType.OBJECT);
+				} else {
+					throw new JadxRuntimeException("Several immutable types in one variable: " + imTypes + ", vars: " + vars);
+				}
 			}
 		}
 	}
@@ -114,13 +123,16 @@ public class InitCodeVariables extends AbstractVisitor {
 			return;
 		}
 		for (PhiInsn phiInsn : phiInsnList) {
-			SSAVar resultVar = phiInsn.getResult().getSVar();
-			if (vars.add(resultVar)) {
-				collectConnectedVars(resultVar.getPhiList(), vars);
+			RegisterArg result = phiInsn.getResult();
+			if (result != null) {
+				SSAVar resultVar = result.getSVar();
+				if (resultVar != null && vars.add(resultVar)) {
+					collectConnectedVars(resultVar.getPhiList(), vars);
+				}
 			}
 			phiInsn.getArguments().forEach(arg -> {
 				SSAVar sVar = ((RegisterArg) arg).getSVar();
-				if (vars.add(sVar)) {
+				if (sVar != null && vars.add(sVar)) {
 					collectConnectedVars(sVar.getPhiList(), vars);
 				}
 			});

@@ -48,6 +48,9 @@ public class MoveInlineVisitor extends AbstractVisitor {
 
 	private static boolean processMove(MethodNode mth, InsnNode move) {
 		RegisterArg resultArg = move.getResult();
+		if (resultArg == null) {
+			return true;
+		}
 		InsnArg moveArg = move.getArg(0);
 		if (resultArg.sameRegAndSVar(moveArg)) {
 			return true;

@@ -49,7 +49,9 @@ public final class TypeBoundConst implements ITypeBound {
 
 	@Override
 	public int hashCode() {
-		return Objects.hash(bound, type);
+		int result = 1;
+		result = 31 * result + Objects.hashCode(bound);
+		return 31 * result + Objects.hashCode(type);
 	}
 
 	@Override

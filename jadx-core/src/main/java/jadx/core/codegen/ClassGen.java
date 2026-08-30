@@ -32,6 +32,8 @@ import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.FieldInitInsnAttr;
 import jadx.core.dex.attributes.nodes.EnumClassAttr;
 import jadx.core.dex.attributes.nodes.EnumClassAttr.EnumField;
+import jadx.core.dex.attributes.nodes.EnumClassAttr.EnumRegionValueHelper;
+import jadx.core.dex.attributes.nodes.EnumClassAttr.EnumValueHelper;
 import jadx.core.dex.attributes.nodes.LineAttrNode;
 import jadx.core.dex.attributes.nodes.MethodInlineAttr;
 import jadx.core.dex.attributes.nodes.NotificationAttrNode;
@@ -39,6 +41,7 @@ import jadx.core.dex.attributes.nodes.SkipMethodArgsAttr;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.PrimitiveType;
 import jadx.core.dex.instructions.mods.ConstructorInsn;
@@ -534,6 +537,57 @@ public class ClassGen {
 			if (isFieldsPresents()) {
 				code.newLine();
 			}
+		}
+		addEnumValueHelpers(code, enumFields, igen);
+	}
+
+	private void addEnumValueHelpers(ICodeWriter code, EnumClassAttr enumFields, @Nullable InsnGen igen)
+			throws CodegenException {
+		List<EnumValueHelper> valueHelpers = enumFields.getValueHelpers();
+		if (valueHelpers != null && !valueHelpers.isEmpty()) {
+			InsnGen helperInsnGen = igen != null ? igen : makeInsnGen(enumFields.getStaticMethod());
+			for (EnumValueHelper helper : valueHelpers) {
+				code.startLine("private static ");
+				useType(code, helper.getReturnType());
+				code.add(' ').add(helper.getName()).add("() {");
+				code.incIndent();
+				helperInsnGen.makeInsn(helper.getInitInsn(), code);
+				code.startLine("return ");
+				helperInsnGen.addArg(code, helper.getReturnArg());
+				code.add(';');
+				code.decIndent();
+				code.startLine('}');
+			}
+		}
+		addEnumRegionValueHelpers(code, enumFields);
+	}
+
+	private void addEnumRegionValueHelpers(ICodeWriter code, EnumClassAttr enumFields)
+			throws CodegenException {
+		List<EnumRegionValueHelper> helpers = enumFields.getRegionValueHelpers();
+		if (helpers == null || helpers.isEmpty()) {
+			return;
+		}
+		for (EnumRegionValueHelper helper : helpers) {
+			RegionGen regionGen = new RegionGen(new MethodGen(this, enumFields.getStaticMethod()));
+			code.startLine("private static ");
+			useType(code, helper.getReturnType());
+			code.add(' ').add(helper.getName()).add("() {");
+			code.incIndent();
+			for (CodeVar declaration : helper.getDeclarations()) {
+				code.startLine();
+				regionGen.declareVar(code, declaration);
+				code.add(';');
+			}
+			for (InsnNode prefixInsn : helper.getPrefixInsns()) {
+				regionGen.makeInsn(prefixInsn, code);
+			}
+			regionGen.makeRegion(code, helper.getBody());
+			code.startLine("return ");
+			regionGen.addArg(code, helper.getReturnArg());
+			code.add(';');
+			code.decIndent();
+			code.startLine('}');
 		}
 	}
 

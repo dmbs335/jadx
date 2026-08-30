@@ -3,19 +3,24 @@ package jadx.core.dex.visitors.regions;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
-import jadx.api.plugins.input.data.annotations.EncodedType;
+import jadx.api.CommentsLevel;
 import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.data.attributes.JadxAttrType;
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.CodeFeaturesAttr;
 import jadx.core.dex.attributes.nodes.CodeFeaturesAttr.CodeFeature;
+import jadx.core.dex.attributes.nodes.JadxCommentsAttr;
+import jadx.core.dex.attributes.nodes.RegionRefAttr;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.InsnType;
@@ -26,17 +31,26 @@ import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
+import jadx.core.dex.instructions.mods.TernaryInsn;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.FieldNode;
+import jadx.core.dex.nodes.IBlock;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
+import jadx.core.dex.nodes.InsnContainer;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
+import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.SwitchRegion;
+import jadx.core.dex.regions.conditions.Compare;
+import jadx.core.dex.regions.conditions.IfCondition;
 import jadx.core.dex.regions.conditions.IfRegion;
+import jadx.core.dex.regions.loops.LoopRegion;
 import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.dex.visitors.JadxVisitor;
+import jadx.core.dex.visitors.regions.maker.SwitchRegionMaker;
 import jadx.core.utils.BlockUtils;
+import jadx.core.utils.EncodedValueUtils;
 import jadx.core.utils.InsnRemover;
 import jadx.core.utils.InsnUtils;
 import jadx.core.utils.ListUtils;
@@ -82,16 +96,17 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 			if (strArg == null || !strArg.isRegister()) {
 				return false;
 			}
-
 			SwitchData data = new SwitchData(mth, part1Region);
 			data.setHashcodeInvokeInsn(hashcodeInv);
 			data.setStrArg((RegisterArg) strArg);
 
 			IContainer nextContainer = RegionUtils.getNextContainer(mth, part1Region);
 			boolean isPart1Switch = part1Region instanceof SwitchRegion;
-			boolean isPart2Switch = nextContainer instanceof SwitchRegion;
-			if (isPart2Switch) {
-				SwitchRegion part2Region = (SwitchRegion) nextContainer;
+			boolean directPart2Switch = nextContainer instanceof SwitchRegion;
+			SwitchRegion part2Region = directPart2Switch
+					? (SwitchRegion) nextContainer
+					: getSwitchAfterEmptyBridge(part1Region, nextContainer);
+			if (part2Region != null) {
 				InsnNode part2SwInsn = BlockUtils.getLastInsnWithType(part2Region.getHeader(), InsnType.SWITCH);
 				if (part2SwInsn == null || !part2SwInsn.getArg(0).isRegister()) {
 					return false;
@@ -109,7 +124,9 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 				return false;
 			}
 			if (!prepareMergedSwitchCases(data) || !replaceWithMergedSwitch(data)) {
-				mth.addWarnComment("Failed to restore switch over string. Please report as a decompilation issue");
+				if (directPart2Switch || part2Region == null) {
+					mth.addWarnComment("Failed to restore switch over string. Please report as a decompilation issue");
+				}
 				return false;
 			}
 			return true;
@@ -117,6 +134,19 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 			mth.addWarnComment("Failed to restore switch over string. Please report as a decompilation issue", e);
 			return false;
 		}
+	}
+
+	static @Nullable SwitchRegion getSwitchAfterEmptyBridge(IRegion part1Region, @Nullable IContainer nextContainer) {
+		if (!(nextContainer instanceof BlockNode) || !((BlockNode) nextContainer).getInstructions().isEmpty()) {
+			return null;
+		}
+		List<IContainer> siblings = part1Region.getParent().getSubBlocks();
+		int bridgePos = siblings.indexOf(nextContainer);
+		if (bridgePos == -1 || bridgePos + 1 >= siblings.size()) {
+			return null;
+		}
+		IContainer afterBridge = siblings.get(bridgePos + 1);
+		return afterBridge instanceof SwitchRegion ? (SwitchRegion) afterBridge : null;
 	}
 
 	/**
@@ -242,6 +272,7 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 			for (CaseData caseData : cases) {
 				casesMap.computeIfAbsent(caseData.getCodeNum(), v -> new ArrayList<>()).add(caseData.getStrValue());
 			}
+			SwitchRegion.CaseInfo defaultCase = null;
 			for (SwitchRegion.CaseInfo caseInfo : Objects.requireNonNull(part2Region).getCases()) {
 				SwitchRegion.CaseInfo newCase = new SwitchRegion.CaseInfo(new ArrayList<>(), caseInfo.getContainer());
 				for (Object key : caseInfo.getKeys()) {
@@ -253,15 +284,19 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 						}
 						newCase.getKeys().addAll(strings);
 					} else {
-						// last case. add all remaining strings
-						for (List<Object> strings : casesMap.values()) {
-							newCase.getKeys().addAll(strings);
-						}
-						casesMap.clear();
 						newCase.getKeys().add(SwitchRegion.DEFAULT_CASE_KEY);
+						defaultCase = newCase;
 					}
 				}
 				newCases.add(newCase);
+			}
+			if (defaultCase != null) {
+				int defaultKeyPos = defaultCase.getKeys().indexOf(SwitchRegion.DEFAULT_CASE_KEY);
+				for (List<Object> strings : casesMap.values()) {
+					defaultCase.getKeys().addAll(defaultKeyPos, strings);
+					defaultKeyPos += strings.size();
+				}
+				casesMap.clear();
 			}
 			if (!casesMap.isEmpty()) {
 				data.getMth().addWarnComment("switch over string: strings are not added: " + casesMap.values());
@@ -271,7 +306,14 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 			SwitchInsn swInsn = (SwitchInsn) BlockUtils.getLastInsnWithType(part1Region.getHeader(), InsnType.SWITCH);
 			BlockNode defBlock = Objects.requireNonNull(swInsn).getDefTargetBlock();
 			if (defBlock != null) {
-				cases.add(new CaseData(SwitchRegion.DEFAULT_CASE_KEY, DEFAULT_NUM_VALUE, defBlock));
+				BlockNode defActionBlock = getFirstInsnBlock(defBlock);
+				boolean externalDefault = RegionUtils.getBlockContainer(part1Region, defActionBlock) == null;
+				boolean externalTerminal = externalDefault && isTerminalPath(defActionBlock);
+				boolean externalFallthrough = externalDefault
+						&& isExternalFallthrough(data.getMth(), part1Region, defActionBlock);
+				if (!externalTerminal && !externalFallthrough) {
+					cases.add(new CaseData(SwitchRegion.DEFAULT_CASE_KEY, DEFAULT_NUM_VALUE, defBlock));
+				}
 			}
 			CaseData lastCaseData = null;
 			for (CaseData caseData : cases) {
@@ -282,6 +324,23 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 				} else {
 					IContainer container = RegionUtils.getBlockContainer(part1Region, caseData.getCode());
 					if (container == null) {
+						BlockNode actionBlock = getFirstInsnBlock(caseData.getCode());
+						container = RegionUtils.getBlockContainer(part1Region, actionBlock);
+						if (container == null) {
+							if (isTerminalBlock(actionBlock)) {
+								container = actionBlock;
+							} else if (isExternalDefaultBeforeSharedJoin(caseData, actionBlock)) {
+								container = actionBlock;
+							} else if (isExternalFallthrough(data.getMth(), part1Region, actionBlock)) {
+								Region fallthroughCase = new Region(part1Region);
+								data.addExternalFallthroughCase(fallthroughCase);
+								container = fallthroughCase;
+							} else {
+								container = getExternalCaseRegion(part1Region, actionBlock);
+							}
+						}
+					}
+					if (container == null) {
 						return false;
 					}
 					SwitchRegion.CaseInfo newInfo = new SwitchRegion.CaseInfo(new ArrayList<>(), container);
@@ -290,8 +349,184 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 				}
 				lastCaseData = caseData;
 			}
+			List<IContainer> sharedTail = getSharedCaseTail(part1Region);
+			if (!sharedTail.isEmpty()
+					&& part1Region.getParent() instanceof Region
+					&& isSharedTailExtractionNeeded(newCases, sharedTail.get(0))
+					&& canNormalizeSharedTailExits(data.getMth(), part1Region, sharedTail)
+					&& newCases.stream().allMatch(caseInfo -> canStripSharedTail(caseInfo.getContainer(), sharedTail))) {
+				for (int i = 0; i < newCases.size(); i++) {
+					SwitchRegion.CaseInfo caseInfo = newCases.get(i);
+					IContainer caseContainer = stripSharedTail(caseInfo.getContainer(), sharedTail);
+					newCases.set(i, new SwitchRegion.CaseInfo(caseInfo.getKeys(), caseContainer));
+				}
+				data.setSharedCaseTail(sharedTail);
+			}
 		}
 		return true;
+	}
+
+	private static List<IContainer> getSharedCaseTail(SwitchRegion switchRegion) {
+		List<IContainer> sharedTail = null;
+		for (SwitchRegion.CaseInfo caseInfo : switchRegion.getCases()) {
+			IContainer caseContainer = caseInfo.getContainer();
+			if (!(caseContainer instanceof Region)) {
+				return Collections.emptyList();
+			}
+			List<IContainer> subBlocks = withoutTrailingSwitchBreak(((Region) caseContainer).getSubBlocks());
+			if (sharedTail == null) {
+				sharedTail = new ArrayList<>(subBlocks);
+				continue;
+			}
+			int sharedPos = sharedTail.size() - 1;
+			int casePos = subBlocks.size() - 1;
+			while (sharedPos >= 0 && casePos >= 0
+					&& isSameContainer(sharedTail.get(sharedPos), subBlocks.get(casePos))) {
+				sharedPos--;
+				casePos--;
+			}
+			sharedTail = new ArrayList<>(sharedTail.subList(sharedPos + 1, sharedTail.size()));
+			if (sharedTail.isEmpty()) {
+				return Collections.emptyList();
+			}
+		}
+		return sharedTail == null ? Collections.emptyList() : sharedTail;
+	}
+
+	private static List<IContainer> withoutTrailingSwitchBreak(List<IContainer> containers) {
+		int end = containers.size();
+		if (end != 0) {
+			IBlock lastBlock = RegionUtils.getLastBlock(containers.get(end - 1));
+			InsnNode lastInsn = BlockUtils.getLastInsn(lastBlock);
+			if (lastInsn != null && lastInsn.getType() == InsnType.BREAK) {
+				end--;
+			}
+		}
+		return containers.subList(0, end);
+	}
+
+	private static boolean isSameContainer(IContainer first, IContainer second) {
+		if (first == second) {
+			return true;
+		}
+		if (first.getClass() != second.getClass()) {
+			return false;
+		}
+		BlockNode firstBlock = RegionUtils.getFirstBlockNode(first);
+		return firstBlock != null && firstBlock == RegionUtils.getFirstBlockNode(second);
+	}
+
+	private static boolean isSharedTailExtractionNeeded(
+			List<SwitchRegion.CaseInfo> cases, IContainer tailStart) {
+		for (SwitchRegion.CaseInfo caseInfo : cases) {
+			if (!containsContainer(caseInfo.getContainer(), tailStart)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean canStripSharedTail(IContainer container, List<IContainer> sharedTail) {
+		if (!containsContainer(container, sharedTail.get(0))) {
+			return true;
+		}
+		if (!(container instanceof Region)) {
+			return false;
+		}
+		List<IContainer> subBlocks = withoutTrailingSwitchBreak(((Region) container).getSubBlocks());
+		int tailPos = subBlocks.size() - sharedTail.size();
+		if (tailPos < 0) {
+			return false;
+		}
+		for (int i = 0; i < sharedTail.size(); i++) {
+			if (!isSameContainer(subBlocks.get(tailPos + i), sharedTail.get(i))) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static IContainer stripSharedTail(IContainer container, List<IContainer> sharedTail) {
+		if (!containsContainer(container, sharedTail.get(0))) {
+			return container;
+		}
+		Region region = (Region) container;
+		List<IContainer> subBlocks = withoutTrailingSwitchBreak(region.getSubBlocks());
+		int tailPos = subBlocks.size() - sharedTail.size();
+		Region prefix = new Region(region.getParent());
+		for (int i = 0; i < tailPos; i++) {
+			prefix.add(subBlocks.get(i));
+		}
+		return prefix;
+	}
+
+	private static boolean containsContainer(IContainer container, IContainer target) {
+		if (container == target) {
+			return true;
+		}
+		if (target instanceof BlockNode) {
+			return RegionUtils.isRegionContainsBlock(container, (BlockNode) target);
+		}
+		return target instanceof IRegion
+				&& RegionUtils.isRegionContainsRegion(container, (IRegion) target);
+	}
+
+	private static boolean isTerminalBlock(@Nullable BlockNode block) {
+		InsnNode lastInsn = BlockUtils.getLastInsn(block);
+		return lastInsn != null && (lastInsn.getType() == InsnType.RETURN || lastInsn.getType() == InsnType.THROW);
+	}
+
+	private static boolean isTerminalPath(@Nullable BlockNode block) {
+		Set<BlockNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+		while (block != null && visited.add(block)) {
+			if (isTerminalBlock(block)) {
+				return true;
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return false;
+			}
+			BlockNode next = successors.get(0);
+			if (next.getPredecessors().size() != 1) {
+				return false;
+			}
+			block = next;
+		}
+		return false;
+	}
+
+	private static boolean isExternalFallthrough(MethodNode mth, IRegion switchRegion, @Nullable BlockNode actionBlock) {
+		if (actionBlock == null) {
+			return false;
+		}
+		IRegion currentRegion = switchRegion;
+		while (currentRegion.getParent() != null) {
+			IContainer nextContainer = RegionUtils.getNextContainer(mth, currentRegion);
+			if (nextContainer != null) {
+				BlockNode nextBlock = RegionUtils.getFirstBlockNode(nextContainer);
+				return getFirstInsnBlock(nextBlock) == actionBlock;
+			}
+			currentRegion = currentRegion.getParent();
+		}
+		return false;
+	}
+
+	private static boolean isExternalDefaultBeforeSharedJoin(CaseData caseData, @Nullable BlockNode actionBlock) {
+		if (caseData.getStrValue() != SwitchRegion.DEFAULT_CASE_KEY || actionBlock == null) {
+			return false;
+		}
+		List<BlockNode> successors = actionBlock.getCleanSuccessors();
+		return successors.size() == 1 && successors.get(0).getPredecessors().size() > 1;
+	}
+
+	private static @Nullable IContainer getExternalCaseRegion(
+			SwitchRegion part1Region, @Nullable BlockNode actionBlock) {
+		if (actionBlock == null) {
+			return null;
+		}
+		IRegion parent = part1Region.getParent();
+		IContainer container = RegionUtils.getBlockContainer(parent, actionBlock);
+		return container instanceof IRegion && container != parent ? container : null;
 	}
 
 	/** replace with new switch. remove original code */
@@ -314,15 +549,32 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 		BlockUtils.replaceInsn(mth, newHeader, swInsn, newSwInsn);
 		keptInsns.add(newSwInsn);
 
-		SwitchRegion replaceRegion = new SwitchRegion(part1Parent, newHeader);
+		SwitchRegion replaceRegion = new SwitchRegion(part1Parent, newHeader, (SwitchInsn) newSwInsn);
 		for (SwitchRegion.CaseInfo caseInfo : data.getNewCases()) {
 			IContainer container = caseInfo.getContainer();
+			removeRedundantTrailingBreak(container, part1Region);
+			if (data.isExternalFallthroughCase(container)) {
+				container = addBreakForSharedTail(replaceRegion, container);
+			}
+			if (!data.getSharedCaseTail().isEmpty()) {
+				container = addBreakForSharedTail(replaceRegion, container);
+			}
 			RegionUtils.visitBlocks(mth, container, b -> keptInsns.addAll(b.getInstructions()));
 			replaceRegion.addCase(Collections.unmodifiableList(caseInfo.getKeys()), container);
 			replaceRegion.updateParent(container, replaceRegion);
 		}
 		if (!part1Parent.replaceSubBlock(part1Region, replaceRegion)) {
 			return false;
+		}
+		if (!data.getSharedCaseTail().isEmpty()) {
+			Region parentRegion = (Region) part1Parent;
+			normalizeSharedTailExits(mth, part1Region, data.getSharedCaseTail());
+			int insertPos = parentRegion.getSubBlocks().indexOf(replaceRegion) + 1;
+			for (IContainer tailContainer : data.getSharedCaseTail()) {
+				parentRegion.getSubBlocks().add(insertPos++, tailContainer);
+				parentRegion.updateParent(tailContainer, parentRegion);
+				RegionUtils.visitBlocks(mth, tailContainer, b -> keptInsns.addAll(b.getInstructions()));
+			}
 		}
 
 		// remove original code
@@ -352,42 +604,373 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 				}
 			}
 			InsnRemover.removeAllMarked(mth);
-			InsnRemover.remove(mth, data.getHashcodeInvokeInsn());
+			InsnNode hashcodeInvokeInsn = data.getHashcodeInvokeInsn();
+			if (hashcodeInvokeInsn.contains(AFlag.WRAPPED)
+					|| BlockUtils.getBlockByInsn(mth, hashcodeInvokeInsn) != null) {
+				InsnRemover.remove(mth, hashcodeInvokeInsn);
+			}
 		} catch (StackOverflowError | Exception e) {
 			mth.addWarnComment("Failed to clean up code after switch over string restore", e);
+		}
+		if (!data.getSharedCaseTail().isEmpty()) {
+			clearResolvedDuplicationWarning(mth);
 		}
 		return true;
 	}
 
-	private static @Nullable Integer extractConstNumber(SwitchData switchData, @Nullable InsnNode numInsn) {
-		if (numInsn == null || numInsn.getArgsCount() != 1) {
-			return null;
+	private static IContainer addBreakForSharedTail(SwitchRegion switchRegion, IContainer container) {
+		if (isSwitchExitContainer(container)) {
+			return container;
 		}
-		Object constVal = InsnUtils.getConstValueByArg(switchData.getMth().root(), numInsn.getArg(0));
-		if (constVal instanceof LiteralArg) {
-			RegisterArg numArg = switchData.getNumArg();
-			if (numArg != null && numArg.sameCodeVar(numInsn.getResult())) {
-				return (int) ((LiteralArg) constVal).getLiteral();
+		if (container instanceof Region) {
+			Region region = (Region) container;
+			if (SwitchRegionMaker.canAppendBreak(region)) {
+				region.add(SwitchRegionMaker.buildBreakContainer(switchRegion));
+			}
+			return region;
+		}
+		if (container instanceof BlockNode && !isTerminalBlock((BlockNode) container)) {
+			Region region = new Region(switchRegion);
+			region.add(container);
+			region.add(SwitchRegionMaker.buildBreakContainer(switchRegion));
+			return region;
+		}
+		return container;
+	}
+
+	private static void removeRedundantTrailingBreak(IContainer container, IRegion oldSwitch) {
+		if (!(container instanceof Region)) {
+			return;
+		}
+		List<IContainer> subBlocks = ((Region) container).getSubBlocks();
+		if (subBlocks.size() < 2) {
+			return;
+		}
+		IContainer trailingContainer = subBlocks.get(subBlocks.size() - 1);
+		InsnNode trailingInsn = RegionUtils.getLastInsn(trailingContainer);
+		if (trailingInsn == null || trailingInsn.getType() != InsnType.BREAK) {
+			return;
+		}
+		RegionRefAttr regionRef = trailingInsn.get(AType.REGION_REF);
+		if (regionRef == null || regionRef.getRegion() != oldSwitch) {
+			return;
+		}
+		for (int i = 0; i < subBlocks.size() - 1; i++) {
+			IContainer subBlock = subBlocks.get(i);
+			if (subBlock instanceof IBlock && isExplicitExitInsn(RegionUtils.getLastInsn(subBlock))) {
+				subBlocks.remove(subBlocks.size() - 1);
+				return;
 			}
 		}
-		return null;
+		IContainer previousContainer = subBlocks.get(subBlocks.size() - 2);
+		if (isSwitchExitContainer(previousContainer)) {
+			subBlocks.remove(subBlocks.size() - 1);
+			return;
+		}
+		InsnNode previousInsn = RegionUtils.getLastInsn(previousContainer);
+		if (previousInsn == null) {
+			return;
+		}
+		switch (previousInsn.getType()) {
+			case RETURN:
+			case THROW:
+			case BREAK:
+			case CONTINUE:
+				subBlocks.remove(subBlocks.size() - 1);
+				break;
+
+			default:
+				break;
+		}
+	}
+
+	private static boolean isExplicitExitInsn(@Nullable InsnNode insn) {
+		if (insn == null) {
+			return false;
+		}
+		switch (insn.getType()) {
+			case RETURN:
+			case THROW:
+			case BREAK:
+			case CONTINUE:
+				return true;
+
+			default:
+				return false;
+		}
+	}
+
+	private static boolean isSwitchExitContainer(IContainer container) {
+		IBlock lastBlock = RegionUtils.getLastBlock(container);
+		if (lastBlock instanceof BlockNode) {
+			BlockNode block = (BlockNode) lastBlock;
+			if (block.getCleanSuccessors().stream().anyMatch(successor -> successor.contains(AFlag.LOOP_START))
+					|| block.getAll(AType.EDGE_INSN).stream()
+							.anyMatch(edge -> edge.getStart() == block
+									&& edge.getInsn().getType() == InsnType.CONTINUE)) {
+				return true;
+			}
+		}
+		InsnNode lastInsn = BlockUtils.getLastInsn(lastBlock);
+		if (lastInsn == null) {
+			return false;
+		}
+		switch (lastInsn.getType()) {
+			case RETURN:
+			case THROW:
+			case BREAK:
+			case CONTINUE:
+				return true;
+
+			default:
+				return false;
+		}
+	}
+
+	private static boolean canNormalizeSharedTailExits(
+			MethodNode mth, IRegion oldSwitch, List<IContainer> sharedTail) {
+		IRegion parent = oldSwitch.getParent();
+		while (parent != null) {
+			if (parent instanceof LoopRegion) {
+				return true;
+			}
+			parent = parent.getParent();
+		}
+		boolean[] switchBreakFound = { false };
+		for (IContainer tailContainer : sharedTail) {
+			RegionUtils.visitBlocks(mth, tailContainer, block -> {
+				for (InsnNode insn : block.getInstructions()) {
+					RegionRefAttr regionRef = insn.get(AType.REGION_REF);
+					if (insn.getType() == InsnType.BREAK
+							&& regionRef != null
+							&& regionRef.getRegion() == oldSwitch) {
+						switchBreakFound[0] = true;
+					}
+				}
+			});
+		}
+		return !switchBreakFound[0];
+	}
+
+	private static void normalizeSharedTailExits(
+			MethodNode mth, IRegion oldSwitch, List<IContainer> sharedTail) {
+		for (IContainer tailContainer : sharedTail) {
+			RegionUtils.visitBlocks(mth, tailContainer, block -> {
+				List<InsnNode> insns = block.getInstructions();
+				for (int i = 0; i < insns.size(); i++) {
+					InsnNode insn = insns.get(i);
+					RegionRefAttr regionRef = insn.get(AType.REGION_REF);
+					if (insn.getType() == InsnType.BREAK
+							&& regionRef != null
+							&& regionRef.getRegion() == oldSwitch) {
+						InsnNode continueInsn = new InsnNode(InsnType.CONTINUE, 0);
+						continueInsn.add(AFlag.SYNTHETIC);
+						insns.set(i, continueInsn);
+					}
+				}
+			});
+			restoreEmptyLoopContinues(tailContainer);
+		}
+	}
+
+	private static void restoreEmptyLoopContinues(IContainer container) {
+		if (!(container instanceof IRegion)) {
+			return;
+		}
+		if (container instanceof IfRegion) {
+			IfRegion ifRegion = (IfRegion) container;
+			if (hasLoopContinueSuccessor(ifRegion)) {
+				addContinueToEmptyRegion(ifRegion.getThenRegion());
+				addContinueToEmptyRegion(ifRegion.getElseRegion());
+			}
+		}
+		for (IContainer subBlock : ((IRegion) container).getSubBlocks()) {
+			restoreEmptyLoopContinues(subBlock);
+		}
+	}
+
+	private static boolean hasLoopContinueSuccessor(IfRegion ifRegion) {
+		BlockNode conditionBlock = ListUtils.last(ifRegion.getConditionBlocks());
+		if (conditionBlock == null) {
+			return false;
+		}
+		if (conditionBlock.getCleanSuccessors().stream().anyMatch(block -> block.contains(AFlag.LOOP_START))) {
+			return true;
+		}
+		return conditionBlock.getAll(AType.EDGE_INSN).stream()
+				.anyMatch(edge -> edge.getStart() == conditionBlock
+						&& edge.getInsn().getType() == InsnType.CONTINUE);
+	}
+
+	private static void addContinueToEmptyRegion(@Nullable IContainer container) {
+		if (container instanceof Region && ((Region) container).getSubBlocks().isEmpty()) {
+			InsnNode continueInsn = new InsnNode(InsnType.CONTINUE, 0);
+			continueInsn.add(AFlag.SYNTHETIC);
+			((Region) container).add(new InsnContainer(continueInsn));
+		}
+	}
+
+	private static void clearResolvedDuplicationWarning(MethodNode mth) {
+		Map<BlockNode, Integer> occurrences = new IdentityHashMap<>();
+		RegionUtils.visitBlockNodes(mth, mth.getRegion(),
+				block -> occurrences.merge(block, 1, Integer::sum));
+		mth.getBasicBlocks().stream()
+				.filter(block -> block.contains(AFlag.DUPLICATED))
+				.filter(block -> occurrences.getOrDefault(block, 0) <= 1)
+				.forEach(block -> block.remove(AFlag.DUPLICATED));
+		if (mth.getBasicBlocks().stream().anyMatch(block -> block.contains(AFlag.DUPLICATED))) {
+			return;
+		}
+		JadxCommentsAttr commentsAttr = mth.get(AType.JADX_COMMENTS);
+		if (commentsAttr != null) {
+			commentsAttr.getComments()
+					.getOrDefault(CommentsLevel.WARN, Collections.emptySet())
+					.removeIf(comment -> comment.startsWith("Code duplicated in "));
+			if (commentsAttr.getComments().values().stream().allMatch(Set::isEmpty)) {
+				mth.remove(AType.JADX_COMMENTS);
+			}
+		}
+	}
+
+	private static @Nullable Integer extractConstNumber(SwitchData switchData, @Nullable InsnNode numInsn) {
+		if (numInsn == null) {
+			return null;
+		}
+		RegisterArg numArg = switchData.getNumArg();
+		RegisterArg result = numInsn.getResult();
+		if (numArg == null || result == null || !numArg.sameCodeVar(result)) {
+			return null;
+		}
+		Object constVal = numInsn.getArgsCount() == 1
+				? InsnUtils.getConstValueByArg(switchData.getMth().root(), numInsn.getArg(0))
+				: InsnUtils.getConstValueByInsn(switchData.getMth().root(), numInsn);
+		Integer intValue = unwrapIntKey(constVal);
+		if (intValue == null && numInsn.getArgsCount() == 1) {
+			intValue = resolveConstNumber(switchData, numInsn.getArg(0));
+		}
+		if (intValue == null && numInsn.getType() == InsnType.TERNARY) {
+			intValue = resolveConstTernaryNumber(switchData, (TernaryInsn) numInsn);
+		}
+		return intValue;
+	}
+
+	private static @Nullable Integer resolveConstTernaryNumber(SwitchData switchData, TernaryInsn ternaryInsn) {
+		Integer thenValue = resolveConstNumber(switchData, ternaryInsn.getArg(0));
+		Integer elseValue = resolveConstNumber(switchData, ternaryInsn.getArg(1));
+		if (thenValue == null || elseValue == null) {
+			return null;
+		}
+		if (thenValue.equals(elseValue)) {
+			return thenValue;
+		}
+		IfCondition condition = ternaryInsn.getCondition();
+		if (!condition.isCompare()) {
+			return null;
+		}
+		Compare compare = condition.getCompare();
+		Integer left = resolveConstNumber(switchData, compare.getA());
+		Integer right = resolveConstNumber(switchData, compare.getB());
+		if (left == null || right == null) {
+			return null;
+		}
+		boolean conditionValue;
+		switch (compare.getOp()) {
+			case EQ:
+				conditionValue = left.equals(right);
+				break;
+			case NE:
+				conditionValue = !left.equals(right);
+				break;
+			case LT:
+				conditionValue = left < right;
+				break;
+			case LE:
+				conditionValue = left <= right;
+				break;
+			case GT:
+				conditionValue = left > right;
+				break;
+			case GE:
+				conditionValue = left >= right;
+				break;
+			default:
+				return null;
+		}
+		return conditionValue ? thenValue : elseValue;
+	}
+
+	private static @Nullable Integer resolveConstNumber(SwitchData switchData, InsnArg startArg) {
+		List<InsnArg> pending = new ArrayList<>();
+		pending.add(startArg);
+		Set<SSAVar> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+		Integer result = null;
+		for (int pos = 0; pos < pending.size(); pos++) {
+			InsnArg arg = pending.get(pos);
+			if (arg.isLiteral()) {
+				Integer value = unwrapIntKey(arg);
+				if (value == null || (result != null && !result.equals(value))) {
+					return null;
+				}
+				result = value;
+				continue;
+			}
+			InsnNode assignInsn;
+			if (arg.isRegister()) {
+				SSAVar ssaVar = ((RegisterArg) arg).getSVar();
+				if (ssaVar == null || !visited.add(ssaVar)) {
+					continue;
+				}
+				assignInsn = ssaVar.getAssignInsn();
+			} else if (arg.isInsnWrap()) {
+				assignInsn = ((InsnWrapArg) arg).getWrapInsn();
+			} else {
+				return null;
+			}
+			if (assignInsn == null) {
+				return null;
+			}
+			switch (assignInsn.getType()) {
+				case CONST:
+				case SGET:
+					Integer value = unwrapIntKey(InsnUtils.getConstValueByInsn(switchData.getMth().root(), assignInsn));
+					if (value == null || (result != null && !result.equals(value))) {
+						return null;
+					}
+					result = value;
+					break;
+
+				case MOVE:
+				case PHI:
+					for (InsnArg insnArg : assignInsn.getArguments()) {
+						pending.add(insnArg);
+					}
+					break;
+
+				default:
+					return null;
+			}
+		}
+		return result;
 	}
 
 	private static Integer unwrapIntKey(Object key) {
 		if (key instanceof Integer) {
 			return (Integer) key;
 		}
+		if (key instanceof Boolean) {
+			return (Boolean) key ? 1 : 0;
+		}
+		if (key instanceof LiteralArg) {
+			return (int) ((LiteralArg) key).getLiteral();
+		}
 		if (key instanceof FieldNode) {
 			EncodedValue encodedValue = ((FieldNode) key).get(JadxAttrType.CONSTANT_VALUE);
-			if (encodedValue != null && encodedValue.getType() == EncodedType.ENCODED_INT) {
-				return (Integer) encodedValue.getValue();
-			}
-			return null;
+			return unwrapIntKey(EncodedValueUtils.convertToConstValue(encodedValue));
 		}
 		return null;
 	}
 
-	private static @Nullable InvokeNode getStrHashcodeInvokeInsn(InsnArg arg) {
+	static @Nullable InvokeNode getStrHashcodeInvokeInsn(InsnArg arg) {
 		InsnNode insn = null;
 		if (arg.isRegister()) {
 			insn = ((RegisterArg) arg).getAssignInsn();
@@ -424,6 +1007,16 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 		return null;
 	}
 
+	private static @Nullable BlockNode getFirstInsnBlock(BlockNode b) {
+		while (b != null) {
+			if (!b.getInstructions().isEmpty()) {
+				return b;
+			}
+			b = BlockUtils.getNextBlock(b);
+		}
+		return null;
+	}
+
 	private static final class SwitchData {
 		private final MethodNode mth;
 		private SwitchStringType type = SwitchStringType.SWITCH_SWITCH;
@@ -434,6 +1027,8 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 		// each case is a str in part1Region, with its num or code block
 		private List<CaseData> cases;
 		private List<SwitchRegion.CaseInfo> newCases;
+		private List<IContainer> sharedCaseTail = Collections.emptyList();
+		private final Set<IContainer> externalFallthroughCases = Collections.newSetFromMap(new IdentityHashMap<>());
 		private RegisterArg numArg;
 		private RegisterArg strArg;
 		private InsnNode hashcodeInvokeInsn;
@@ -465,6 +1060,22 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 
 		public void setNewCases(List<SwitchRegion.CaseInfo> cases) {
 			this.newCases = cases;
+		}
+
+		public List<IContainer> getSharedCaseTail() {
+			return sharedCaseTail;
+		}
+
+		public void setSharedCaseTail(List<IContainer> sharedCaseTail) {
+			this.sharedCaseTail = sharedCaseTail;
+		}
+
+		public void addExternalFallthroughCase(IContainer container) {
+			externalFallthroughCases.add(container);
+		}
+
+		public boolean isExternalFallthroughCase(IContainer container) {
+			return externalFallthroughCases.contains(container);
 		}
 
 		public MethodNode getMth() {

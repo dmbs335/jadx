@@ -1,5 +1,6 @@
 package jadx.core.dex.visitors.blocks;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -20,7 +21,11 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.CodeFeaturesAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
+import jadx.core.dex.instructions.IfNode;
+import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.InvokeNode;
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -31,6 +36,7 @@ import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.trycatch.ExcHandlerAttr;
 import jadx.core.dex.trycatch.TryCatchBlockAttr;
 import jadx.core.dex.visitors.AbstractVisitor;
+import jadx.core.dex.visitors.kotlin.CoroutineMethodUtils;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -54,12 +60,46 @@ public class BlockProcessor extends AbstractVisitor {
 		removeUnreachableBlocks(mth);
 
 		computeDominators(mth);
+		boolean hasMultiEntryLoops = FixMultiEntryLoops.hasMultiEntryLoops(mth);
+		if (hasMultiEntryLoops && simplifyConstantIfs(mth)) {
+			removeUnreachableBlocks(mth);
+			computeDominators(mth);
+		}
+		boolean earlyMultiEntryChange = FixMultiEntryLoops.processBeforeExceptionHandlers(mth);
+		if (hasMultiEntryLoops) {
+			earlyMultiEntryChange |= FixMultiEntryLoops.processManyStateSwitchLoopReentryBeforeExceptionHandlers(mth);
+		}
+		if (earlyMultiEntryChange) {
+			computeDominators(mth);
+		}
 		if (independentBlockTreeMod(mth)) {
 			checkForUnreachableBlocks(mth);
 			computeDominators(mth);
 		}
-		if (FixMultiEntryLoops.process(mth)) {
+		FixMultiEntryLoops.ProcessResult multiEntryResult = FixMultiEntryLoops.process(mth);
+		if (multiEntryResult.isChanged()) {
 			computeDominators(mth);
+			if (multiEntryResult.processAdditionalCoroutinePasses()) {
+				int additionalMultiEntryFixPass = 0;
+				while (FixMultiEntryLoops.processAdditionalCoroutinePass(mth)) {
+					computeDominators(mth);
+					if (++additionalMultiEntryFixPass >= 16) {
+						mth.addWarn("Additional coroutine multi-entry normalization limit reached");
+						break;
+					}
+				}
+			}
+		}
+		int coroutineRegionNormalizationPass = 0;
+		// Each successful pass consumes one CFG candidate, so large coroutine state machines need a
+		// budget proportional to their original graph while still retaining a finite progress guard.
+		int coroutineRegionNormalizationLimit = Math.max(8, mth.getBasicBlocks().size());
+		while (FixMultiEntryLoops.processCoroutineRegionNormalizations(mth)) {
+			computeDominators(mth);
+			if (++coroutineRegionNormalizationPass >= coroutineRegionNormalizationLimit) {
+				mth.addWarn("Coroutine region normalization limit reached");
+				break;
+			}
 		}
 		updateCleanSuccessors(mth);
 
@@ -89,10 +129,95 @@ public class BlockProcessor extends AbstractVisitor {
 		DominatorTree.computeDominanceFrontier(mth);
 		registerLoops(mth);
 		processNestedLoops(mth);
+		FixMultiEntryLoops.clearVerifiedCoroutineIteratorStrideWarnings(mth);
+		FixMultiEntryLoops.clearVerifiedInlineChannelReadReentryWarning(mth);
 
 		PostDominatorTree.compute(mth);
 
 		updateCleanSuccessors(mth);
+	}
+
+	/**
+	 * Remove an IF branch if both operands resolve to literal assignments on the same straight-line
+	 * path.
+	 * This runs before SSA and only follows single-predecessor/single-successor edges.
+	 */
+	private static boolean simplifyConstantIfs(MethodNode mth) {
+		boolean changed = false;
+		for (BlockNode block : mth.getBasicBlocks()) {
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn == null || lastInsn.getType() != InsnType.IF) {
+				continue;
+			}
+			IfNode ifInsn = (IfNode) lastInsn;
+			Long first = resolveLiteralInBlock(block, ifInsn.getArg(0), lastInsn);
+			Long second = resolveLiteralInBlock(block, ifInsn.getArg(1), lastInsn);
+			if (first == null || second == null) {
+				continue;
+			}
+			boolean condition = evaluate(ifInsn.getOp(), first, second);
+			BlockNode liveBranch = condition ? ifInsn.getThenBlock() : ifInsn.getElseBlock();
+			BlockNode deadBranch = condition ? ifInsn.getElseBlock() : ifInsn.getThenBlock();
+			if (liveBranch == deadBranch) {
+				continue;
+			}
+			block.getInstructions().remove(block.getInstructions().size() - 1);
+			BlockSplitter.removeConnection(block, deadBranch);
+			mth.addDebugComment("Simplified constant IF in block: " + block);
+			changed = true;
+		}
+		return changed;
+	}
+
+	private static @Nullable Long resolveLiteralInBlock(BlockNode block, InsnArg arg, InsnNode beforeInsn) {
+		if (arg.isLiteral()) {
+			return ((LiteralArg) arg).getLiteral();
+		}
+		if (!arg.isRegister()) {
+			return null;
+		}
+		int regNum = ((RegisterArg) arg).getRegNum();
+		return resolveRegisterLiteral(block, regNum, block.getInstructions().indexOf(beforeInsn), 0);
+	}
+
+	private static @Nullable Long resolveRegisterLiteral(BlockNode block, int regNum, int end, int depth) {
+		List<InsnNode> insns = block.getInstructions();
+		for (int i = end - 1; i >= 0; i--) {
+			InsnNode insn = insns.get(i);
+			RegisterArg result = insn.getResult();
+			if (result != null && result.getRegNum() == regNum) {
+				if (insn.getType() == InsnType.CONST && insn.getArgsCount() == 1 && insn.getArg(0).isLiteral()) {
+					return ((LiteralArg) insn.getArg(0)).getLiteral();
+				}
+				return null;
+			}
+		}
+		if (depth < 4 && block.getPredecessors().size() == 1) {
+			BlockNode predecessor = block.getPredecessors().get(0);
+			if (predecessor.getSuccessors().size() == 1) {
+				return resolveRegisterLiteral(predecessor, regNum, predecessor.getInstructions().size(), depth + 1);
+			}
+		}
+		return null;
+	}
+
+	private static boolean evaluate(IfOp op, long first, long second) {
+		switch (op) {
+			case EQ:
+				return first == second;
+			case NE:
+				return first != second;
+			case LT:
+				return first < second;
+			case LE:
+				return first <= second;
+			case GT:
+				return first > second;
+			case GE:
+				return first >= second;
+			default:
+				throw new JadxRuntimeException("Unexpected IF operation: " + op);
+		}
 	}
 
 	/**
@@ -358,9 +483,23 @@ public class BlockProcessor extends AbstractVisitor {
 		if (mergeConstReturn(mth)) {
 			return true;
 		}
+		for (BlockNode basicBlock : mth.getBasicBlocks()) {
+			if (duplicateLoopSharedMoveBlock(mth, basicBlock)) {
+				return true;
+			}
+		}
 		if (CodeFeaturesAttr.contains(mth, CodeFeaturesAttr.CodeFeature.SWITCH)) {
 			for (BlockNode basicBlock : mth.getBasicBlocks()) {
+				if (duplicateSharedStringIfDiamond(mth, basicBlock)) {
+					return true;
+				}
 				if (duplicateSimpleMoveBlock(mth, basicBlock)) {
+					return true;
+				}
+				if (duplicateSharedIfReturnBranch(mth, basicBlock)) {
+					return true;
+				}
+				if (duplicateSharedIfTail(mth, basicBlock)) {
 					return true;
 				}
 			}
@@ -414,6 +553,16 @@ public class BlockProcessor extends AbstractVisitor {
 	private static boolean independentBlockTreeMod(MethodNode mth) {
 		boolean changed = false;
 		List<BlockNode> basicBlocks = mth.getBasicBlocks();
+		if (mergeEquivalentIfBranches(mth, basicBlocks)) {
+			changed = true;
+			// Exception processing below needs dominators for the updated CFG.
+			computeDominators(mth);
+		}
+		if (mergeEquivalentSynchronizedExitTails(mth, basicBlocks)) {
+			changed = true;
+			// The merged cleanup changes both predecessor sets and dominance frontiers.
+			computeDominators(mth);
+		}
 		for (BlockNode basicBlock : basicBlocks) {
 			if (deduplicateBlockInsns(mth, basicBlock)) {
 				changed = true;
@@ -431,6 +580,370 @@ public class BlockProcessor extends AbstractVisitor {
 			changed = true;
 		}
 		return changed;
+	}
+
+	/**
+	 * Merge compiler-duplicated cleanup tails which run immediately after leaving the same
+	 * synchronized block.
+	 *
+	 * <p>
+	 * D8 can clone a {@code finally} cleanup for several early returns:
+	 *
+	 * <pre>
+	 * monitor-exit(lock);
+	 * if (value != null) {
+	 *     release(value);
+	 * }
+	 * return;
+	 * </pre>
+	 *
+	 * <p>
+	 * Keeping the clones as distinct CFG exits prevents the synchronized region from selecting a
+	 * continuation. Region construction then stops at each {@code monitor-exit} and loses the
+	 * cleanup. Joining byte-for-byte equivalent, return-only tails restores the single continuation
+	 * present in the source without moving or inventing side effects.
+	 */
+	private static boolean mergeEquivalentSynchronizedExitTails(MethodNode mth, List<BlockNode> blocks) {
+		if (!mth.isVoidReturn()) {
+			return false;
+		}
+		List<SyncExitTail> tails = new ArrayList<>();
+		for (BlockNode block : new ArrayList<>(blocks)) {
+			InsnNode monitorExit = findInsn(block, InsnType.MONITOR_EXIT);
+			BlockNode tail = getSingleSuccessor(block);
+			if (monitorExit == null
+					|| monitorExit.getArgsCount() != 1
+					|| tail == null
+					|| tail.getPredecessors().size() != 1
+					|| !isConditionalReturnCleanupTail(mth, tail)) {
+				continue;
+			}
+			Set<BlockNode> tailBlocks = collectClosedReturnTail(mth, tail, block);
+			if (tailBlocks != null) {
+				tails.add(new SyncExitTail(block, monitorExit.getArg(0), tail, tailBlocks));
+			}
+		}
+		if (tails.size() < 2) {
+			return false;
+		}
+
+		Set<BlockNode> removed = new HashSet<>();
+		boolean changed = false;
+		for (int firstIdx = 0; firstIdx < tails.size() - 1; firstIdx++) {
+			SyncExitTail canonical = tails.get(firstIdx);
+			if (removed.contains(canonical.tail)) {
+				continue;
+			}
+			BlockNode sharedEntry = null;
+			for (int secondIdx = firstIdx + 1; secondIdx < tails.size(); secondIdx++) {
+				SyncExitTail duplicate = tails.get(secondIdx);
+				if (removed.contains(duplicate.tail)
+						|| !sameMonitorArg(canonical.monitorArg, duplicate.monitorArg)
+						|| !shareMonitorEnterDominator(mth, canonical, duplicate)
+						|| !areEquivalentReturnTails(canonical.tail, duplicate.tail, new HashMap<>())) {
+					continue;
+				}
+				if (sharedEntry == null) {
+					sharedEntry = BlockSplitter.startNewBlock(mth, canonical.tail.getStartOffset());
+					sharedEntry.add(AFlag.SYNTHETIC);
+					BlockSplitter.replaceConnection(canonical.exit, canonical.tail, sharedEntry);
+					BlockSplitter.connect(sharedEntry, canonical.tail);
+				}
+				BlockSplitter.replaceConnection(duplicate.exit, duplicate.tail, sharedEntry);
+				for (BlockNode duplicateBlock : duplicate.blocks) {
+					BlockSplitter.detachBlock(duplicateBlock);
+					duplicateBlock.add(AFlag.REMOVE);
+				}
+				removed.addAll(duplicate.blocks);
+				mth.addDebugComment("Merged equivalent synchronized cleanup tails: "
+						+ canonical.tail + " and " + duplicate.tail);
+				changed = true;
+			}
+		}
+		if (changed) {
+			removeMarkedBlocks(mth);
+			mth.getBasicBlocks().forEach(BlockNode::updateCleanSuccessors);
+		}
+		return changed;
+	}
+
+	private static @Nullable InsnNode findInsn(BlockNode block, InsnType type) {
+		for (InsnNode insn : block.getInstructions()) {
+			if (insn.getType() == type) {
+				return insn;
+			}
+		}
+		return null;
+	}
+
+	private static @Nullable BlockNode getSingleSuccessor(BlockNode block) {
+		return block.getSuccessors().size() == 1 ? block.getSuccessors().get(0) : null;
+	}
+
+	private static boolean sameMonitorArg(InsnArg first, InsnArg second) {
+		if (first.isRegister() && second.isRegister()) {
+			return ((RegisterArg) first).getRegNum() == ((RegisterArg) second).getRegNum();
+		}
+		return first.equals(second);
+	}
+
+	private static boolean shareMonitorEnterDominator(
+			MethodNode mth, SyncExitTail first, SyncExitTail second) {
+		BlockNode common = BlockUtils.getCommonDominator(mth, List.of(first.exit, second.exit));
+		while (common != null) {
+			InsnNode monitorEnter = findInsn(common, InsnType.MONITOR_ENTER);
+			if (monitorEnter != null
+					&& monitorEnter.getArgsCount() == 1
+					&& sameMonitorArg(first.monitorArg, monitorEnter.getArg(0))) {
+				return true;
+			}
+			common = common.getIDom();
+		}
+		return false;
+	}
+
+	private static boolean isConditionalReturnCleanupTail(MethodNode mth, BlockNode start) {
+		if (!(BlockUtils.getLastInsn(start) instanceof IfNode)) {
+			return false;
+		}
+		Set<BlockNode> tail = collectClosedReturnTail(mth, start, start.getPredecessors().get(0));
+		if (tail == null) {
+			return false;
+		}
+		boolean hasReturn = false;
+		boolean hasCleanup = false;
+		for (BlockNode block : tail) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.getType() == InsnType.RETURN) {
+					hasReturn = true;
+				} else if (insn.getType() != InsnType.IF
+						&& insn.getType() != InsnType.CONST
+						&& insn.getType() != InsnType.MOVE) {
+					hasCleanup = true;
+				}
+			}
+		}
+		return hasReturn && hasCleanup;
+	}
+
+	private static @Nullable Set<BlockNode> collectClosedReturnTail(
+			MethodNode mth, BlockNode start, BlockNode entryPredecessor) {
+		Set<BlockNode> tail = new LinkedHashSet<>();
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		queue.add(start);
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (block == mth.getExitBlock()) {
+				continue;
+			}
+			if (!tail.add(block)) {
+				continue;
+			}
+			if (tail.size() > 8
+					|| block.contains(AFlag.LOOP_START)
+					|| block.contains(AFlag.LOOP_END)
+					|| block.contains(AType.TRY_BLOCK)
+					|| block.contains(AType.EXC_CATCH)
+					|| BlockUtils.isExceptionHandlerPath(block)
+					|| block.getInstructions().stream()
+							.anyMatch(insn -> insn.getType() == InsnType.THROW
+									|| insn.getType() == InsnType.MONITOR_ENTER
+									|| insn.getType() == InsnType.MONITOR_EXIT)) {
+				return null;
+			}
+			for (BlockNode successor : block.getSuccessors()) {
+				if (successor != mth.getExitBlock()) {
+					queue.add(successor);
+				}
+			}
+		}
+		if (tail.isEmpty()) {
+			return null;
+		}
+		for (BlockNode block : tail) {
+			for (BlockNode predecessor : block.getPredecessors()) {
+				if (!tail.contains(predecessor)
+						&& !(block == start && predecessor == entryPredecessor)) {
+					return null;
+				}
+			}
+			if (block.getSuccessors().isEmpty()
+					|| block.getSuccessors().stream()
+							.anyMatch(successor -> successor != mth.getExitBlock() && !tail.contains(successor))) {
+				return null;
+			}
+		}
+		return tail;
+	}
+
+	private static boolean areEquivalentReturnTails(
+			BlockNode first, BlockNode second, Map<BlockNode, BlockNode> matched) {
+		if (first == second) {
+			return true;
+		}
+		BlockNode mapped = matched.get(first);
+		if (mapped != null) {
+			return mapped == second;
+		}
+		if (matched.containsValue(second)
+				|| first.getInstructions().size() != second.getInstructions().size()) {
+			return false;
+		}
+		for (int i = 0; i < first.getInstructions().size(); i++) {
+			if (!isInsnsEquals(first.getInstructions().get(i), second.getInstructions().get(i))) {
+				return false;
+			}
+		}
+		matched.put(first, second);
+
+		InsnNode firstLast = BlockUtils.getLastInsn(first);
+		InsnNode secondLast = BlockUtils.getLastInsn(second);
+		if (firstLast instanceof IfNode || secondLast instanceof IfNode) {
+			if (!(firstLast instanceof IfNode) || !(secondLast instanceof IfNode)) {
+				return false;
+			}
+			IfNode firstIf = (IfNode) firstLast;
+			IfNode secondIf = (IfNode) secondLast;
+			return areEquivalentReturnTails(firstIf.getThenBlock(), secondIf.getThenBlock(), matched)
+					&& areEquivalentReturnTails(firstIf.getElseBlock(), secondIf.getElseBlock(), matched);
+		}
+		if (first.isReturnBlock() || second.isReturnBlock()) {
+			return BlockUtils.isEqualReturnBlocks(first, second);
+		}
+		BlockNode firstNext = getSingleSuccessor(first);
+		BlockNode secondNext = getSingleSuccessor(second);
+		return firstNext != null
+				&& secondNext != null
+				&& areEquivalentReturnTails(firstNext, secondNext, matched);
+	}
+
+	private static final class SyncExitTail {
+		private final BlockNode exit;
+		private final InsnArg monitorArg;
+		private final BlockNode tail;
+		private final Set<BlockNode> blocks;
+
+		private SyncExitTail(
+				BlockNode exit, InsnArg monitorArg, BlockNode tail, Set<BlockNode> blocks) {
+			this.exit = exit;
+			this.monitorArg = monitorArg;
+			this.tail = tail;
+			this.blocks = blocks;
+		}
+	}
+
+	private static boolean mergeEquivalentIfBranches(MethodNode mth, List<BlockNode> blocks) {
+		boolean changed = false;
+		for (BlockNode root : new ArrayList<>(blocks)) {
+			InsnNode rootInsn = BlockUtils.getLastInsn(root);
+			if (!(rootInsn instanceof IfNode)) {
+				continue;
+			}
+			BlockNode thenEnd = followLinearBranchToIf(((IfNode) rootInsn).getThenBlock());
+			BlockNode elseEnd = followLinearBranchToIf(((IfNode) rootInsn).getElseBlock());
+			if (thenEnd == null || elseEnd == null || thenEnd == elseEnd) {
+				continue;
+			}
+			IfNode thenIf = (IfNode) BlockUtils.getLastInsn(thenEnd);
+			IfNode elseIf = (IfNode) BlockUtils.getLastInsn(elseEnd);
+			if (!areEquivalentIfs(thenIf, elseIf)
+					|| !haveCompatibleEquivalentIfInputTypes(thenEnd, elseEnd, thenIf, elseIf)
+					|| BlockUtils.isExceptionHandlerPath(thenEnd)
+					|| BlockUtils.isExceptionHandlerPath(elseEnd)) {
+				continue;
+			}
+			BlockNode thenTarget = thenIf.getThenBlock();
+			BlockNode elseTarget = thenIf.getElseBlock();
+			BlockNode join = BlockSplitter.startNewBlock(mth, thenEnd.getStartOffset());
+			join.add(AFlag.SYNTHETIC);
+			join.getInstructions().add(thenIf.copyWithoutSsa());
+			thenEnd.getInstructions().remove(thenEnd.getInstructions().size() - 1);
+			elseEnd.getInstructions().remove(elseEnd.getInstructions().size() - 1);
+			for (BlockNode target : new ArrayList<>(thenEnd.getSuccessors())) {
+				BlockSplitter.removeConnection(thenEnd, target);
+			}
+			for (BlockNode target : new ArrayList<>(elseEnd.getSuccessors())) {
+				BlockSplitter.removeConnection(elseEnd, target);
+			}
+			BlockSplitter.connect(thenEnd, join);
+			BlockSplitter.connect(elseEnd, join);
+			BlockSplitter.connect(join, thenTarget);
+			BlockSplitter.connect(join, elseTarget);
+			thenEnd.updateCleanSuccessors();
+			elseEnd.updateCleanSuccessors();
+			join.updateCleanSuccessors();
+			mth.addDebugComment("Merge equivalent branch IF blocks: " + thenEnd + " and " + elseEnd);
+			changed = true;
+		}
+		return changed;
+	}
+
+	private static @Nullable BlockNode followLinearBranchToIf(BlockNode start) {
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != null && visited.size() < 8 && visited.add(block)) {
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn instanceof IfNode) {
+				return block;
+			}
+			if (block.getSuccessors().size() != 1
+					|| block.contains(AFlag.LOOP_START)
+					|| block.contains(AFlag.LOOP_END)) {
+				return null;
+			}
+			block = block.getSuccessors().get(0);
+		}
+		return null;
+	}
+
+	private static boolean areEquivalentIfs(IfNode first, IfNode second) {
+		return first.getThenBlock() == second.getThenBlock()
+				&& first.getElseBlock() == second.getElseBlock()
+				&& first.getOp() == second.getOp()
+				&& first.getArguments().equals(second.getArguments());
+	}
+
+	static boolean haveCompatibleEquivalentIfInputTypes(
+			BlockNode firstBlock, BlockNode secondBlock, IfNode firstIf, IfNode secondIf) {
+		for (int i = 0; i < firstIf.getArgsCount(); i++) {
+			InsnArg firstArg = firstIf.getArg(i);
+			InsnArg secondArg = secondIf.getArg(i);
+			if (!firstArg.isRegister() || !secondArg.isRegister()) {
+				continue;
+			}
+			int firstReg = ((RegisterArg) firstArg).getRegNum();
+			int secondReg = ((RegisterArg) secondArg).getRegNum();
+			if (firstReg != secondReg) {
+				continue;
+			}
+			ArgType firstType = resolveRegisterType(
+					firstBlock, firstReg, firstBlock.getInstructions().indexOf(firstIf), 0);
+			ArgType secondType = resolveRegisterType(
+					secondBlock, secondReg, secondBlock.getInstructions().indexOf(secondIf), 0);
+			if (firstType != null && firstType.isTypeKnown()
+					&& secondType != null && secondType.isTypeKnown()
+					&& firstType.isPrimitive() != secondType.isPrimitive()) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static @Nullable ArgType resolveRegisterType(BlockNode block, int regNum, int end, int depth) {
+		List<InsnNode> insns = block.getInstructions();
+		for (int i = end - 1; i >= 0; i--) {
+			RegisterArg result = insns.get(i).getResult();
+			if (result != null && result.getRegNum() == regNum) {
+				return result.getInitType();
+			}
+		}
+		if (depth < 4 && block.getPredecessors().size() == 1) {
+			BlockNode predecessor = block.getPredecessors().get(0);
+			if (predecessor.getSuccessors().size() == 1) {
+				return resolveRegisterType(predecessor, regNum, predecessor.getInstructions().size(), depth + 1);
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -469,6 +982,117 @@ public class BlockProcessor extends AbstractVisitor {
 		return false;
 	}
 
+	/**
+	 * Duplicate a move-only loop branch shared by several IF exits.
+	 * Optimizers can merge identical assignments from several direction checks,
+	 * but a region can only own the shared block once.
+	 */
+	private static boolean duplicateLoopSharedMoveBlock(MethodNode mth, BlockNode block) {
+		List<InsnNode> insns = block.getInstructions();
+		if (isCoroutineMethod(mth)
+				|| !isInMarkedLoop(mth, block)
+				|| insns.size() != 1
+				|| block.getSuccessors().size() != 1
+				|| insns.get(0).getType() != InsnType.MOVE) {
+			return false;
+		}
+		List<BlockNode> preds = block.getPredecessors();
+		if (preds.size() < 3
+				|| !onlyIfInLastInsns(preds)
+				|| (!isMarkedLoopSharedMove(block) && !hasLoopSharedMoveCompanion(mth, block))) {
+			return false;
+		}
+		BlockNode successor = block.getSuccessors().get(0);
+		List<BlockNode> predsCopy = new ArrayList<>(preds);
+		for (int i = 1; i < predsCopy.size(); i++) {
+			BlockNode pred = predsCopy.get(i);
+			BlockNode newBlock = BlockSplitter.startNewBlock(mth, -1);
+			newBlock.add(AFlag.SYNTHETIC);
+			InsnNode copyInsn = insns.get(0).copyWithoutSsa();
+			copyInsn.add(AFlag.SYNTHETIC);
+			newBlock.getInstructions().add(copyInsn);
+			newBlock.copyAttributesFrom(block);
+			BlockSplitter.replaceConnection(pred, block, newBlock);
+			BlockSplitter.connect(newBlock, successor);
+			InsnNode predInsn = BlockUtils.getLastInsn(pred);
+			if (predInsn instanceof IfNode) {
+				((IfNode) predInsn).replaceTargetBlock(block, newBlock);
+			}
+			pred.updateCleanSuccessors();
+			newBlock.updateCleanSuccessors();
+		}
+		block.add(AFlag.SYNTHETIC);
+		block.getInstructions().get(0).add(AFlag.SYNTHETIC);
+		return true;
+	}
+
+	private static boolean hasLoopSharedMoveCompanion(MethodNode mth, BlockNode block) {
+		boolean continuation = isStraightLoopContinuation(mth, block);
+		for (BlockNode other : mth.getBasicBlocks()) {
+			if (other == block
+					|| other.getInstructions().size() != 1
+					|| other.getSuccessors().size() != 1
+					|| other.getInstructions().get(0).getType() != InsnType.MOVE
+					|| !isInMarkedLoop(mth, other)
+					|| other.getPredecessors().size() < 3
+					|| !onlyIfInLastInsns(other.getPredecessors())
+					|| continuation == isStraightLoopContinuation(mth, other)
+					|| !isInsnsEquals(block.getInstructions().get(0), other.getInstructions().get(0))) {
+				continue;
+			}
+			long commonPreds = block.getPredecessors().stream()
+					.filter(other.getPredecessors()::contains)
+					.count();
+			if (commonPreds >= 3) {
+				other.add(AFlag.SYNTHETIC);
+				other.getInstructions().get(0).add(AFlag.SYNTHETIC);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean isMarkedLoopSharedMove(BlockNode block) {
+		return block.contains(AFlag.SYNTHETIC)
+				&& block.getInstructions().size() == 1
+				&& block.getInstructions().get(0).contains(AFlag.SYNTHETIC);
+	}
+
+	private static boolean isStraightLoopContinuation(MethodNode mth, BlockNode source) {
+		for (BlockNode loopEndPoint : mth.getBasicBlocks()) {
+			for (LoopInfo loop : loopEndPoint.getAll(AType.LOOP)) {
+				if (!loop.getLoopBlocks().contains(source)) {
+					continue;
+				}
+				BlockNode block = source.getSuccessors().get(0);
+				Set<BlockNode> visited = new HashSet<>();
+				while (block != null && visited.size() < 8 && visited.add(block)) {
+					if (block == loop.getEnd()) {
+						return true;
+					}
+					if (block.getInstructions().stream()
+							.anyMatch(insn -> insn.getType() != InsnType.MOVE && insn.getType() != InsnType.CONST)
+							|| block.getSuccessors().size() != 1) {
+						break;
+					}
+					block = block.getSuccessors().get(0);
+				}
+			}
+		}
+		return false;
+	}
+
+	private static boolean isInMarkedLoop(MethodNode mth, BlockNode block) {
+		for (BlockNode loopEndPoint : mth.getBasicBlocks()) {
+			for (LoopInfo loop : loopEndPoint.getAll(AType.LOOP)) {
+				if (loop.getLoopBlocks().contains(block)) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
 	private static boolean onlySwitchAndIfInLastInsns(List<BlockNode> preds) {
 		boolean hasSwitch = false;
 		boolean hasIf = false;
@@ -490,6 +1114,339 @@ public class BlockProcessor extends AbstractVisitor {
 			}
 		}
 		return hasSwitch && hasIf;
+	}
+
+	private static boolean onlyIfInLastInsns(List<BlockNode> preds) {
+		for (BlockNode pred : preds) {
+			InsnNode lastInsn = BlockUtils.getLastInsn(pred);
+			if (lastInsn == null || lastInsn.getType() != InsnType.IF) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean isStringEqualsIf(BlockNode ifBlock) {
+		BlockNode block = ifBlock;
+		for (int depth = 0; depth < 3 && block != null; depth++) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn instanceof InvokeNode) {
+					InvokeNode invoke = (InvokeNode) insn;
+					if (invoke.getCallMth().getName().equals("equals")
+							&& invoke.getInstanceArg() != null
+							&& isStringArg(invoke.getInstanceArg())) {
+						return true;
+					}
+				}
+			}
+			block = block.getPredecessors().size() == 1 ? block.getPredecessors().get(0) : null;
+		}
+		return false;
+	}
+
+	private static boolean isStringArg(InsnArg arg) {
+		if (arg.getType().equals(ArgType.STRING)) {
+			return true;
+		}
+		return arg instanceof RegisterArg && ((RegisterArg) arg).getInitType().equals(ArgType.STRING);
+	}
+
+	private static boolean duplicateSharedStringIfDiamond(MethodNode mth, BlockNode firstIfBlock) {
+		InsnNode firstLastInsn = BlockUtils.getLastInsn(firstIfBlock);
+		if (!(firstLastInsn instanceof IfNode) || !isStringEqualsIf(firstIfBlock)) {
+			return false;
+		}
+		IfNode firstIf = (IfNode) firstLastInsn;
+		BlockNode firstTarget = firstIf.getThenBlock();
+		BlockNode secondTarget = firstIf.getElseBlock();
+		BlockNode join = findStraightJoin(firstTarget, secondTarget, 8);
+		if (join == null || join == firstTarget || join == secondTarget) {
+			return false;
+		}
+		List<BlockNode> firstPath = collectStraightPath(firstTarget, join, 4);
+		List<BlockNode> secondPath = collectStraightPath(secondTarget, join, 4);
+		if (firstPath == null || secondPath == null) {
+			return false;
+		}
+		for (BlockNode candidate : new ArrayList<>(firstTarget.getPredecessors())) {
+			if (candidate == firstIfBlock || !secondTarget.getPredecessors().contains(candidate)) {
+				continue;
+			}
+			InsnNode candidateLastInsn = BlockUtils.getLastInsn(candidate);
+			if (!(candidateLastInsn instanceof IfNode)
+					|| !isStringEqualsIf(candidate)) {
+				continue;
+			}
+			IfNode candidateIf = (IfNode) candidateLastInsn;
+			if (!Set.of(candidateIf.getThenBlock(), candidateIf.getElseBlock())
+					.equals(Set.of(firstTarget, secondTarget))) {
+				continue;
+			}
+			BlockNode firstCopy = copyStraightPath(mth, firstPath, join);
+			BlockNode secondCopy = copyStraightPath(mth, secondPath, join);
+			BlockSplitter.replaceConnection(candidate, firstTarget, firstCopy);
+			BlockSplitter.replaceConnection(candidate, secondTarget, secondCopy);
+			candidateIf.initBlocks(candidate);
+			candidate.updateCleanSuccessors();
+			return true;
+		}
+		return false;
+	}
+
+	private static @Nullable BlockNode findStraightJoin(BlockNode first, BlockNode second, int maxDepth) {
+		Set<BlockNode> firstPath = new HashSet<>();
+		BlockNode block = first;
+		for (int depth = 0; depth < maxDepth && block != null; depth++) {
+			firstPath.add(block);
+			block = block.getSuccessors().size() == 1 ? block.getSuccessors().get(0) : null;
+		}
+		block = second;
+		for (int depth = 0; depth < maxDepth && block != null; depth++) {
+			if (firstPath.contains(block)) {
+				return block;
+			}
+			block = block.getSuccessors().size() == 1 ? block.getSuccessors().get(0) : null;
+		}
+		return null;
+	}
+
+	private static BlockNode copyStraightPath(MethodNode mth, List<BlockNode> path, BlockNode exit) {
+		BlockNode firstCopy = null;
+		BlockNode previous = null;
+		for (BlockNode oldBlock : path) {
+			BlockNode copyBlock = BlockSplitter.startNewBlock(mth, oldBlock.getStartOffset());
+			copyBlock.add(AFlag.SYNTHETIC);
+			for (InsnNode oldInsn : oldBlock.getInstructions()) {
+				InsnNode copyInsn = oldInsn.copyWithoutSsa();
+				copyInsn.add(AFlag.SYNTHETIC);
+				copyBlock.getInstructions().add(copyInsn);
+			}
+			copyBlock.copyAttributesFrom(oldBlock);
+			if (firstCopy == null) {
+				firstCopy = copyBlock;
+			}
+			if (previous != null) {
+				BlockSplitter.connect(previous, copyBlock);
+			}
+			previous = copyBlock;
+		}
+		BlockSplitter.connect(previous, exit);
+		return firstCopy;
+	}
+
+	private static boolean duplicateSharedIfReturnBranch(MethodNode mth, BlockNode body) {
+		if (!mth.getMethodInfo().getArgumentsTypes().contains(ArgType.STRING)) {
+			return false;
+		}
+		List<BlockNode> preds = body.getPredecessors();
+		if (preds.size() < 2) {
+			return false;
+		}
+		for (int firstIdx = 0; firstIdx < preds.size() - 1; firstIdx++) {
+			BlockNode firstPred = preds.get(firstIdx);
+			BlockNode commonExit = getOtherIfSuccessor(firstPred, body);
+			if (commonExit == null) {
+				continue;
+			}
+			for (int secondIdx = firstIdx + 1; secondIdx < preds.size(); secondIdx++) {
+				BlockNode secondPred = preds.get(secondIdx);
+				if (getOtherIfSuccessor(secondPred, body) != commonExit
+						|| !hasCommonSwitchDominator(mth, firstPred, secondPred)
+						|| !isStringEqualsIf(firstPred)
+						|| !isStringEqualsIf(secondPred)) {
+					continue;
+				}
+				Set<BlockNode> branch = collectReturnBranch(mth, body, commonExit, 32);
+				if (branch == null) {
+					continue;
+				}
+				Map<BlockNode, BlockNode> copies = new HashMap<>(branch.size());
+				for (BlockNode oldBlock : branch) {
+					BlockNode copyBlock = BlockSplitter.startNewBlock(mth, oldBlock.getStartOffset());
+					copyBlock.add(AFlag.SYNTHETIC);
+					for (InsnNode oldInsn : oldBlock.getInstructions()) {
+						InsnNode copyInsn = oldInsn.copyWithoutSsa();
+						copyInsn.add(AFlag.SYNTHETIC);
+						copyBlock.getInstructions().add(copyInsn);
+					}
+					copyBlock.copyAttributesFrom(oldBlock);
+					copies.put(oldBlock, copyBlock);
+				}
+				BlockSplitter.replaceConnection(secondPred, body, copies.get(body));
+				for (BlockNode oldBlock : branch) {
+					BlockNode copyBlock = copies.get(oldBlock);
+					for (BlockNode successor : oldBlock.getSuccessors()) {
+						BlockNode copySuccessor = copies.get(successor);
+						BlockSplitter.connect(copyBlock, copySuccessor != null ? copySuccessor : successor);
+					}
+				}
+				for (BlockNode copyBlock : copies.values()) {
+					InsnNode lastInsn = BlockUtils.getLastInsn(copyBlock);
+					if (lastInsn instanceof IfNode) {
+						((IfNode) lastInsn).initBlocks(copyBlock);
+					}
+					copyBlock.updateCleanSuccessors();
+				}
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static @Nullable Set<BlockNode> collectReturnBranch(MethodNode mth, BlockNode start,
+			BlockNode commonExit, int maxBlocks) {
+		Set<BlockNode> branch = new LinkedHashSet<>();
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		queue.add(start);
+		boolean hasReturn = false;
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (block == commonExit || block == mth.getExitBlock()) {
+				return null;
+			}
+			if (!branch.add(block)) {
+				continue;
+			}
+			if (branch.size() > maxBlocks
+					|| block.contains(AType.LOOP)
+					|| BlockUtils.isExceptionHandlerPath(block)) {
+				return null;
+			}
+			hasReturn |= block.isReturnBlock();
+			for (BlockNode successor : block.getSuccessors()) {
+				if (successor == commonExit) {
+					return null;
+				}
+				if (successor != mth.getExitBlock()) {
+					queue.add(successor);
+				}
+			}
+		}
+		if (!hasReturn) {
+			return null;
+		}
+		for (BlockNode block : branch) {
+			if (block != start && block.getPredecessors().stream().anyMatch(pred -> !branch.contains(pred))) {
+				return null;
+			}
+			if (block.getSuccessors().stream()
+					.anyMatch(successor -> successor != mth.getExitBlock() && !branch.contains(successor))) {
+				return null;
+			}
+		}
+		return branch;
+	}
+
+	/**
+	 * Split a straight-line body shared by equivalent conditional exits.
+	 *
+	 * D8/R8 can fold switch cases such as a regular field and its oneof variant so
+	 * both conditional case entries jump into the same size/calculation tail. A
+	 * region can only own that tail once, leaving the other case condition outside
+	 * the switch region. Keep the common exit, but give one condition its own copy
+	 * of the short true branch.
+	 */
+	private static boolean duplicateSharedIfTail(MethodNode mth, BlockNode body) {
+		if (isCoroutineMethod(mth)) {
+			return false;
+		}
+		List<BlockNode> preds = body.getPredecessors();
+		if (preds.size() < 2) {
+			return false;
+		}
+		for (int firstIdx = 0; firstIdx < preds.size() - 1; firstIdx++) {
+			BlockNode firstPred = preds.get(firstIdx);
+			if (BlockUtils.getLastInsn(firstPred) == null
+					|| BlockUtils.getLastInsn(firstPred).getType() != InsnType.IF) {
+				continue;
+			}
+			BlockNode commonExit = getOtherIfSuccessor(firstPred, body);
+			if (commonExit == null) {
+				continue;
+			}
+			for (int secondIdx = firstIdx + 1; secondIdx < preds.size(); secondIdx++) {
+				BlockNode secondPred = preds.get(secondIdx);
+				if (getOtherIfSuccessor(secondPred, body) != commonExit) {
+					continue;
+				}
+				if (!hasCommonSwitchDominator(mth, firstPred, secondPred)) {
+					continue;
+				}
+				List<BlockNode> path = collectStraightPath(body, commonExit, 4);
+				if (path == null) {
+					continue;
+				}
+				BlockNode previous = secondPred;
+				for (BlockNode oldBlock : path) {
+					BlockNode copyBlock = BlockSplitter.startNewBlock(mth, -1);
+					copyBlock.add(AFlag.SYNTHETIC);
+					for (InsnNode oldInsn : oldBlock.getInstructions()) {
+						InsnNode copyInsn = oldInsn.copyWithoutSsa();
+						copyInsn.add(AFlag.SYNTHETIC);
+						copyBlock.getInstructions().add(copyInsn);
+					}
+					copyBlock.copyAttributesFrom(oldBlock);
+					if (previous == secondPred) {
+						BlockSplitter.replaceConnection(secondPred, body, copyBlock);
+					} else {
+						BlockSplitter.connect(previous, copyBlock);
+					}
+					previous = copyBlock;
+				}
+				BlockSplitter.connect(previous, commonExit);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean isCoroutineMethod(MethodNode mth) {
+		return CoroutineMethodUtils.hasContinuationParameter(mth)
+				|| CoroutineMethodUtils.isSuspendLambdaBody(mth);
+	}
+
+	private static boolean hasCommonSwitchDominator(MethodNode mth, BlockNode first, BlockNode second) {
+		BlockNode commonDominator = BlockUtils.getCommonDominator(mth, List.of(first, second));
+		for (BlockNode block = commonDominator; block != null; block = block.getIDom()) {
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null && lastInsn.getType() == InsnType.SWITCH) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static BlockNode getOtherIfSuccessor(BlockNode ifBlock, BlockNode body) {
+		InsnNode lastInsn = BlockUtils.getLastInsn(ifBlock);
+		if (lastInsn == null || lastInsn.getType() != InsnType.IF || ifBlock.getSuccessors().size() != 2) {
+			return null;
+		}
+		if (ifBlock.getSuccessors().get(0) == body) {
+			return ifBlock.getSuccessors().get(1);
+		}
+		if (ifBlock.getSuccessors().get(1) == body) {
+			return ifBlock.getSuccessors().get(0);
+		}
+		return null;
+	}
+
+	private static List<BlockNode> collectStraightPath(BlockNode start, BlockNode exit, int maxLength) {
+		List<BlockNode> path = new ArrayList<>(maxLength);
+		BlockNode current = start;
+		while (current != exit && path.size() < maxLength) {
+			if (current.getSuccessors().size() != 1
+					|| current.contains(AFlag.LOOP_START)
+					|| current.contains(AFlag.LOOP_END)) {
+				return null;
+			}
+			InsnNode lastInsn = BlockUtils.getLastInsn(current);
+			if (lastInsn != null && (lastInsn.getType() == InsnType.IF || lastInsn.getType() == InsnType.SWITCH)) {
+				return null;
+			}
+			path.add(current);
+			current = current.getSuccessors().get(0);
+		}
+		return current == exit && !path.isEmpty() ? path : null;
 	}
 
 	private static boolean simplifyLoopEnd(MethodNode mth, LoopInfo loop) {

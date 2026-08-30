@@ -15,6 +15,7 @@ import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
+import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
@@ -139,6 +140,18 @@ public final class IfCondition extends AttrNode {
 		throw new JadxRuntimeException("Unknown mode for invert: " + mode);
 	}
 
+	public static IfCondition copyForSharedView(IfCondition cond) {
+		if (cond.isCompare()) {
+			return new IfCondition(cond.getCompare().copyForSharedView());
+		}
+		List<IfCondition> args = cond.getArgs();
+		List<IfCondition> newArgs = new ArrayList<>(args.size());
+		for (IfCondition arg : args) {
+			newArgs.add(copyForSharedView(arg));
+		}
+		return new IfCondition(cond.getMode(), newArgs);
+	}
+
 	public static IfCondition not(IfCondition cond) {
 		if (cond.getMode() == Mode.NOT) {
 			return cond.first();
@@ -203,6 +216,33 @@ public final class IfCondition extends AttrNode {
 		return cond;
 	}
 
+	public static boolean isUnsafeNotNullGuard(IfCondition guard, IfCondition dereference) {
+		if (!guard.isCompare() || !dereference.isCompare()) {
+			return false;
+		}
+		Compare guardCmp = guard.getCompare();
+		Compare dereferenceCmp = dereference.getCompare();
+		if (guardCmp.getOp() != IfOp.NE
+				|| dereferenceCmp.getOp() != IfOp.EQ
+				|| !(guardCmp.getA() instanceof RegisterArg)
+				|| !isNullLiteral(guardCmp.getB())
+				|| !isNullLiteral(dereferenceCmp.getB())
+				|| !(dereferenceCmp.getA() instanceof InsnWrapArg)) {
+			return false;
+		}
+		InsnNode wrappedInsn = ((InsnWrapArg) dereferenceCmp.getA()).getWrapInsn();
+		if (!(wrappedInsn instanceof InvokeNode)) {
+			return false;
+		}
+		InsnArg instanceArg = ((InvokeNode) wrappedInsn).getInstanceArg();
+		return instanceArg instanceof RegisterArg
+				&& ((RegisterArg) instanceArg).getSVar() == ((RegisterArg) guardCmp.getA()).getSVar();
+	}
+
+	private static boolean isNullLiteral(InsnArg arg) {
+		return arg.isZeroLiteral() && arg.getType().isObject();
+	}
+
 	private static IfCondition simplifyCmpOp(Compare c) {
 		if (!c.getA().isInsnWrap()) {
 			return null;
@@ -220,6 +260,9 @@ public final class IfCondition extends AttrNode {
 			case CMP_L:
 			case CMP_G:
 				if (lit == 0) {
+					if (c.isSharedView()) {
+						return null;
+					}
 					IfNode insn = c.getInsn();
 					insn.changeCondition(insn.getOp(), wrapInsn.getArg(0), wrapInsn.getArg(1));
 				}

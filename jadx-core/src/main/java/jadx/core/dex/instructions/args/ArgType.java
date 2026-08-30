@@ -276,7 +276,7 @@ public abstract class ArgType {
 
 		GenericType(String obj, List<ArgType> extendTypes) {
 			super(obj);
-			this.extendTypes = extendTypes;
+			this.extendTypes = Utils.lockList(extendTypes);
 		}
 
 		@Override
@@ -291,7 +291,7 @@ public abstract class ArgType {
 
 		@Override
 		public void setExtendTypes(List<ArgType> extendTypes) {
-			this.extendTypes = extendTypes;
+			this.extendTypes = Utils.lockList(extendTypes);
 		}
 
 		@Override
@@ -387,7 +387,7 @@ public abstract class ArgType {
 
 		GenericObject(String obj, List<ArgType> generics) {
 			super(obj);
-			this.generics = Objects.requireNonNull(generics);
+			this.generics = Utils.lockList(Objects.requireNonNull(generics));
 			this.hash = calcHash();
 		}
 

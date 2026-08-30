@@ -4,6 +4,8 @@ import org.jetbrains.annotations.Nullable;
 
 import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.data.attributes.JadxAttrType;
+import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.nodes.ConstReplacementUseAttr;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.info.ConstStorage;
 import jadx.core.dex.nodes.ClassNode;
@@ -27,6 +29,9 @@ public class CollectConstValues extends AbstractVisitor {
 	public boolean visit(ClassNode cls) throws JadxException {
 		RootNode root = cls.root();
 		if (!root.getArgs().isReplaceConsts()) {
+			return true;
+		}
+		if (root.getArgs().isDependencyInputFile(cls.getInputFileName())) {
 			return true;
 		}
 		if (cls.getFields().isEmpty()) {
@@ -56,8 +61,11 @@ public class CollectConstValues extends AbstractVisitor {
 			return null;
 		}
 		if (!fld.getUseIn().isEmpty()) {
-			// field still used somewhere and not inlined by compiler, so we don't need to restore it
-			return null;
+			ConstReplacementUseAttr replacementUse = fld.get(AType.CONST_REPLACEMENT_USE);
+			if (replacementUse == null || !replacementUse.containsAll(fld.getUseIn())) {
+				// field still used somewhere and not inlined by compiler, so we don't need to restore it
+				return null;
+			}
 		}
 		return constVal.getValue();
 	}

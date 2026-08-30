@@ -28,7 +28,7 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 		this.name = name;
 		this.alias = name;
 		this.declClass = declClass;
-		this.argTypes = args;
+		this.argTypes = Utils.lockList(Objects.requireNonNull(args));
 		this.retType = retType;
 		this.shortId = makeShortId(name, argTypes, retType);
 		this.rawFullId = declClass.makeRawFullName() + '.' + shortId;
@@ -45,10 +45,10 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 			}
 		}
 		methodRef.load();
-		ArgType parentClsType = ArgType.parse(methodRef.getParentClassType());
+		ArgType parentClsType = infoStorage.getType(methodRef.getParentClassType());
 		ClassInfo parentClass = ClassInfo.fromType(root, parentClsType);
-		ArgType returnType = ArgType.parse(methodRef.getReturnType());
-		List<ArgType> args = Utils.collectionMap(methodRef.getArgTypes(), ArgType::parse);
+		ArgType returnType = infoStorage.getType(methodRef.getReturnType());
+		List<ArgType> args = Utils.collectionMap(methodRef.getArgTypes(), infoStorage::getType);
 		MethodInfo newMth = new MethodInfo(parentClass, methodRef.getName(), args, returnType);
 		MethodInfo uniqMth = infoStorage.putMethod(newMth);
 		if (uniqId != 0) {
@@ -63,8 +63,9 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 	}
 
 	public static MethodInfo fromMethodProto(RootNode root, ClassInfo declClass, String name, IMethodProto proto) {
-		List<ArgType> args = Utils.collectionMap(proto.getArgTypes(), ArgType::parse);
-		ArgType returnType = ArgType.parse(proto.getReturnType());
+		InfoStorage infoStorage = root.getInfoStorage();
+		List<ArgType> args = Utils.collectionMap(proto.getArgTypes(), infoStorage::getType);
+		ArgType returnType = infoStorage.getType(proto.getReturnType());
 		return fromDetails(root, declClass, name, args, returnType);
 	}
 

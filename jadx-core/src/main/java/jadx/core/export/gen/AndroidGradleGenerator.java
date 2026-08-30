@@ -17,6 +17,7 @@ import jadx.api.ResourceType;
 import jadx.api.security.IJadxSecurity;
 import jadx.api.security.SanitizeType;
 import jadx.core.dex.nodes.RootNode;
+import jadx.core.dex.visitors.SaveCode;
 import jadx.core.export.ExportGradleType;
 import jadx.core.export.GradleInfoStorage;
 import jadx.core.export.OutDirs;
@@ -130,12 +131,13 @@ public class AndroidGradleGenerator implements IExportGradleGenerator {
 			try (FileOutputStream fos = new FileOutputStream(gradlePropertiesFile)) {
 				fos.write("android.nonFinalResIds=false".getBytes(StandardCharsets.UTF_8));
 			}
+			SaveCode.notifyFileSaved(root.getArgs(), gradlePropertiesFile);
 		}
 	}
 
 	private void saveProjectBuildGradle() throws IOException {
 		TemplateFile tmpl = loadGradleTemplate("/export/android/build.gradle.tmpl");
-		tmpl.save(new File(projectDir, "build.gradle"));
+		tmpl.save(new File(projectDir, "build.gradle"), root.getArgs());
 	}
 
 	private void saveSettingsGradle() throws IOException {
@@ -149,7 +151,7 @@ public class AndroidGradleGenerator implements IExportGradleGenerator {
 		}
 		tmpl.add("projectName", projectName);
 		tmpl.add("mainModuleName", baseDir.getName());
-		tmpl.save(new File(projectDir, "settings.gradle"));
+		tmpl.save(new File(projectDir, "settings.gradle"), root.getArgs());
 	}
 
 	private void saveApplicationBuildGradle() throws IOException {
@@ -164,7 +166,7 @@ public class AndroidGradleGenerator implements IExportGradleGenerator {
 		tmpl.add("versionCode", applicationParams.getVersionCode());
 		tmpl.add("versionName", applicationParams.getVersionName());
 		tmpl.add("additionalOptions", genAdditionalAndroidPluginOptions(minSdkVersion));
-		tmpl.save(new File(baseDir, "build.gradle"));
+		tmpl.save(new File(baseDir, "build.gradle"), root.getArgs());
 	}
 
 	private void saveLibraryBuildGradle() throws IOException {
@@ -177,7 +179,7 @@ public class AndroidGradleGenerator implements IExportGradleGenerator {
 		tmpl.add("compileSdkVersion", applicationParams.getCompileSdkVersion());
 		tmpl.add("additionalOptions", genAdditionalAndroidPluginOptions(minSdkVersion));
 
-		tmpl.save(new File(baseDir, "build.gradle"));
+		tmpl.save(new File(baseDir, "build.gradle"), root.getArgs());
 	}
 
 	private TemplateFile loadGradleTemplate(String templatePath) throws FileNotFoundException {

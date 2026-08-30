@@ -196,6 +196,21 @@ public class PluginContext implements JadxPluginContext, JadxPluginRuntimeData, 
 	}
 
 	@Override
+	public void reportInputError(String message, @Nullable Throwable error) {
+		decompiler.reportInputError(message, error);
+	}
+
+	@Override
+	public void reportInputError(String category, String message, @Nullable Throwable error) {
+		decompiler.reportInputError(category, message, error);
+	}
+
+	@Override
+	public void reportInputExclusion(String category, String message, @Nullable Throwable error) {
+		decompiler.reportInputExclusion(category, message, error);
+	}
+
+	@Override
 	public IJadxPlugins plugins() {
 		return pluginsData;
 	}

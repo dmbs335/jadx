@@ -1,6 +1,5 @@
 package jadx.core.dex.visitors.gradle;
 
-import java.util.Map;
 
 import jadx.api.plugins.input.data.annotations.AnnotationVisibility;
 import jadx.api.plugins.input.data.annotations.EncodedValue;
@@ -73,18 +72,26 @@ public class NonFinalResIdsVisitor extends AbstractVisitor implements IRegionIte
 
 	private boolean visitAnnotationList(AnnotationsAttr annotationsList) {
 		if (annotationsList != null) {
-			for (IAnnotation annotation : annotationsList.getAll()) {
+			boolean[] customResource = { false };
+			annotationsList.forEach((type, annotation) -> {
+				if (customResource[0]) {
+					return;
+				}
 				if (annotation.getVisibility() == AnnotationVisibility.SYSTEM) {
-					continue;
+					return;
 				}
-				for (Map.Entry<String, EncodedValue> entry : annotation.getValues().entrySet()) {
-					Object value = entry.getValue().getValue();
-					if (value instanceof IFieldInfoRef && isCustomResourceClass(((IFieldInfoRef) value).getFieldInfo().getDeclClass())) {
-						gradleInfoStorage.setNonFinalResIds(true);
-						return true;
+				annotation.forEachValue((name, encodedValue) -> {
+					Object value = encodedValue.getValue();
+					if (value instanceof IFieldInfoRef
+							&& isCustomResourceClass(((IFieldInfoRef) value).getFieldInfo().getDeclClass())) {
+						customResource[0] = true;
 					}
+				});
+				if (customResource[0]) {
+					gradleInfoStorage.setNonFinalResIds(true);
 				}
-			}
+			});
+			return customResource[0];
 		}
 		return false;
 	}

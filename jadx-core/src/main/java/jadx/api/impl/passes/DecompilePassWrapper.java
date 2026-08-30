@@ -10,6 +10,7 @@ import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
 import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.utils.exceptions.JadxException;
+import jadx.core.utils.exceptions.JadxTaskCancelledException;
 
 public class DecompilePassWrapper extends AbstractVisitor implements IPassWrapperVisitor {
 	private static final Logger LOG = LoggerFactory.getLogger(DecompilePassWrapper.class);
@@ -29,6 +30,8 @@ public class DecompilePassWrapper extends AbstractVisitor implements IPassWrappe
 	public void init(RootNode root) throws JadxException {
 		try {
 			decompilePass.init(root);
+		} catch (JadxTaskCancelledException e) {
+			throw e;
 		} catch (StackOverflowError | Exception e) {
 			LOG.error("Error in decompile pass init: {}", this, e);
 		}
@@ -38,6 +41,8 @@ public class DecompilePassWrapper extends AbstractVisitor implements IPassWrappe
 	public boolean visit(ClassNode cls) throws JadxException {
 		try {
 			return decompilePass.visit(cls);
+		} catch (JadxTaskCancelledException e) {
+			throw e;
 		} catch (StackOverflowError | Exception e) {
 			cls.addError("Error in decompile pass: " + this, e);
 			return false;
@@ -48,6 +53,8 @@ public class DecompilePassWrapper extends AbstractVisitor implements IPassWrappe
 	public void visit(MethodNode mth) throws JadxException {
 		try {
 			decompilePass.visit(mth);
+		} catch (JadxTaskCancelledException e) {
+			throw e;
 		} catch (StackOverflowError | Exception e) {
 			mth.addError("Error in decompile pass: " + this, e);
 		}

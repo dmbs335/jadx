@@ -1,6 +1,7 @@
 package jadx.core.codegen;
 
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
@@ -61,6 +62,7 @@ import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
+import jadx.core.dex.visitors.ProcessAnonymous;
 import jadx.core.utils.RegionUtils;
 import jadx.core.utils.exceptions.CodegenException;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -195,7 +197,13 @@ public class InsnGen {
 						code.add(".this");
 						break;
 					case VAR:
-						addArg(code, replace.getVarRef());
+						InsnArg varRef = replace.getVarRef();
+						if (isOuterThisVar(varRef)) {
+							useClass(code, varRef.getType());
+							code.add(".this");
+						} else {
+							addArg(code, varRef);
+						}
 						break;
 				}
 				return;
@@ -210,6 +218,14 @@ public class InsnGen {
 		} else {
 			code.add(fieldNode.getAlias());
 		}
+	}
+
+	private static boolean isOuterThisVar(InsnArg varRef) {
+		if (!varRef.isRegister()) {
+			return false;
+		}
+		SSAVar ssaVar = ((RegisterArg) varRef).getSVar();
+		return ssaVar != null && ssaVar.getCodeVar().isThis();
 	}
 
 	protected void staticField(ICodeWriter code, FieldInfo field) throws CodegenException {
@@ -298,6 +314,11 @@ public class InsnGen {
 					if (var == null || var.getUseCount() != 0 || insn.getType() != InsnType.CONSTRUCTOR) {
 						assignVar(code, insn);
 						code.add(" = ");
+						if (isGenericAssignCastNeeded(insn, resArg)) {
+							code.add('(');
+							useType(code, resArg.getSVar().getCodeVar().getType());
+							code.add(") ");
+						}
 					}
 				}
 				makeInsnBody(code, insn, EMPTY_FLAGS);
@@ -309,6 +330,48 @@ public class InsnGen {
 		} catch (Exception e) {
 			throw new CodegenException(mth, "Error generate insn: " + insn, e);
 		}
+	}
+
+	private static boolean isGenericAssignCastNeeded(InsnNode insn, RegisterArg result) {
+		if (result.getSVar() == null) {
+			return false;
+		}
+		ArgType codeVarType = result.getSVar().getCodeVar().getType();
+		if (codeVarType == null
+				|| !codeVarType.isGenericType()
+				|| !ArgType.OBJECT.equals(result.getInitType())) {
+			return false;
+		}
+		InvokeNode sourceInvoke = findSourceInvoke(insn, new HashSet<>());
+		return sourceInvoke == null
+				|| sourceInvoke.getInvokeType() == InvokeType.STATIC
+				|| sourceInvoke.getArgsCount() == 0
+				|| !sourceInvoke.getArg(0).getType().containsGeneric();
+	}
+
+	@Nullable
+	private static InvokeNode findSourceInvoke(InsnNode insn, Set<InsnNode> visited) {
+		if (!visited.add(insn)) {
+			return null;
+		}
+		if (insn instanceof InvokeNode) {
+			return (InvokeNode) insn;
+		}
+		for (InsnArg arg : insn.getArguments()) {
+			InsnNode assignInsn = null;
+			if (arg instanceof InsnWrapArg) {
+				assignInsn = ((InsnWrapArg) arg).getWrapInsn();
+			} else if (arg instanceof RegisterArg && ((RegisterArg) arg).getSVar() != null) {
+				assignInsn = ((RegisterArg) arg).getSVar().getAssignInsn();
+			}
+			if (assignInsn != null) {
+				InvokeNode sourceInvoke = findSourceInvoke(assignInsn, visited);
+				if (sourceInvoke != null) {
+					return sourceInvoke;
+				}
+			}
+		}
+		return null;
 	}
 
 	private void makeInsnBody(ICodeWriter code, InsnNode insn, Set<Flags> state) throws CodegenException {
@@ -330,7 +393,23 @@ public class InsnGen {
 				break;
 
 			case MOVE:
-				addArg(code, insn.getArg(0), false);
+				InsnArg moveArg = insn.getArg(0);
+				if (isBooleanToIntMove(insn, moveArg)) {
+					addArg(code, moveArg, false);
+					code.add(" ? 1 : 0");
+					break;
+				}
+				if (isIntToBooleanMove(insn, moveArg)) {
+					addArg(code, moveArg, false);
+					code.add(" != 0");
+					break;
+				}
+				if (isMoveCastNeeded(insn, moveArg)) {
+					code.add('(');
+					useType(code, insn.getResult().getSVar().getCodeVar().getType());
+					code.add(") ");
+				}
+				addArg(code, moveArg, false);
 				break;
 
 			case CHECK_CAST:
@@ -381,6 +460,10 @@ public class InsnGen {
 
 			case CONTINUE:
 				code.add("continue");
+				LoopLabelAttr continueLabelAttr = insn.get(AType.LOOP_LABEL);
+				if (continueLabelAttr != null) {
+					code.add(' ').add(mgen.getNameGen().getLoopLabel(continueLabelAttr));
+				}
 				break;
 
 			case THROW:
@@ -650,6 +733,47 @@ public class InsnGen {
 		}
 	}
 
+	private static boolean isBooleanToIntMove(InsnNode insn, InsnArg moveArg) {
+		if (insn.getResult() == null
+				|| insn.getResult().getSVar() == null
+				|| !(moveArg instanceof RegisterArg)
+				|| ((RegisterArg) moveArg).getSVar() == null) {
+			return false;
+		}
+		ArgType resultType = insn.getResult().getSVar().getCodeVar().getType();
+		ArgType sourceType = ((RegisterArg) moveArg).getSVar().getCodeVar().getType();
+		return ArgType.INT.equals(resultType) && ArgType.BOOLEAN.equals(sourceType);
+	}
+
+	private static boolean isIntToBooleanMove(InsnNode insn, InsnArg moveArg) {
+		if (insn.getResult() == null
+				|| insn.getResult().getSVar() == null
+				|| !(moveArg instanceof RegisterArg)
+				|| ((RegisterArg) moveArg).getSVar() == null) {
+			return false;
+		}
+		ArgType resultType = insn.getResult().getSVar().getCodeVar().getType();
+		ArgType sourceType = ((RegisterArg) moveArg).getSVar().getCodeVar().getType();
+		return ArgType.BOOLEAN.equals(resultType) && ArgType.INT.equals(sourceType);
+	}
+
+	private boolean isMoveCastNeeded(InsnNode insn, InsnArg moveArg) {
+		if (insn.getResult() == null
+				|| insn.getResult().getSVar() == null
+				|| !(moveArg instanceof RegisterArg)
+				|| ((RegisterArg) moveArg).getSVar() == null) {
+			return false;
+		}
+		ArgType resultType = insn.getResult().getSVar().getCodeVar().getType();
+		ArgType sourceType = ((RegisterArg) moveArg).getSVar().getCodeVar().getType();
+		if (resultType == null || sourceType == null
+				|| !resultType.isTypeKnown() || !sourceType.isTypeKnown()
+				|| !resultType.isObject() || !sourceType.isObject()) {
+			return false;
+		}
+		return mth.root().getTypeCompare().compareTypes(resultType, sourceType).isNarrow();
+	}
+
 	/**
 	 * In most cases must be combined with new array instructions.
 	 * Use one by one array fill (can be replaced with System.arrayCopy)
@@ -804,10 +928,12 @@ public class InsnGen {
 	}
 
 	private void inlineAnonymousConstructor(ICodeWriter code, ClassNode cls, ConstructorInsn insn) throws CodegenException {
+		if (!cls.checkProcessed()) {
+			mth.root().getProcessClasses().forceProcess(cls);
+		}
 		cls.ensureProcessed();
 		if (this.mth.getParentClass() == cls) {
-			cls.remove(AType.ANONYMOUS_CLASS);
-			cls.remove(AFlag.DONT_GENERATE);
+			ProcessAnonymous.convertToInner(cls);
 			mth.getParentClass().getTopParentClass().add(AFlag.RESTART_CODEGEN);
 			throw new CodegenException("Anonymous inner class unlimited recursion detected."
 					+ " Convert class to inner: " + cls.getClassInfo().getFullName());

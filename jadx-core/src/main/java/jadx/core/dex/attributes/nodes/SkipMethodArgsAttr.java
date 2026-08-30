@@ -1,12 +1,14 @@
 package jadx.core.dex.attributes.nodes;
 
 import java.util.BitSet;
+import java.util.Objects;
 
 import org.jetbrains.annotations.Nullable;
 
 import jadx.api.plugins.input.data.attributes.PinnedAttribute;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.utils.Utils;
@@ -19,16 +21,24 @@ public class SkipMethodArgsAttr extends PinnedAttribute {
 		if (argNum == -1) {
 			throw new JadxRuntimeException("Arg not found: " + arg);
 		}
-		skipArg(mth, argNum);
+		SkipMethodArgsAttr attr = getOrCreate(mth);
+		attr.skip(argNum);
+		if (arg.contains(AFlag.REMOVE)) {
+			attr.markRemovedArg(argNum, arg.getType());
+		}
 	}
 
 	public static void skipArg(MethodNode mth, int argNum) {
+		getOrCreate(mth).skip(argNum);
+	}
+
+	private static SkipMethodArgsAttr getOrCreate(MethodNode mth) {
 		SkipMethodArgsAttr attr = mth.get(AType.SKIP_MTH_ARGS);
 		if (attr == null) {
 			attr = new SkipMethodArgsAttr(mth);
 			mth.addAttr(attr);
 		}
-		attr.skip(argNum);
+		return attr;
 	}
 
 	public static boolean isSkip(@Nullable MethodNode mth, int argNum) {
@@ -46,6 +56,8 @@ public class SkipMethodArgsAttr extends PinnedAttribute {
 	}
 
 	private final BitSet skipArgs;
+	@Nullable
+	private ArgType[] removedArgTypes;
 
 	private SkipMethodArgsAttr(MethodNode mth) {
 		this.skipArgs = new BitSet(mth.getMethodInfo().getArgsCount());
@@ -53,6 +65,24 @@ public class SkipMethodArgsAttr extends PinnedAttribute {
 
 	public void skip(int argNum) {
 		skipArgs.set(argNum);
+	}
+
+	private void markRemovedArg(int argNum, ArgType type) {
+		if (removedArgTypes == null || argNum >= removedArgTypes.length) {
+			ArgType[] newTypes = new ArgType[argNum + 1];
+			if (removedArgTypes != null) {
+				System.arraycopy(removedArgTypes, 0, newTypes, 0, removedArgTypes.length);
+			}
+			removedArgTypes = newTypes;
+		}
+		removedArgTypes[argNum] = type;
+	}
+
+	public boolean isRemovedArg(int argNum, ArgType type) {
+		return removedArgTypes != null
+				&& 0 <= argNum
+				&& argNum < removedArgTypes.length
+				&& Objects.equals(removedArgTypes[argNum], type);
 	}
 
 	public boolean isSkip(int argNum) {

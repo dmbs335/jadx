@@ -4,11 +4,14 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import jadx.api.JadxDecompiler;
+import jadx.api.JadxArgs;
 import jadx.api.ResourceFile;
 import jadx.api.ResourcesLoader;
 import jadx.api.security.IJadxSecurity;
@@ -23,11 +26,13 @@ public class ResourcesSaver implements Runnable {
 	private final ResourceFile resourceFile;
 	private final File outDir;
 	private final IJadxSecurity security;
+	private final JadxArgs args;
 
 	public ResourcesSaver(JadxDecompiler decompiler, File outDir, ResourceFile resourceFile) {
 		this.resourceFile = resourceFile;
 		this.outDir = outDir;
-		this.security = decompiler.getArgs().getSecurity();
+		this.args = decompiler.getArgs();
+		this.security = args.getSecurity();
 	}
 
 	@Override
@@ -54,7 +59,8 @@ public class ResourcesSaver implements Runnable {
 	}
 
 	private void save(ResContainer rc, File outDir) {
-		File outFile = new File(outDir, rc.getFileName());
+		String safeFileName = FileUtils.toSafeFilePath(rc.getFileName());
+		File outFile = new File(outDir, safeFileName);
 		if (!security.isInSubDirectory(outDir, outFile)) {
 			LOG.error("Invalid resource name or path traversal attack detected: {}", outFile.getPath());
 			return;
@@ -66,7 +72,7 @@ public class ResourcesSaver implements Runnable {
 		switch (rc.getDataType()) {
 			case TEXT:
 			case RES_TABLE:
-				SaveCode.save(rc.getText(), outFile);
+				SaveCode.save(rc.getText(), outFile, args);
 				return;
 
 			case DECODED_DATA:
@@ -74,6 +80,12 @@ public class ResourcesSaver implements Runnable {
 				FileUtils.makeDirsForFile(outFile);
 				try {
 					Files.write(outFile.toPath(), data);
+					if (args.getOutputFileListener().useContentMetadata()) {
+						MessageDigest digest = SaveCode.newSha256Digest();
+						SaveCode.notifyFileSaved(args, outFile, SaveCode.toHex(digest.digest(data)), data.length);
+					} else {
+						SaveCode.notifyFileSaved(args, outFile);
+					}
 				} catch (Exception e) {
 					LOG.warn("Resource '{}' not saved, got exception", rc.getName(), e);
 				}
@@ -99,7 +111,17 @@ public class ResourcesSaver implements Runnable {
 		ResourcesLoader.decodeStream(resFile, (size, is) -> {
 			Path target = outFile.toPath();
 			try {
-				Files.copy(is, target, StandardCopyOption.REPLACE_EXISTING);
+				if (args.getOutputFileListener().useContentMetadata()) {
+					MessageDigest digest = SaveCode.newSha256Digest();
+					long written;
+					try (DigestInputStream digestInput = new DigestInputStream(is, digest)) {
+						written = Files.copy(digestInput, target, StandardCopyOption.REPLACE_EXISTING);
+					}
+					SaveCode.notifyFileSaved(args, outFile, SaveCode.toHex(digest.digest()), written);
+				} else {
+					Files.copy(is, target, StandardCopyOption.REPLACE_EXISTING);
+					SaveCode.notifyFileSaved(args, outFile);
+				}
 			} catch (Exception e) {
 				Files.deleteIfExists(target); // delete partially written file
 				throw new JadxRuntimeException("Resource file save error", e);

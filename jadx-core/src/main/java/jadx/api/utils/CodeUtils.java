@@ -93,8 +93,19 @@ public class CodeUtils {
 		if (!codeInfo.hasMetadata()) {
 			return -1;
 		}
+		// Abstract, native and other no-code methods are emitted as declarations ending
+		// with ';', so codegen intentionally doesn't attach a NodeEnd annotation. Avoid
+		// scanning all remaining annotations in the class looking for an end marker that
+		// cannot exist. This can otherwise become pathological for large interfaces.
+		if (mth.isNoCode()) {
+			return -1;
+		}
+		int defPosition = mth.getDefPosition();
+		if (defPosition <= 0 || defPosition >= codeInfo.getCodeStr().length()) {
+			return -1;
+		}
 		// skip nested nodes DEF/END until first unpaired END annotation (end of this method)
-		Integer end = codeInfo.getCodeMetadata().searchDown(mth.getDefPosition() + 1, new BiFunction<>() {
+		Integer end = codeInfo.getCodeMetadata().searchDown(defPosition + 1, new BiFunction<>() {
 			int nested = 0;
 
 			@Override

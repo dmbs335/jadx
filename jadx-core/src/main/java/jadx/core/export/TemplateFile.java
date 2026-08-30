@@ -14,6 +14,8 @@ import java.util.function.Function;
 
 import org.jetbrains.annotations.Nullable;
 
+import jadx.api.JadxArgs;
+import jadx.core.dex.visitors.SaveCode;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 /**
@@ -68,6 +70,11 @@ public class TemplateFile {
 		try (OutputStream out = new FileOutputStream(outFile)) {
 			process(out);
 		}
+	}
+
+	public void save(File outFile, JadxArgs args) throws IOException {
+		save(outFile);
+		SaveCode.notifyFileSaved(args, outFile);
 	}
 
 	public void setValueSanitizer(@Nullable Function<String, String> valueSanitizer) {

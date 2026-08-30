@@ -12,6 +12,15 @@ import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.utils.exceptions.JadxException;
 
 public class DeobfuscatorVisitor extends AbstractVisitor {
+	private final DeobfPresets.ReapplyData reapplyData;
+
+	public DeobfuscatorVisitor() {
+		this(new DeobfPresets.ReapplyData());
+	}
+
+	public DeobfuscatorVisitor(DeobfPresets.ReapplyData reapplyData) {
+		this.reapplyData = reapplyData;
+	}
 
 	@Override
 	public void init(RootNode root) throws JadxException {
@@ -22,13 +31,14 @@ public class DeobfuscatorVisitor extends AbstractVisitor {
 		DeobfPresets mapping = DeobfPresets.build(root);
 		if (args.getGeneratedRenamesMappingFileMode().shouldRead()) {
 			if (mapping.load()) {
-				mapping.apply(root);
+				mapping.apply(root, reapplyData);
 			}
 		}
 		IAliasProvider aliasProvider = args.getAliasProvider();
 		IRenameCondition renameCondition = args.getRenameCondition();
 		mapping.initIndexes(aliasProvider);
 		process(root, renameCondition, aliasProvider);
+		mapping.clear();
 	}
 
 	public static void process(RootNode root, IRenameCondition renameCondition, IAliasProvider aliasProvider) {

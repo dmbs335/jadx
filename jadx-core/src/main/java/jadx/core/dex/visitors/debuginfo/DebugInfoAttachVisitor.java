@@ -1,8 +1,8 @@
 package jadx.core.dex.visitors.debuginfo;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
 
 import jadx.api.plugins.input.data.IDebugInfo;
 import jadx.api.plugins.input.data.ILocalVar;
@@ -48,27 +48,31 @@ public class DebugInfoAttachVisitor extends AbstractVisitor {
 
 	private void processDebugInfo(MethodNode mth, IDebugInfo debugInfo) {
 		InsnNode[] insnArr = mth.getInstructions();
-		attachSourceLines(mth, debugInfo.getSourceLineMapping(), insnArr);
+		attachSourceLines(mth, debugInfo, insnArr);
 		attachDebugInfo(mth, debugInfo.getLocalVars(), insnArr);
 		setMethodSourceLine(mth, insnArr);
 	}
 
-	private void attachSourceLines(MethodNode mth, Map<Integer, Integer> lineMapping, InsnNode[] insnArr) {
-		if (lineMapping.isEmpty()) {
+	private void attachSourceLines(MethodNode mth, IDebugInfo debugInfo, InsnNode[] insnArr) {
+		int linesCount = debugInfo.getSourceLineMappingSize();
+		if (linesCount == 0) {
 			return;
 		}
-		for (Map.Entry<Integer, Integer> entry : lineMapping.entrySet()) {
-			try {
-				InsnNode insn = insnArr[entry.getKey()];
+		int[] sourceLines = new int[linesCount];
+		int[] lineIndex = new int[1];
+		try {
+			debugInfo.forEachSourceLine((codeOffset, sourceLine) -> {
+				InsnNode insn = insnArr[codeOffset];
 				if (insn != null) {
-					insn.setSourceLine(entry.getValue());
+					insn.setSourceLine(sourceLine);
 				}
-			} catch (Exception e) {
-				mth.addWarnComment("Error attach source line", e);
-				return;
-			}
+				sourceLines[lineIndex[0]++] = sourceLine;
+			});
+		} catch (Exception e) {
+			mth.addWarnComment("Error attach source line", e);
+			return;
 		}
-		String ignoreReason = verifyDebugLines(lineMapping);
+		String ignoreReason = verifyDebugLines(sourceLines, lineIndex[0]);
 		if (ignoreReason != null) {
 			mth.addDebugComment("Don't trust debug lines info. " + ignoreReason);
 		} else {
@@ -76,9 +80,9 @@ public class DebugInfoAttachVisitor extends AbstractVisitor {
 		}
 	}
 
-	private String verifyDebugLines(Map<Integer, Integer> lineMapping) {
-		// search min line in method
-		int minLine = lineMapping.values().stream().mapToInt(v -> v).min().orElse(Integer.MAX_VALUE);
+	private String verifyDebugLines(int[] sourceLines, int linesCount) {
+		Arrays.sort(sourceLines, 0, linesCount);
+		int minLine = sourceLines[0];
 		if (minLine < 3) {
 			return "Lines numbers was adjusted: min line is " + minLine;
 		}
@@ -86,12 +90,23 @@ public class DebugInfoAttachVisitor extends AbstractVisitor {
 		// count repeating lines
 		// 3 here is allowed maximum for line repeat count
 		// can occur in indexed 'for' loops (3 instructions with the same line)
-		var repeatingLines = lineMapping.values().stream()
-				.collect(Collectors.toMap(l -> l, l -> 1, Integer::sum))
-				.entrySet().stream()
-				.filter(p -> p.getValue() > 3)
-				.collect(Collectors.toList());
-		if (!repeatingLines.isEmpty()) {
+		List<String> repeatingLines = null;
+		int start = 0;
+		while (start < linesCount) {
+			int end = start + 1;
+			while (end < linesCount && sourceLines[end] == sourceLines[start]) {
+				end++;
+			}
+			int repeatCount = end - start;
+			if (repeatCount > 3) {
+				if (repeatingLines == null) {
+					repeatingLines = new ArrayList<>();
+				}
+				repeatingLines.add(sourceLines[start] + "=" + repeatCount);
+			}
+			start = end;
+		}
+		if (repeatingLines != null) {
 			return "Repeating lines: " + repeatingLines;
 		}
 		return null;

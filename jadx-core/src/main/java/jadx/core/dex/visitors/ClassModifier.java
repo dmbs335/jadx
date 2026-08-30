@@ -218,7 +218,7 @@ public class ClassModifier extends AbstractVisitor {
 				// remove first arg for non-static class (references to outer class)
 				RegisterArg firstArg = args.get(0);
 				if (firstArg.getType().equals(cls.getParentClass().getClassInfo().getType())) {
-					SkipMethodArgsAttr.skipArg(mth, 0);
+					SkipMethodArgsAttr.skipArg(mth, firstArg);
 				}
 				// remove unused args
 				int argsCount = args.size();
@@ -226,7 +226,7 @@ public class ClassModifier extends AbstractVisitor {
 					RegisterArg arg = args.get(i);
 					SSAVar sVar = arg.getSVar();
 					if (sVar != null && sVar.getUseCount() == 0) {
-						SkipMethodArgsAttr.skipArg(mth, i);
+						SkipMethodArgsAttr.skipArg(mth, arg);
 					}
 				}
 				MethodInfo callMth = constr.getCallMth();
@@ -297,8 +297,11 @@ public class ClassModifier extends AbstractVisitor {
 		String alias = mth.getAlias();
 		if (!Objects.equals(wrappedMth.getAlias(), alias)) {
 			wrappedMth.rename(alias);
-			RenameReasonAttr.forNode(wrappedMth).append("merged with bridge method [inline-methods]");
 		}
+		// Record the merge independently from alias propagation. Another bridge in the
+		// override set can already have installed the same alias, but this method was
+		// still merged and must produce the same provenance in every processing order.
+		RenameReasonAttr.forNode(wrappedMth).append("merged with bridge method [inline-methods]");
 		wrappedMth.addAttr(new MethodReplaceAttr(mth));
 		wrappedMth.copyAttributeFrom(mth, AType.METHOD_OVERRIDE);
 		wrappedMth.addDebugComment("Method merged with bridge method: " + mth.getMethodInfo().getShortId());

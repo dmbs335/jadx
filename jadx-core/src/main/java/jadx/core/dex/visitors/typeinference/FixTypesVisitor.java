@@ -3,6 +3,7 @@ package jadx.core.dex.visitors.typeinference;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
@@ -15,18 +16,24 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import jadx.core.Consts;
+import jadx.core.clsp.ClspClass;
 import jadx.core.clsp.ClspGraph;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.nodes.IncompleteFieldTypeConflictAttr;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArithOp;
+import jadx.core.dex.instructions.IfNode;
+import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.PhiInsn;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.InsnArg;
+import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.PrimitiveType;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -37,11 +44,13 @@ import jadx.core.dex.nodes.IMethodDetails;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
+import jadx.core.dex.regions.conditions.IfCondition;
 import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.dex.visitors.InitCodeVariables;
 import jadx.core.dex.visitors.JadxVisitor;
 import jadx.core.dex.visitors.ModVisitor;
 import jadx.core.dex.visitors.blocks.BlockSplitter;
+import jadx.core.dex.visitors.kotlin.CoroutineMethodUtils;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnList;
 import jadx.core.utils.InsnUtils;
@@ -61,6 +70,8 @@ import jadx.core.utils.exceptions.JadxOverflowException;
 )
 public final class FixTypesVisitor extends AbstractVisitor {
 	private static final Logger LOG = LoggerFactory.getLogger(FixTypesVisitor.class);
+	private static final int EXCEPTION_MOVE_MAX_BLOCKS = 64;
+	private static final int LARGE_COROUTINE_MOVE_MIN_BLOCKS = 128;
 
 	private final TypeInferenceVisitor typeInference = new TypeInferenceVisitor();
 
@@ -73,7 +84,11 @@ public final class FixTypesVisitor extends AbstractVisitor {
 		this.typeInference.init(root);
 		this.resolvers = Arrays.asList(
 				this::applyFieldType,
+				this::trySplitIncompatibleFieldPut,
+				this::trySplitWideAssignUses,
 				this::tryRestoreTypeVarCasts,
+				this::tryRestorePhiConcreteType,
+				this::tryRestoreClosedObjectPhiType,
 				this::tryInsertCasts,
 				this::tryDeduceTypes,
 				this::trySplitConstInsns,
@@ -84,6 +99,116 @@ public final class FixTypesVisitor extends AbstractVisitor {
 				this::tryRemoveGenerics);
 	}
 
+	/**
+	 * Keep a concrete assignment type when R8 stores it into an unrelated object-typed field.
+	 *
+	 * <p>
+	 * DEX object field writes don't require the verifier-visible value type to implement the
+	 * field interface. Java does, so sharing one SSA variable between {@code new Concrete()} and
+	 * an unrelated interface field leaves type inference with two conflicting bounds. Split only
+	 * the field-write use and make the Java-required cast explicit.
+	 * </p>
+	 */
+	private boolean trySplitIncompatibleFieldPut(MethodNode mth) {
+		List<RegisterArg> fieldPutUses = new ArrayList<>();
+		for (BlockNode block : mth.getBasicBlocks()) {
+			for (InsnNode insn : block.getInstructions()) {
+				InsnType type = insn.getType();
+				if ((type == InsnType.IPUT || type == InsnType.SPUT) && insn.getArg(0).isRegister()) {
+					fieldPutUses.add((RegisterArg) insn.getArg(0));
+				}
+			}
+		}
+		int added = 0;
+		for (RegisterArg useArg : fieldPutUses) {
+			SSAVar var = useArg.getSVar();
+			if (var == null) {
+				continue;
+			}
+			if (var.getTypeInfo().getType().isTypeKnown() || var.isTypeImmutable()) {
+				continue;
+			}
+			ArgType assignType = getKnownMoveSourceType(var.getAssign());
+			if (assignType == null || !assignType.isObject()) {
+				continue;
+			}
+			ArgType fieldType = useArg.getInitType();
+			if (!fieldType.isTypeKnown() || !fieldType.isObject()
+					|| typeUpdate.getTypeCompare().compareTypes(assignType, fieldType) != TypeCompareEnum.CONFLICT) {
+				continue;
+			}
+			IndexInsnNode castInsn = insertUseCast(mth, useArg, fieldType);
+			if (castInsn != null) {
+				castInsn.add(AFlag.EXPLICIT_CAST);
+				added++;
+			}
+		}
+		if (added == 0) {
+			return false;
+		}
+		InitCodeVariables.rerun(mth);
+		typeInference.initTypeBounds(mth);
+		return typeInference.runTypePropagation(mth);
+	}
+
+	/**
+	 * Split a value assigned or explicitly cast to a wide erased type from uses which require a
+	 * narrower type.
+	 *
+	 * <p>
+	 * This occurs for generic overrides whose resolved return type is more specific than
+	 * the erased DEX implementation, for example a method returning {@code Parcelable} which
+	 * implements {@code NavType<Model>}. Keep the erased assignment and add the Java-level
+	 * narrowing cast only at the concrete use.
+	 * </p>
+	 */
+	private boolean trySplitWideAssignUses(MethodNode mth) {
+		if (mth.getAccessFlags().isBridge()
+				|| !mth.contains(AType.METHOD_OVERRIDE)
+				|| mth.getReturnType().equals(mth.getMethodInfo().getReturnType())) {
+			return false;
+		}
+		int added = 0;
+		for (SSAVar var : new ArrayList<>(mth.getSVars())) {
+			if (var.getTypeInfo().getType().isTypeKnown() || var.isTypeImmutable()) {
+				continue;
+			}
+			InsnNode assignInsn = var.getAssignInsn();
+			if (assignInsn == null
+					|| assignInsn.getType() != InsnType.CHECK_CAST && assignInsn.getType() != InsnType.INVOKE) {
+				continue;
+			}
+			ArgType assignType = assignInsn.getType() == InsnType.CHECK_CAST
+					? ((IndexInsnNode) assignInsn).getIndexAsType()
+					: assignInsn.getResult().getInitType();
+			if (!assignType.isTypeKnown() || (!assignType.isObject() && !assignType.isArray())) {
+				continue;
+			}
+			for (RegisterArg useArg : new ArrayList<>(var.getUseList())) {
+				ArgType useType = useArg.getInitType();
+				if (!useType.isTypeKnown() || (!useType.isObject() && !useType.isArray())) {
+					continue;
+				}
+				TypeCompareEnum compare = typeUpdate.getTypeCompare().compareTypes(useType, assignType);
+				if (!compare.isNarrow()) {
+					continue;
+				}
+				IndexInsnNode castInsn = insertUseCast(mth, useArg, useType);
+				if (castInsn != null) {
+					((RegisterArg) castInsn.getArg(0)).forceSetInitType(assignType);
+					castInsn.add(AFlag.EXPLICIT_CAST);
+					added++;
+				}
+			}
+		}
+		if (added == 0) {
+			return false;
+		}
+		InitCodeVariables.rerun(mth);
+		typeInference.initTypeBounds(mth);
+		return typeInference.runTypePropagation(mth);
+	}
+
 	@Override
 	public void visit(MethodNode mth) {
 		if (mth.isNoCode() || checkTypes(mth)) {
@@ -91,8 +216,12 @@ public final class FixTypesVisitor extends AbstractVisitor {
 		}
 		try {
 			for (Function<MethodNode, Boolean> resolver : resolvers) {
-				if (resolver.apply(mth) && checkTypes(mth)) {
-					break;
+				try {
+					if (resolver.apply(mth) && checkTypes(mth)) {
+						break;
+					}
+				} catch (JadxOverflowException e) {
+					LOG.debug("Type update limit reached in resolver for method: {}", mth, e);
 				}
 			}
 		} catch (Exception e) {
@@ -116,9 +245,7 @@ public final class FixTypesVisitor extends AbstractVisitor {
 	private boolean runMultiVariableSearch(MethodNode mth) {
 		try {
 			TypeSearch typeSearch = new TypeSearch(mth);
-			if (!typeSearch.run()) {
-				mth.addWarnComment("Multi-variable type inference failed");
-			}
+			typeSearch.run();
 			for (SSAVar var : mth.getSVars()) {
 				if (!var.getTypeInfo().getType().isTypeKnown()) {
 					return false;
@@ -126,7 +253,7 @@ public final class FixTypesVisitor extends AbstractVisitor {
 			}
 			return true;
 		} catch (Exception e) {
-			mth.addWarnComment("Multi-variable type inference failed. Error: " + Utils.getStackTrace(e));
+			LOG.debug("Multi-variable type inference failed in method: {}", mth, e);
 			return false;
 		}
 	}
@@ -301,13 +428,27 @@ public final class FixTypesVisitor extends AbstractVisitor {
 	 */
 	private Boolean applyFieldType(MethodNode mth) {
 		try {
+			if (trySplitSiblingStaticFieldPhi(mth) && checkTypes(mth)) {
+				return true;
+			}
 			boolean changed = false;
+			InsnNode firstCastFieldAssignment = null;
+			Set<InsnNode> additionalCastFieldAssignments = null;
 			// will add new SSA vars, can't use for-each loop
 			List<SSAVar> sVars = mth.getSVars();
 			for (int i = 0, varsCount = sVars.size(); i < varsCount; i++) {
 				SSAVar ssaVar = sVars.get(i);
 				if (tryFieldTypeWithNewCasts(mth, ssaVar, true)) {
 					changed = true;
+					InsnNode assignInsn = ssaVar.getAssignInsn();
+					if (firstCastFieldAssignment == null) {
+						firstCastFieldAssignment = assignInsn;
+					} else if (assignInsn != firstCastFieldAssignment) {
+						if (additionalCastFieldAssignments == null) {
+							additionalCastFieldAssignments = new LinkedHashSet<>();
+						}
+						additionalCastFieldAssignments.add(assignInsn);
+					}
 				}
 			}
 			if (!changed) {
@@ -319,22 +460,127 @@ public final class FixTypesVisitor extends AbstractVisitor {
 			typeInference.runTypePropagation(mth);
 
 			// check if changed var types are fixed
-			boolean success = true;
+			boolean forcedFieldType = false;
+			boolean incomplete = false;
 			for (SSAVar ssaVar : mth.getSVars()) {
 				if (tryFieldTypeWithNewCasts(mth, ssaVar, false)) {
-					success = false;
+					forcedFieldType = true;
+					// Ignore unrelated unknown field reads discovered only after another field inserted casts.
+					// They still receive their declared field type below, but don't imply a missing cast.
+					InsnNode assignInsn = ssaVar.getAssignInsn();
+					boolean insertedCastForField = assignInsn == firstCastFieldAssignment
+							|| additionalCastFieldAssignments != null && additionalCastFieldAssignments.contains(assignInsn);
+					if (insertedCastForField
+							&& !isOnlyCompatibleFieldTypeConflict(ssaVar, typeUpdate.getTypeCompare())) {
+						assignInsn.addAttr(IncompleteFieldTypeConflictAttr.INSTANCE);
+						incomplete = true;
+					}
 				}
 			}
-			if (!success) {
+			if (forcedFieldType) {
 				typeInference.initTypeBounds(mth);
 				typeInference.runTypePropagation(mth);
+			}
+			if (incomplete) {
 				mth.addWarnComment("Type inference incomplete: some casts might be missing");
 			}
-			return success;
+			return !incomplete;
 		} catch (Exception e) {
 			mth.addWarnComment("Type inference fix 'apply assigned field type' failed", e);
 			return false;
 		}
+	}
+
+	/**
+	 * Split a PHI before field fallback forces one concrete singleton subtype onto its sibling
+	 * branches.
+	 * Common for sealed state hierarchies: {@code condition ? new Loading() : Idle.INSTANCE}.
+	 */
+	private boolean trySplitSiblingStaticFieldPhi(MethodNode mth) {
+		int insnsAdded = 0;
+		for (BlockNode block : mth.getBasicBlocks()) {
+			PhiListAttr phiListAttr = block.get(AType.PHI_LIST);
+			if (phiListAttr == null) {
+				continue;
+			}
+			for (PhiInsn phiInsn : phiListAttr.getList()) {
+				if (isSiblingStaticFieldPhi(phiInsn)) {
+					insnsAdded += tryInsertAdditionalInsn(mth, phiInsn);
+				}
+			}
+		}
+		if (insnsAdded == 0) {
+			return false;
+		}
+		InitCodeVariables.rerun(mth);
+		typeInference.initTypeBounds(mth);
+		return typeInference.runTypePropagation(mth);
+	}
+
+	private boolean isSiblingStaticFieldPhi(PhiInsn phiInsn) {
+		boolean hasStaticField = false;
+		List<ArgType> types = new ArrayList<>(phiInsn.getArgsCount());
+		for (InsnArg arg : phiInsn.getArguments()) {
+			if (!arg.isRegister()) {
+				return false;
+			}
+			SSAVar var = ((RegisterArg) arg).getSVar();
+			if (var == null) {
+				return false;
+			}
+			InsnNode assignInsn = var.getAssignInsn();
+			hasStaticField |= assignInsn != null && assignInsn.getType() == InsnType.SGET;
+			ArgType type = getKnownMoveSourceType((RegisterArg) arg);
+			if (type == null || !type.isTypeKnown() || !type.isObject() || type.containsGeneric()) {
+				return false;
+			}
+			types.add(type);
+		}
+		if (!hasStaticField) {
+			return false;
+		}
+		for (int i = 1; i < types.size(); i++) {
+			if (typeUpdate.getTypeCompare().compareTypes(types.get(0), types.get(i)) == TypeCompareEnum.CONFLICT) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	@Nullable
+	private static ArgType getKnownMoveSourceType(RegisterArg arg) {
+		RegisterArg currentArg = arg;
+		for (int i = 0; i < 10; i++) {
+			SSAVar var = currentArg.getSVar();
+			if (var == null) {
+				return null;
+			}
+			ArgType type = currentArg.getType();
+			if (type.isTypeKnown()) {
+				return type;
+			}
+			type = var.getImmutableType();
+			if (type != null && type.isTypeKnown()) {
+				return type;
+			}
+			InsnNode assignInsn = var.getAssignInsn();
+			if (assignInsn == null) {
+				return null;
+			}
+			if (assignInsn.getResult() != null) {
+				type = assignInsn.getResult().getInitType();
+				if (type.isTypeKnown()) {
+					return type;
+				}
+			}
+			if (assignInsn.getType() != InsnType.MOVE
+					|| assignInsn.getArgsCount() != 1
+					|| !assignInsn.getArg(0).isRegister()) {
+				return null;
+			}
+			currentArg = (RegisterArg) assignInsn.getArg(0);
+		}
+		return null;
 	}
 
 	private boolean tryFieldTypeWithNewCasts(MethodNode mth, SSAVar ssaVar, boolean insertCasts) {
@@ -350,22 +596,160 @@ public final class FixTypesVisitor extends AbstractVisitor {
 		if (insnType != InsnType.IGET && insnType != InsnType.SGET) {
 			return false;
 		}
-		ArgType fieldType = assignInsn.getResult().getInitType();
+		ArgType fieldType = getFieldType(ssaVar, assignInsn.getResult().getInitType());
 		// field type should be used
 		if (insertCasts) {
 			// try to find a use place and insert cast
 			boolean inserted = false;
-			for (RegisterArg useArg : ssaVar.getUseList()) {
+			for (RegisterArg useArg : List.copyOf(ssaVar.getUseList())) {
 				if (insertExplicitUseCast(mth, ssaVar, useArg, fieldType)) {
 					inserted = true;
 				}
 			}
 			return inserted;
 		}
-		// force field type, will make type inference incomplete,
-		// but it is better that completely unknown type
-		ssaVar.setType(fieldType);
+		ArgType rawType = getWildcardCaptureRawType(ssaVar, fieldType);
+		if (rawType != null) {
+			// Java can't pass Object values back into an unbounded wildcard capture.
+			// Use the raw local type so linked generic calls remain source-compilable.
+			ssaVar.setType(rawType);
+		} else {
+			// force field type, will make type inference incomplete,
+			// but it is better that completely unknown type
+			ssaVar.setType(fieldType);
+		}
 		return true;
+	}
+
+	static boolean isOnlyCompatibleFieldTypeConflict(SSAVar ssaVar, TypeCompare typeCompare) {
+		InsnNode assignInsn = ssaVar.getAssignInsn();
+		if (assignInsn == null || assignInsn.getResult() == null) {
+			return false;
+		}
+		ArgType fieldType = getFieldType(ssaVar, assignInsn.getResult().getInitType());
+		if (!fieldType.isObject() || !fieldType.containsGeneric() || fieldType.isWildcard()) {
+			return false;
+		}
+		if (getWildcardCaptureRawType(ssaVar, fieldType) != null) {
+			return true;
+		}
+		boolean compatibleBoundFound = false;
+		for (ITypeBound bound : ssaVar.getTypeInfo().getBounds()) {
+			ArgType boundType = bound.getType();
+			if (!boundType.isTypeKnown()) {
+				if (isCompatibleUnknownObjectUse(bound)) {
+					compatibleBoundFound = true;
+					continue;
+				}
+				return false;
+			}
+			if (!boundType.isObject()
+					|| boundType.isWildcard()) {
+				return false;
+			}
+			TypeCompareEnum compare = typeCompare.compareTypes(fieldType, boundType);
+			if (!compare.isNarrowOrEqual()) {
+				return false;
+			}
+			if (!compare.isEqual()) {
+				compatibleBoundFound = true;
+			}
+		}
+		return compatibleBoundFound;
+	}
+
+	@Nullable
+	private static ArgType getWildcardCaptureRawType(SSAVar ssaVar, ArgType fieldType) {
+		List<ArgType> fieldGenerics = fieldType.getGenericTypes();
+		if (fieldGenerics == null || fieldGenerics.isEmpty()) {
+			return null;
+		}
+		for (ArgType generic : fieldGenerics) {
+			if (!generic.isWildcard() || generic.getWildcardBound() != ArgType.WildcardBound.UNBOUND) {
+				return null;
+			}
+		}
+		boolean captureBoundFound = false;
+		for (ITypeBound bound : ssaVar.getTypeInfo().getBounds()) {
+			ArgType boundType = bound.getType();
+			if (!boundType.isTypeKnown() || !boundType.isObject()) {
+				return null;
+			}
+			if (boundType.equals(fieldType) || boundType.equals(ArgType.OBJECT)) {
+				continue;
+			}
+			if (!boundType.getObject().equals(fieldType.getObject())) {
+				return null;
+			}
+			if (!boundType.containsGeneric()) {
+				continue;
+			}
+			if (!(bound instanceof TypeBoundInvokeUse)
+					|| !isUnboundedWildcardCapture(fieldType, boundType)) {
+				return null;
+			}
+			captureBoundFound = true;
+		}
+		return captureBoundFound ? ArgType.object(fieldType.getObject()) : null;
+	}
+
+	static boolean isUnboundedWildcardCapture(ArgType fieldType, ArgType useType) {
+		if (!fieldType.isObject() || !useType.isObject()
+				|| !fieldType.getObject().equals(useType.getObject())) {
+			return false;
+		}
+		List<ArgType> fieldGenerics = fieldType.getGenericTypes();
+		List<ArgType> useGenerics = useType.getGenericTypes();
+		if (fieldGenerics == null || useGenerics == null
+				|| fieldGenerics.isEmpty() || fieldGenerics.size() != useGenerics.size()) {
+			return false;
+		}
+		for (int i = 0; i < fieldGenerics.size(); i++) {
+			ArgType fieldGeneric = fieldGenerics.get(i);
+			if (!fieldGeneric.isWildcard()
+					|| fieldGeneric.getWildcardBound() != ArgType.WildcardBound.UNBOUND
+					|| !useGenerics.get(i).isGenericType()) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	static boolean isCompatibleUnknownObjectUse(ITypeBound bound) {
+		ArgType boundType = bound.getType();
+		if (bound.getBound() != BoundEnum.USE
+				|| boundType.isTypeKnown()
+				|| !boundType.canBeObject()) {
+			return false;
+		}
+		if (!boundType.canBeAnyNumber()) {
+			return true;
+		}
+		RegisterArg arg = bound.getArg();
+		if (arg == null || !(arg.getParentInsn() instanceof IfNode)) {
+			return false;
+		}
+		IfNode ifInsn = (IfNode) arg.getParentInsn();
+		IfOp op = ifInsn.getOp();
+		if (op != IfOp.EQ && op != IfOp.NE) {
+			return false;
+		}
+		InsnArg firstArg = ifInsn.getArg(0);
+		InsnArg secondArg = ifInsn.getArg(1);
+		return firstArg == arg && secondArg.isZeroLiteral()
+				|| secondArg == arg && firstArg.isZeroLiteral();
+	}
+
+	private static ArgType getFieldType(SSAVar ssaVar, ArgType initType) {
+		for (ITypeBound bound : ssaVar.getTypeInfo().getBounds()) {
+			if (bound instanceof TypeBoundFieldGetAssign) {
+				ArgType resolvedType = ((TypeBoundFieldGetAssign) bound).getTypeForFallback();
+				if (resolvedType.isTypeKnown() && !resolvedType.isWildcard()) {
+					return resolvedType;
+				}
+			}
+		}
+		return initType;
 	}
 
 	private boolean insertExplicitUseCast(MethodNode mth, SSAVar ssaVar, RegisterArg useArg, ArgType fieldType) {
@@ -457,6 +841,258 @@ public final class FixTypesVisitor extends AbstractVisitor {
 			}
 		}
 		return fixed;
+	}
+
+	/**
+	 * Restore a concrete PHI type hidden behind move chains when the merged value is used through
+	 * several sibling interfaces. This is common in generated Compose view-model lookup code:
+	 * a checked {@code NavBackStackEntry} is merged with a null carried by a register which was
+	 * assigned another interface type on an unrelated path.
+	 */
+	private boolean tryRestorePhiConcreteType(MethodNode mth) {
+		boolean fixed = false;
+		for (SSAVar var : new ArrayList<>(mth.getSVars())) {
+			if (var.isTypeImmutable() || var.getTypeInfo().getType().isTypeKnown()) {
+				continue;
+			}
+			InsnNode assignInsn = var.getAssignInsn();
+			if (!(assignInsn instanceof PhiInsn)) {
+				continue;
+			}
+			PhiInsn phiInsn = (PhiInsn) assignInsn;
+			Set<ArgType> useTypes = collectConflictingInterfaceUseTypes(mth, var);
+			if (useTypes.size() < 2) {
+				continue;
+			}
+			ArgType concreteType = findPhiConcreteType(mth, phiInsn, useTypes);
+			if (concreteType == null) {
+				continue;
+			}
+			var.markAsImmutable(concreteType);
+			var.setType(concreteType);
+			fixed = true;
+		}
+		return fixed;
+	}
+
+	private Set<ArgType> collectConflictingInterfaceUseTypes(MethodNode mth, SSAVar var) {
+		Set<ArgType> useTypes = new LinkedHashSet<>();
+		for (RegisterArg useArg : var.getUseList()) {
+			InsnNode useInsn = useArg.getParentInsn();
+			if (useInsn == null || useInsn.getType() == InsnType.PHI
+					|| useInsn.getType() == InsnType.IF && useInsn.getArg(1).isZeroConst()) {
+				continue;
+			}
+			ArgType useType = useArg.getInitType();
+			if (!isKnownInterface(mth, useType)) {
+				continue;
+			}
+			useTypes.add(useType);
+		}
+		if (useTypes.size() < 2) {
+			return Collections.emptySet();
+		}
+		List<ArgType> list = new ArrayList<>(useTypes);
+		for (int i = 0; i < list.size(); i++) {
+			for (int j = i + 1; j < list.size(); j++) {
+				if (typeUpdate.getTypeCompare().compareTypes(list.get(i), list.get(j)) != TypeCompareEnum.CONFLICT) {
+					return Collections.emptySet();
+				}
+			}
+		}
+		return useTypes;
+	}
+
+	private static boolean isKnownInterface(MethodNode mth, ArgType type) {
+		if (!type.isTypeKnown() || !type.isObject() || type.containsGeneric()) {
+			return false;
+		}
+		ClspClass cls = mth.root().getClsp().getClsDetails(type);
+		return cls != null && cls.isInterface();
+	}
+
+	@Nullable
+	private static ArgType findPhiConcreteType(MethodNode mth, PhiInsn phiInsn, Set<ArgType> useTypes) {
+		ClspGraph clsp = mth.root().getClsp();
+		for (InsnArg arg : phiInsn.getArguments()) {
+			if (!arg.isRegister()) {
+				continue;
+			}
+			ArgType type = getKnownMoveSourceType((RegisterArg) arg);
+			if (type == null || !type.isObject() || type.containsGeneric()) {
+				continue;
+			}
+			ClspClass cls = clsp.getClsDetails(type);
+			if (cls == null || cls.isInterface()) {
+				continue;
+			}
+			boolean implementsAll = true;
+			for (ArgType useType : useTypes) {
+				if (!type.equals(useType) && !clsp.isImplements(type.getObject(), useType.getObject())) {
+					implementsAll = false;
+					break;
+				}
+			}
+			if (implementsAll) {
+				return type;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Restore an object type in a closed MOVE/PHI cycle whose only concrete inputs have one type.
+	 *
+	 * <p>
+	 * Generated node traversals often carry {@code Node} or {@code null} through a loop. SSA
+	 * splitting adds synthetic MOVE instructions around the loop PHIs, and the null branch can keep
+	 * the entire component at the broad object-or-array type. A concrete type is safe only when all
+	 * non-null leaves agree and every external use accepts it. This repair is intentionally limited
+	 * to Compose {@code Modifier.Node}; applying it to arbitrary coroutine locals can merge an object
+	 * with the continuation state label through a shared code variable.
+	 * </p>
+	 */
+	private boolean tryRestoreClosedObjectPhiType(MethodNode mth) {
+		boolean fixed = false;
+		for (SSAVar var : new ArrayList<>(mth.getSVars())) {
+			if (var.isTypeImmutable() || var.getTypeInfo().getType().isTypeKnown()
+					|| !(var.getAssignInsn() instanceof PhiInsn)) {
+				continue;
+			}
+			Set<SSAVar> component = new LinkedHashSet<>();
+			Set<ArgType> leafTypes = new LinkedHashSet<>();
+			boolean closed = collectClosedObjectPhiComponent(var, component, leafTypes);
+			if (!closed || leafTypes.size() != 1) {
+				continue;
+			}
+			ArgType candidate = leafTypes.iterator().next();
+			boolean compatible = isClosedObjectPhiUseCompatible(mth, component, candidate);
+			if (!isComposeModifierNode(candidate) || !compatible) {
+				continue;
+			}
+			for (SSAVar componentVar : component) {
+				if (!componentVar.getTypeInfo().getType().isTypeKnown()) {
+					componentVar.markAsImmutable(candidate);
+					componentVar.setType(candidate);
+				}
+			}
+			fixed = true;
+		}
+		return fixed;
+	}
+
+	private static boolean isComposeModifierNode(ArgType candidate) {
+		return candidate.isObject()
+				&& !candidate.containsGeneric()
+				&& "androidx.compose.ui.Modifier$Node".equals(candidate.getObject());
+	}
+
+	private static boolean collectClosedObjectPhiComponent(
+			SSAVar var, Set<SSAVar> component, Set<ArgType> leafTypes) {
+		ArgType currentType = var.getTypeInfo().getType();
+		if (currentType.isTypeKnown()) {
+			if (!currentType.isObject()) {
+				return false;
+			}
+			leafTypes.add(currentType);
+			return leafTypes.size() == 1;
+		}
+		if (!component.add(var)) {
+			return true;
+		}
+		InsnNode assignInsn = var.getAssignInsn();
+		if (assignInsn == null) {
+			ArgType initType = var.getAssign().getInitType();
+			if (initType.isTypeKnown() && initType.isObject()) {
+				leafTypes.add(initType);
+				return leafTypes.size() == 1;
+			}
+			return false;
+		}
+		InsnType assignType = assignInsn.getType();
+		if (assignType != InsnType.MOVE && assignType != InsnType.PHI) {
+			ArgType initType = var.getAssign().getInitType();
+			if (initType.isTypeKnown() && initType.isObject()) {
+				leafTypes.add(initType);
+				return leafTypes.size() == 1;
+			}
+			return false;
+		}
+		for (InsnArg arg : assignInsn.getArguments()) {
+			if (arg.isZeroConst()) {
+				continue;
+			}
+			if (!arg.isRegister()) {
+				return false;
+			}
+			RegisterArg reg = (RegisterArg) arg;
+			SSAVar sourceVar = reg.getSVar();
+			if (sourceVar == null || !collectClosedObjectPhiComponent(sourceVar, component, leafTypes)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private boolean isClosedObjectPhiUseCompatible(MethodNode mth, Set<SSAVar> component, ArgType candidate) {
+		boolean exactUseFound = false;
+		for (SSAVar var : component) {
+			for (RegisterArg useArg : var.getUseList()) {
+				InsnNode useInsn = useArg.getParentInsn();
+				if (useInsn == null) {
+					return false;
+				}
+				RegisterArg result = useInsn.getResult();
+				if ((useInsn.getType() == InsnType.MOVE || useInsn.getType() == InsnType.PHI)
+						&& result != null && component.contains(result.getSVar())) {
+					continue;
+				}
+				ArgType useType = useArg.getInitType();
+				exactUseFound |= candidate.equals(useType);
+				if (!useType.canBeObject()) {
+					return false;
+				}
+				if (useType.isTypeKnown()
+						&& typeUpdate.getTypeCompare().compareTypes(candidate, useType) == TypeCompareEnum.CONFLICT) {
+					return false;
+				}
+			}
+		}
+		for (SSAVar other : mth.getSVars()) {
+			if (component.contains(other) || !sharesCodeVar(component, other)) {
+				continue;
+			}
+			ArgType otherType = other.getTypeInfo().getType();
+			if (otherType.isTypeKnown()) {
+				if (!otherType.isObject()
+						|| typeUpdate.getTypeCompare().compareTypes(candidate, otherType) == TypeCompareEnum.CONFLICT) {
+					return false;
+				}
+				continue;
+			}
+			if (!other.getAssign().getInitType().canBeObject()) {
+				return false;
+			}
+			for (RegisterArg useArg : other.getUseList()) {
+				exactUseFound |= candidate.equals(useArg.getInitType());
+				if (!useArg.getInitType().canBeObject()) {
+					return false;
+				}
+			}
+		}
+		return exactUseFound;
+	}
+
+	private static boolean sharesCodeVar(Set<SSAVar> component, SSAVar other) {
+		if (!other.isCodeVarSet()) {
+			return false;
+		}
+		for (SSAVar var : component) {
+			if (var.isCodeVarSet() && var.getCodeVar() == other.getCodeVar()) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	@SuppressWarnings({ "ForLoopReplaceableByWhile", "ForLoopReplaceableByForEach" })
@@ -659,11 +1295,16 @@ public final class FixTypesVisitor extends AbstractVisitor {
 
 	private boolean tryInsertAdditionalMove(MethodNode mth) {
 		int insnsAdded = 0;
+		// In large methods and coroutine state machines, splitting every exception PHI can
+		// perturb unrelated type groups. Keep this fallback to small resource-cleanup methods.
+		boolean allowExceptionMove = mth.getBasicBlocks().size() <= EXCEPTION_MOVE_MAX_BLOCKS
+				&& !CoroutineMethodUtils.isStateMachine(mth)
+				&& hasCloseablePhi(mth);
 		for (BlockNode block : mth.getBasicBlocks()) {
 			PhiListAttr phiListAttr = block.get(AType.PHI_LIST);
 			if (phiListAttr != null) {
 				for (PhiInsn phiInsn : phiListAttr.getList()) {
-					insnsAdded += tryInsertAdditionalInsn(mth, phiInsn);
+					insnsAdded += tryInsertAdditionalInsn(mth, phiInsn, allowExceptionMove);
 				}
 			}
 		}
@@ -686,17 +1327,21 @@ public final class FixTypesVisitor extends AbstractVisitor {
 	 * This allows using different types in blocks merged by PHI.
 	 */
 	private int tryInsertAdditionalInsn(MethodNode mth, PhiInsn phiInsn) {
+		return tryInsertAdditionalInsn(mth, phiInsn, false);
+	}
+
+	private int tryInsertAdditionalInsn(MethodNode mth, PhiInsn phiInsn, boolean allowExceptionMove) {
 		ArgType phiType = getCommonTypeForPhiArgs(phiInsn);
 		if (phiType != null && phiType.isTypeKnown()) {
 			// all args have the same known type => nothing to do here
 			return 0;
 		}
 		// check if instructions can be inserted
-		if (insertMovesForPhi(mth, phiInsn, false) == 0) {
+		if (insertMovesForPhi(mth, phiInsn, false, allowExceptionMove) == 0) {
 			return 0;
 		}
 		// check passed => apply
-		return insertMovesForPhi(mth, phiInsn, true);
+		return insertMovesForPhi(mth, phiInsn, true, allowExceptionMove);
 	}
 
 	@Nullable
@@ -713,17 +1358,16 @@ public final class FixTypesVisitor extends AbstractVisitor {
 		return phiArgType;
 	}
 
-	private int insertMovesForPhi(MethodNode mth, PhiInsn phiInsn, boolean apply) {
+	private int insertMovesForPhi(MethodNode mth, PhiInsn phiInsn, boolean apply, boolean allowExceptionMove) {
 		int argsCount = phiInsn.getArgsCount();
 		int count = 0;
+		// An empty 1-in/1-out synthetic block is an edge split, so a MOVE placed there
+		// still executes on exactly one PHI input. Loop exits commonly use such blocks.
+		boolean allowSynthetic = hasGenericTypeBound(phiInsn) || hasSimpleSyntheticEdge(phiInsn);
+		boolean skipNoopInputBlockCheck = CoroutineMethodUtils.isStateMachine(mth)
+				&& mth.getBasicBlocks().size() >= LARGE_COROUTINE_MOVE_MIN_BLOCKS;
 		for (int argIndex = 0; argIndex < argsCount; argIndex++) {
 			RegisterArg reg = phiInsn.getArg(argIndex);
-			BlockNode startBlock = phiInsn.getBlockByArgIndex(argIndex);
-			BlockNode blockNode = checkBlockForInsnInsert(startBlock);
-			if (blockNode == null) {
-				mth.addDebugComment("Failed to insert an additional move for type inference into block " + startBlock);
-				return 0;
-			}
 			boolean add = true;
 			SSAVar var = reg.getSVar();
 			InsnNode assignInsn = var.getAssign().getAssignInsn();
@@ -734,14 +1378,105 @@ public final class FixTypesVisitor extends AbstractVisitor {
 					add = false;
 				}
 			}
-			if (add) {
-				count++;
-				if (apply) {
-					insertMove(mth, blockNode, phiInsn, reg);
-				}
+			if (!add && skipNoopInputBlockCheck) {
+				continue;
+			}
+			BlockNode startBlock = phiInsn.getBlockByArgIndex(argIndex);
+			BlockNode blockNode = checkBlockForInsnInsert(startBlock, allowSynthetic, allowExceptionMove);
+			if (blockNode == null
+					|| blockNode != startBlock
+							&& allowExceptionMove
+							&& isExceptionSplitter(startBlock)
+							&& !isMoveSourceAvailableAt(mth, reg, blockNode)) {
+				mth.addDebugComment("Failed to insert an additional move for type inference into block " + startBlock);
+				return 0;
+			}
+			if (!add) {
+				continue;
+			}
+			count++;
+			if (apply) {
+				insertMove(mth, blockNode, phiInsn, reg);
 			}
 		}
 		return count;
+	}
+
+	private static boolean hasSimpleSyntheticEdge(PhiInsn phiInsn) {
+		for (int i = 0; i < phiInsn.getArgsCount(); i++) {
+			BlockNode block = phiInsn.getBlockByArgIndex(i);
+			if (block.isSynthetic()
+					&& block.isEmpty()
+					&& block.getPredecessors().size() == 1
+					&& block.getSuccessors().size() == 1) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean isExceptionSplitter(BlockNode block) {
+		return block.contains(AFlag.EXC_TOP_SPLITTER)
+				|| block.contains(AFlag.EXC_BOTTOM_SPLITTER);
+	}
+
+	private static boolean isMoveSourceAvailableAt(MethodNode mth, RegisterArg reg, BlockNode block) {
+		InsnNode assignInsn = reg.getSVar().getAssignInsn();
+		if (assignInsn == null) {
+			// method arguments and exception-state vars have no concrete assignment instruction
+			return true;
+		}
+		BlockNode assignBlock = BlockUtils.getBlockByInsn(mth, assignInsn);
+		return assignBlock != null
+				&& (assignBlock == block || block.isDominator(assignBlock));
+	}
+
+	private static boolean hasGenericTypeBound(PhiInsn phiInsn) {
+		for (InsnArg arg : phiInsn.getArguments()) {
+			if (arg.isRegister()) {
+				SSAVar var = ((RegisterArg) arg).getSVar();
+				if (var != null && var.getTypeInfo().getBounds().stream()
+						.map(ITypeBound::getType)
+						.map(type -> type.isWildcard() ? type.getWildcardType() : type)
+						.anyMatch(type -> type != null && type.isGenericType())) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static boolean hasCloseablePhi(MethodNode mth) {
+		for (BlockNode block : mth.getBasicBlocks()) {
+			PhiListAttr phiListAttr = block.get(AType.PHI_LIST);
+			if (phiListAttr != null) {
+				for (PhiInsn phiInsn : phiListAttr.getList()) {
+					if (hasCloseableTypeBound(phiInsn)) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	private static boolean hasCloseableTypeBound(PhiInsn phiInsn) {
+		RegisterArg result = phiInsn.getResult();
+		if (result != null && hasCloseableTypeBound(result.getSVar())) {
+			return true;
+		}
+		for (InsnArg arg : phiInsn.getArguments()) {
+			if (arg.isRegister() && hasCloseableTypeBound(((RegisterArg) arg).getSVar())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean hasCloseableTypeBound(@Nullable SSAVar var) {
+		return var != null && var.getTypeInfo().getBounds().stream()
+				.map(ITypeBound::getType)
+				.anyMatch(type -> type.isObject() && "java.io.Closeable".equals(type.getObject()));
 	}
 
 	private void insertMove(MethodNode mth, BlockNode blockNode, PhiInsn phiInsn, RegisterArg reg) {
@@ -761,16 +1496,47 @@ public final class FixTypesVisitor extends AbstractVisitor {
 	}
 
 	@Nullable
-	private BlockNode checkBlockForInsnInsert(BlockNode blockNode) {
+	private BlockNode checkBlockForInsnInsert(BlockNode blockNode, boolean allowSynthetic, boolean allowExceptionMove) {
 		if (blockNode.isSynthetic()) {
+			if (allowExceptionMove
+					&& blockNode.isEmpty()
+					&& (blockNode.contains(AFlag.EXC_TOP_SPLITTER)
+							|| blockNode.contains(AFlag.EXC_BOTTOM_SPLITTER))) {
+				List<BlockNode> preds = blockNode.getPredecessors();
+				if (preds.size() == 1) {
+					// Splitters can have several exception successors. Insert before one only
+					// when the source SSA value is available there (checked by the caller).
+					return checkBlockForInsnInsert(preds.get(0), allowSynthetic, true);
+				}
+			}
+			if (allowExceptionMove
+					&& blockNode.isEmpty()
+					&& blockNode.contains(AType.EXC_HANDLER)
+					&& blockNode.getSuccessors().size() == 1) {
+				// A synthetic handler merge has one unambiguous outgoing value.
+				return blockNode;
+			}
+			if (allowSynthetic
+					&& blockNode.isEmpty()
+					&& blockNode.getPredecessors().size() == 1
+					&& blockNode.getSuccessors().size() == 1) {
+				return blockNode;
+			}
 			return null;
 		}
 		InsnNode lastInsn = BlockUtils.getLastInsn(blockNode);
 		if (lastInsn != null && BlockSplitter.isSeparate(lastInsn.getType())) {
+			if (allowExceptionMove
+					&& lastInsn.getType() == InsnType.MOVE_EXCEPTION
+					&& blockNode.getSuccessors().size() == 1) {
+				// MOVE_EXCEPTION must stay first, but a synthetic move can safely follow it
+				// when the handler has a single normal continuation.
+				return blockNode;
+			}
 			// can't insert move in a block with 'separate' instruction => try previous block by simple path
 			List<BlockNode> preds = blockNode.getPredecessors();
 			if (preds.size() == 1) {
-				return checkBlockForInsnInsert(preds.get(0));
+				return checkBlockForInsnInsert(preds.get(0), allowSynthetic, allowExceptionMove);
 			}
 			return null;
 		}
@@ -825,6 +1591,12 @@ public final class FixTypesVisitor extends AbstractVisitor {
 		if (typeInfo.getType().isTypeKnown()) {
 			return false;
 		}
+		if (splitIntBooleanPhiInputs(mth, var)) {
+			return true;
+		}
+		if (splitIntBooleanPhiUses(mth, var)) {
+			return true;
+		}
 		boolean assigned = false;
 		for (ITypeBound bound : typeInfo.getBounds()) {
 			ArgType boundType = bound.getType();
@@ -856,6 +1628,625 @@ public final class FixTypesVisitor extends AbstractVisitor {
 			}
 		}
 		return fixed;
+	}
+
+	private static void markVarAsBoolean(SSAVar var) {
+		var.markAsImmutable(ArgType.BOOLEAN);
+		var.setType(ArgType.BOOLEAN);
+		var.getAssign().forceSetInitType(ArgType.BOOLEAN);
+		for (RegisterArg use : var.getUseList()) {
+			use.forceSetInitType(ArgType.BOOLEAN);
+			InsnNode useInsn = use.getParentInsn();
+			if (useInsn instanceof IfNode) {
+				for (InsnArg arg : useInsn.getArguments()) {
+					if (arg.isZeroLiteral()) {
+						arg.setType(ArgType.BOOLEAN);
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 * Convert an int input of a boolean control-flow PHI on its incoming edge.
+	 * DEX commonly reuses an int zero local as the null/default branch of a boolean expression.
+	 */
+	private boolean splitIntBooleanPhiInputs(MethodNode mth, SSAVar var) {
+		InsnNode assignInsn = var.getAssignInsn();
+		if (!(assignInsn instanceof PhiInsn)) {
+			return false;
+		}
+		PhiInsn phiInsn = (PhiInsn) assignInsn;
+		List<RegisterArg> intArgs = new ArrayList<>();
+		boolean booleanArgFound = false;
+		for (InsnArg insnArg : phiInsn.getArguments()) {
+			RegisterArg arg = (RegisterArg) insnArg;
+			ArgType type = getKnownMoveSourceType(arg);
+			if (ArgType.BOOLEAN.equals(type)) {
+				booleanArgFound = true;
+			} else if (ArgType.INT.equals(type)) {
+				intArgs.add(arg);
+			} else {
+				return false;
+			}
+		}
+		Set<SSAVar> booleanFlowVars = new LinkedHashSet<>();
+		if (!booleanArgFound || intArgs.isEmpty()
+				|| !isBooleanControlFlowVar(var, new LinkedHashSet<>(), booleanFlowVars)) {
+			return false;
+		}
+		List<BlockNode> insertBlocks = new ArrayList<>(intArgs.size());
+		for (RegisterArg intArg : intArgs) {
+			BlockNode startBlock = phiInsn.getBlockByArg(intArg);
+			if (startBlock == null) {
+				return false;
+			}
+			BlockNode insertBlock = checkBlockForInsnInsert(startBlock, true, false);
+			if (insertBlock == null || !isMoveSourceAvailableAt(mth, intArg, insertBlock)) {
+				return false;
+			}
+			insertBlocks.add(insertBlock);
+		}
+		for (int i = 0; i < intArgs.size(); i++) {
+			insertIntToBooleanPhiConversion(mth, phiInsn, intArgs.get(i), insertBlocks.get(i));
+		}
+		for (SSAVar booleanVar : booleanFlowVars) {
+			markVarAsBoolean(booleanVar);
+		}
+		return true;
+	}
+
+	private boolean isBooleanControlFlowVar(SSAVar var, Set<SSAVar> visited, Set<SSAVar> booleanFlowVars) {
+		if (!visited.add(var) || var.getUseList().isEmpty()) {
+			return false;
+		}
+		booleanFlowVars.add(var);
+		for (RegisterArg useArg : var.getUseList()) {
+			InsnNode useInsn = useArg.getParentInsn();
+			if (useInsn == null) {
+				return false;
+			}
+			if (useInsn instanceof IfNode && isIntZeroComparison(useArg)) {
+				continue;
+			}
+			if (!(useInsn instanceof ArithNode) || !((ArithNode) useInsn).getOp().isBitOp()) {
+				return false;
+			}
+			RegisterArg result = useInsn.getResult();
+			if (result == null || result.getSVar() == null
+					|| !isBooleanControlFlowVar(result.getSVar(), visited, booleanFlowVars)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private void insertIntToBooleanPhiConversion(MethodNode mth, PhiInsn phiInsn, RegisterArg intArg, BlockNode block) {
+		RegisterArg resultArg = intArg.duplicateWithNewSSAVar(mth);
+		resultArg.forceSetInitType(ArgType.BOOLEAN);
+		RegisterArg sourceArg = intArg.duplicate();
+		sourceArg.forceSetInitType(ArgType.INT);
+		IfNode ifNode = new IfNode(IfOp.NE, -1, sourceArg, LiteralArg.make(0, ArgType.INT));
+		TernaryInsn convertInsn = new TernaryInsn(
+				IfCondition.fromIfNode(ifNode), resultArg, LiteralArg.litTrue(), LiteralArg.litFalse());
+		convertInsn.add(AFlag.SYNTHETIC);
+		block.getInstructions().add(convertInsn);
+		phiInsn.replaceArg(intArg, resultArg.duplicate());
+	}
+
+	private boolean splitIntBooleanPhiUses(MethodNode mth, SSAVar var) {
+		InsnNode assignInsn = var.getAssignInsn();
+		if (assignInsn == null || assignInsn.getType() != InsnType.PHI) {
+			return false;
+		}
+		List<RegisterArg> booleanUses = new ArrayList<>();
+		boolean[] useKinds = new boolean[2]; // boolean, int
+		Set<SSAVar> intFlowVars = new LinkedHashSet<>();
+		if (!collectIntBooleanUses(
+				mth, var, intFlowVars, booleanUses, null, null, useKinds, true)
+				|| !useKinds[0]
+				|| !useKinds[1]
+				|| intFlowVars.stream().anyMatch(intFlowVar -> !canMarkIntFlowVar(intFlowVar))) {
+			return false;
+		}
+		for (RegisterArg booleanUse : booleanUses) {
+			insertIntToBooleanConversion(mth, booleanUse);
+		}
+		for (SSAVar intFlowVar : intFlowVars) {
+			markVarAsInt(intFlowVar);
+		}
+		return true;
+	}
+
+	/**
+	 * Retry the proven mixed int/boolean PHI split after region transforms expose the final loop
+	 * carrier graph. At this late stage an inserted temporary would miss declaration/inlining passes,
+	 * so keep the carrier numeric and wrap only its boolean consumers with {@code value != 0}.
+	 */
+	static int repairLateIntBooleanPhiUses(MethodNode mth) {
+		int repaired = 0;
+		for (SSAVar var : new ArrayList<>(mth.getSVars())) {
+			ArgType codeVarType = var.getCodeVar().getType();
+			if (codeVarType != null && codeVarType.isTypeKnown() && !ArgType.INT.equals(codeVarType)
+					|| !(var.getAssignInsn() instanceof PhiInsn)) {
+				continue;
+			}
+			List<RegisterArg> booleanUses = new ArrayList<>();
+			List<WrappedInsnUse> booleanExpressions = new ArrayList<>();
+			Set<CodeVar> booleanSelectVars = Collections.newSetFromMap(new IdentityHashMap<>());
+			boolean[] useKinds = new boolean[2];
+			Set<SSAVar> intFlowVars = new LinkedHashSet<>();
+			boolean collected = collectIntBooleanUses(mth, var, intFlowVars, booleanUses,
+					booleanExpressions, booleanSelectVars, useKinds, false);
+			if (!collected
+					|| !useKinds[0] || !useKinds[1]
+					|| intFlowVars.stream().anyMatch(intFlowVar -> !canMarkIntFlowVar(intFlowVar))
+					|| booleanSelectVars.stream().anyMatch(codeVar -> !canMarkBooleanCodeVar(codeVar))) {
+				continue;
+			}
+			for (RegisterArg booleanUse : booleanUses) {
+				wrapIntToBooleanUse(booleanUse);
+			}
+			for (WrappedInsnUse booleanExpression : booleanExpressions) {
+				wrapIntExpressionToBoolean(booleanExpression);
+			}
+			for (SSAVar intFlowVar : intFlowVars) {
+				markVarAsInt(intFlowVar);
+				intFlowVar.getCodeVar().setType(ArgType.INT);
+			}
+			for (CodeVar booleanSelectVar : booleanSelectVars) {
+				markCodeVarAsBoolean(mth, booleanSelectVar);
+			}
+			repaired++;
+		}
+		return repaired;
+	}
+
+	private static void wrapIntToBooleanUse(RegisterArg useArg) {
+		InsnNode useInsn = Objects.requireNonNull(useArg.getParentInsn());
+		RegisterArg intArg = useArg.duplicate();
+		intArg.forceSetInitType(ArgType.INT);
+		IfNode ifNode = new IfNode(IfOp.NE, -1, intArg, LiteralArg.make(0, ArgType.INT));
+		TernaryInsn convertInsn = new TernaryInsn(
+				IfCondition.fromIfNode(ifNode), null, LiteralArg.litTrue(), LiteralArg.litFalse());
+		convertInsn.add(AFlag.SYNTHETIC);
+		InsnArg convertArg = InsnArg.wrapArg(convertInsn);
+		convertArg.setType(ArgType.BOOLEAN);
+		useInsn.replaceArg(useArg, convertArg);
+	}
+
+	private static void wrapIntExpressionToBoolean(WrappedInsnUse use) {
+		use.wrappedArg.setType(ArgType.INT);
+		IfNode ifNode = new IfNode(
+				IfOp.NE, -1, use.wrappedArg, LiteralArg.make(0, ArgType.INT));
+		TernaryInsn convertInsn = new TernaryInsn(
+				IfCondition.fromIfNode(ifNode), null, LiteralArg.litTrue(), LiteralArg.litFalse());
+		convertInsn.add(AFlag.SYNTHETIC);
+		InsnArg convertArg = InsnArg.wrapArg(convertInsn);
+		convertArg.setType(ArgType.BOOLEAN);
+		use.parentInsn.replaceArg(use.wrappedArg, convertArg);
+	}
+
+	private static boolean canMarkBooleanCodeVar(CodeVar codeVar) {
+		ArgType type = codeVar.getType();
+		if (type != null && type.isTypeKnown() && !ArgType.BOOLEAN.equals(type)) {
+			return false;
+		}
+		for (SSAVar var : codeVar.getSsaVars()) {
+			ArgType immutableType = var.getImmutableType();
+			if (immutableType != null && !ArgType.BOOLEAN.equals(immutableType)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static void markCodeVarAsBoolean(MethodNode mth, CodeVar codeVar) {
+		for (SSAVar var : codeVar.getSsaVars()) {
+			markVarAsBoolean(var);
+			InsnNode assignInsn = var.getAssignInsn();
+			if (assignInsn instanceof TernaryInsn) {
+				for (InsnArg arg : assignInsn.getArguments()) {
+					if (arg.isLiteral()) {
+						long literal = ((LiteralArg) arg).getLiteral();
+						if (literal == 0 || literal == 1) {
+							arg.setType(ArgType.BOOLEAN);
+						}
+					}
+				}
+			}
+			normalizeBooleanXorOne(mth, var);
+		}
+		codeVar.setType(ArgType.BOOLEAN);
+	}
+
+	private static void normalizeBooleanXorOne(MethodNode mth, SSAVar var) {
+		for (RegisterArg use : new ArrayList<>(var.getUseList())) {
+			InsnNode useInsn = use.getParentInsn();
+			if (!(useInsn instanceof ArithNode)
+					|| ((ArithNode) useInsn).getOp() != ArithOp.XOR
+					|| useInsn.getArgsCount() != 2) {
+				continue;
+			}
+			InsnArg other = useInsn.getArg(0) == use ? useInsn.getArg(1)
+					: useInsn.getArg(1) == use ? useInsn.getArg(0) : null;
+			if (!otherIsLiteralOne(other)) {
+				continue;
+			}
+			InsnNode notInsn = new InsnNode(InsnType.NOT, 1);
+			notInsn.addArg(use.duplicate());
+			notInsn.add(AFlag.SYNTHETIC);
+			RegisterArg result = useInsn.getResult();
+			if (result != null) {
+				notInsn.setResult(result);
+				BlockUtils.replaceInsn(mth, useInsn, notInsn);
+				continue;
+			}
+			WrappedInsnUse wrappedUse = findWrappedInsnUse(mth, useInsn);
+			if (wrappedUse != null) {
+				InsnArg notArg = InsnArg.wrapArg(notInsn);
+				notArg.setType(ArgType.BOOLEAN);
+				wrappedUse.parentInsn.replaceArg(wrappedUse.wrappedArg, notArg);
+			}
+		}
+	}
+
+	private static boolean otherIsLiteralOne(InsnArg arg) {
+		return arg != null && arg.isLiteral() && ((LiteralArg) arg).getLiteral() == 1;
+	}
+
+	private static boolean canMarkIntFlowVar(SSAVar var) {
+		ArgType immutableType = var.getImmutableType();
+		return immutableType == null
+				|| immutableType.equals(ArgType.INT)
+				|| immutableType.equals(ArgType.BOOLEAN) && var.getAssignInsn() instanceof PhiInsn;
+	}
+
+	private static void markVarAsInt(SSAVar var) {
+		if (ArgType.BOOLEAN.equals(var.getImmutableType()) && var.getAssignInsn() instanceof PhiInsn) {
+			// A PHI has no declared DEX type. Its immutable boolean marker can be inferred from one
+			// boolean-only use even when another use requires the merged 0/1 value as an int.
+			var.getAssign().remove(AFlag.IMMUTABLE_TYPE);
+		}
+		var.setType(ArgType.INT);
+		if (var.getAssign() != null) {
+			var.getAssign().forceSetInitType(ArgType.INT);
+		}
+		for (RegisterArg use : var.getUseList()) {
+			use.forceSetInitType(ArgType.INT);
+		}
+	}
+
+	private static boolean collectIntBooleanUses(MethodNode mth, SSAVar var, Set<SSAVar> visited,
+			List<RegisterArg> booleanUses,
+			List<WrappedInsnUse> booleanExpressions,
+			Set<CodeVar> booleanSelectVars,
+			boolean[] useKinds,
+			boolean requireInsertBlock) {
+		if (!visited.add(var)) {
+			return true;
+		}
+		if (var.getUseList().isEmpty()) {
+			return false;
+		}
+		for (RegisterArg useArg : var.getUseList()) {
+			ArgType useType = useArg.getInitType();
+			if (useType.equals(ArgType.BOOLEAN)) {
+				useKinds[0] = true;
+				if (requireInsertBlock && !canInsertIntToBooleanConversion(mth, useArg)) {
+					return false;
+				}
+				booleanUses.add(useArg);
+			} else if (useType.equals(ArgType.INT) || isIntOnlyUse(useArg)) {
+				useKinds[1] = true;
+			} else if (isIntZeroComparison(useArg) || isIntLiteralComparison(useArg)) {
+				useKinds[1] = true;
+			} else if (isBooleanLiteralComparison(useArg)) {
+				useKinds[0] = true;
+				if (requireInsertBlock && !canInsertIntToBooleanConversion(mth, useArg)) {
+					return false;
+				}
+				booleanUses.add(useArg);
+			} else if (!requireInsertBlock && booleanExpressions != null
+					&& isBooleanNumericExpressionBoundary(mth, useArg)) {
+				WrappedInsnUse wrappedUse = findWrappedInsnUse(mth, useArg.getParentInsn());
+				if (wrappedUse == null) {
+					return false;
+				}
+				useKinds[0] = true;
+				useKinds[1] = true;
+				booleanExpressions.add(wrappedUse);
+			} else if (!requireInsertBlock && booleanSelectVars != null
+					&& isBooleanTernaryBranch(mth, useArg, booleanSelectVars)) {
+				useKinds[0] = true;
+				booleanUses.add(useArg);
+			} else {
+				InsnNode useInsn = useArg.getParentInsn();
+				if (useInsn == null || (useInsn.getType() != InsnType.MOVE && useInsn.getType() != InsnType.PHI)) {
+					return false;
+				}
+				RegisterArg result = useInsn.getResult();
+				if (result == null || result.getSVar() == null
+						|| !collectIntBooleanUses(
+								mth, result.getSVar(), visited, booleanUses,
+								booleanExpressions, booleanSelectVars, useKinds, requireInsertBlock)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private static boolean isBooleanNumericExpressionBoundary(MethodNode mth, RegisterArg useArg) {
+		InsnNode useInsn = useArg.getParentInsn();
+		if (!(useInsn instanceof ArithNode) || !((ArithNode) useInsn).getOp().isBitOp()) {
+			return false;
+		}
+		WrappedInsnUse wrappedUse = findWrappedInsnUse(mth, useInsn);
+		return wrappedUse != null && isBooleanConsumer(wrappedUse.parentInsn, wrappedUse.wrappedArg);
+	}
+
+	private static boolean isBooleanTernaryBranch(
+			MethodNode mth, RegisterArg useArg, Set<CodeVar> booleanSelectVars) {
+		InsnNode useInsn = useArg.getParentInsn();
+		if (!(useInsn instanceof TernaryInsn)) {
+			return false;
+		}
+		int argIndex = useInsn.getArg(0) == useArg ? 0 : useInsn.getArg(1) == useArg ? 1 : -1;
+		if (argIndex == -1) {
+			return false;
+		}
+		InsnArg otherArg = useInsn.getArg(1 - argIndex);
+		RegisterArg result = useInsn.getResult();
+		if (result == null || result.getSVar() == null) {
+			return false;
+		}
+		boolean provenBoolean = ArgType.BOOLEAN.equals(otherArg.getType())
+				|| ArgType.BOOLEAN.equals(result.getSVar().getCodeVar().getType());
+		if (!provenBoolean && isZeroOneLiteral(otherArg)) {
+			boolean[] evidence = { false };
+			provenBoolean = isBooleanOnlyValueFlow(
+					mth, result.getSVar(), new LinkedHashSet<>(), evidence) && evidence[0];
+		}
+		if (!provenBoolean) {
+			return false;
+		}
+		booleanSelectVars.add(result.getSVar().getCodeVar());
+		return true;
+	}
+
+	private static boolean isBooleanOnlyValueFlow(
+			MethodNode mth, SSAVar var, Set<SSAVar> visited, boolean[] evidence) {
+		if (!visited.add(var)) {
+			return true;
+		}
+		for (RegisterArg use : var.getUseList()) {
+			InsnNode useInsn = use.getParentInsn();
+			if (useInsn == null) {
+				return false;
+			}
+			if (ArgType.BOOLEAN.equals(use.getInitType())
+					|| isBooleanLiteralComparison(use)
+					|| isBooleanConsumer(useInsn, use)) {
+				evidence[0] = true;
+				continue;
+			}
+			if (isIntZeroComparison(use)) {
+				// A zero comparison is representation-neutral for a 0/1 carrier.
+				continue;
+			}
+			if (useInsn instanceof ArithNode && ((ArithNode) useInsn).getOp().isBitOp()) {
+				RegisterArg result = useInsn.getResult();
+				if (result != null && result.getSVar() != null) {
+					if (!isBooleanOnlyValueFlow(mth, result.getSVar(), visited, evidence)) {
+						return false;
+					}
+					continue;
+				}
+				WrappedInsnUse wrappedUse = findWrappedInsnUse(mth, useInsn);
+				if (wrappedUse != null && isBooleanConsumer(
+						wrappedUse.parentInsn, wrappedUse.wrappedArg)) {
+					evidence[0] = true;
+					continue;
+				}
+				return false;
+			}
+			if (useInsn.getType() == InsnType.MOVE || useInsn.getType() == InsnType.PHI) {
+				RegisterArg result = useInsn.getResult();
+				if (result == null || result.getSVar() == null
+						|| !isBooleanOnlyValueFlow(mth, result.getSVar(), visited, evidence)) {
+					return false;
+				}
+				continue;
+			}
+			return false;
+		}
+		return true;
+	}
+
+	private static boolean isBooleanConsumer(InsnNode parentInsn, InsnArg arg) {
+		if (parentInsn instanceof IfNode) {
+			return true;
+		}
+		if (parentInsn instanceof IndexInsnNode && parentInsn.getType() == InsnType.CAST) {
+			return ArgType.BOOLEAN.equals(((IndexInsnNode) parentInsn).getIndex());
+		}
+		if (!(parentInsn instanceof InvokeNode)) {
+			return false;
+		}
+		InvokeNode invoke = (InvokeNode) parentInsn;
+		int argIndex = parentInsn.getArgList().indexOf(arg) - invoke.getFirstArgOffset();
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		return argIndex >= 0 && argIndex < argTypes.size()
+				&& ArgType.BOOLEAN.equals(argTypes.get(argIndex));
+	}
+
+	private static boolean isZeroOneLiteral(InsnArg arg) {
+		if (!arg.isLiteral()) {
+			return false;
+		}
+		long literal = ((LiteralArg) arg).getLiteral();
+		return literal == 0 || literal == 1;
+	}
+
+	private static WrappedInsnUse findWrappedInsnUse(MethodNode mth, InsnNode target) {
+		for (BlockNode block : mth.getBasicBlocks()) {
+			for (InsnNode insn : block.getInstructions()) {
+				WrappedInsnUse found = findWrappedInsnUse(insn, target);
+				if (found != null) {
+					return found;
+				}
+			}
+		}
+		return null;
+	}
+
+	private static WrappedInsnUse findWrappedInsnUse(InsnNode parentInsn, InsnNode target) {
+		for (InsnArg arg : parentInsn.getArguments()) {
+			if (!(arg instanceof InsnWrapArg)) {
+				continue;
+			}
+			InsnWrapArg wrappedArg = (InsnWrapArg) arg;
+			InsnNode wrappedInsn = wrappedArg.getWrapInsn();
+			if (wrappedInsn == target) {
+				return new WrappedInsnUse(parentInsn, wrappedArg);
+			}
+			WrappedInsnUse found = findWrappedInsnUse(wrappedInsn, target);
+			if (found != null) {
+				return found;
+			}
+		}
+		return null;
+	}
+
+	private static final class WrappedInsnUse {
+		final InsnNode parentInsn;
+		final InsnWrapArg wrappedArg;
+
+		WrappedInsnUse(InsnNode parentInsn, InsnWrapArg wrappedArg) {
+			this.parentInsn = parentInsn;
+			this.wrappedArg = wrappedArg;
+		}
+	}
+
+	private static boolean isIntOnlyUse(RegisterArg useArg) {
+		InsnNode useInsn = useArg.getParentInsn();
+		if (useInsn == null) {
+			return false;
+		}
+		InsnType useInsnType = useInsn.getType();
+		if ((useInsnType == InsnType.AGET || useInsnType == InsnType.APUT) && useInsn.getArg(1) == useArg) {
+			return true;
+		}
+		if (!(useInsn instanceof ArithNode)) {
+			return false;
+		}
+		RegisterArg result = useInsn.getResult();
+		if (result != null && isKnownInt(result)) {
+			return true;
+		}
+		for (InsnArg arg : useInsn.getArguments()) {
+			if (arg != useArg && isKnownInt(arg)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean isKnownInt(InsnArg arg) {
+		if (ArgType.INT.equals(arg.getType())) {
+			return true;
+		}
+		return arg.isRegister() && ArgType.INT.equals(((RegisterArg) arg).getInitType());
+	}
+
+	private static boolean isBooleanLiteralComparison(RegisterArg useArg) {
+		InsnNode parentInsn = useArg.getParentInsn();
+		if (!(parentInsn instanceof IfNode)) {
+			return false;
+		}
+		IfNode ifInsn = (IfNode) parentInsn;
+		IfOp op = ifInsn.getOp();
+		if (op != IfOp.EQ && op != IfOp.NE) {
+			return false;
+		}
+		InsnArg firstArg = ifInsn.getArg(0);
+		InsnArg secondArg = ifInsn.getArg(1);
+		InsnArg otherArg = firstArg == useArg ? secondArg : secondArg == useArg ? firstArg : null;
+		return otherArg != null && otherArg.isLiteral() && ArgType.BOOLEAN.equals(otherArg.getType());
+	}
+
+	private static boolean isIntLiteralComparison(RegisterArg useArg) {
+		InsnNode parentInsn = useArg.getParentInsn();
+		if (!(parentInsn instanceof IfNode)) {
+			return false;
+		}
+		IfNode ifInsn = (IfNode) parentInsn;
+		IfOp op = ifInsn.getOp();
+		if (op == IfOp.LT || op == IfOp.LE || op == IfOp.GT || op == IfOp.GE) {
+			// Relational comparisons are numeric even when their zero literal keeps a
+			// narrow int-or-boolean union type.
+			return true;
+		}
+		if (op != IfOp.EQ && op != IfOp.NE) {
+			return false;
+		}
+		InsnArg firstArg = ifInsn.getArg(0);
+		InsnArg secondArg = ifInsn.getArg(1);
+		InsnArg otherArg = firstArg == useArg ? secondArg : secondArg == useArg ? firstArg : null;
+		if (otherArg == null || !otherArg.isLiteral()) {
+			return false;
+		}
+		if (ArgType.INT.equals(otherArg.getType())) {
+			return true;
+		}
+		long literal = ((LiteralArg) otherArg).getLiteral();
+		// DEX narrow integer literals often retain a union type here. Values outside 0/1
+		// cannot be boolean and therefore provide an unambiguous numeric boundary.
+		return literal != 0 && literal != 1;
+	}
+
+	private static boolean isIntZeroComparison(RegisterArg useArg) {
+		InsnNode parentInsn = useArg.getParentInsn();
+		if (!(parentInsn instanceof IfNode)) {
+			return false;
+		}
+		IfNode ifInsn = (IfNode) parentInsn;
+		IfOp op = ifInsn.getOp();
+		if (op != IfOp.EQ && op != IfOp.NE) {
+			return false;
+		}
+		InsnArg firstArg = ifInsn.getArg(0);
+		InsnArg secondArg = ifInsn.getArg(1);
+		return firstArg == useArg && secondArg.isZeroLiteral()
+				|| secondArg == useArg && firstArg.isZeroLiteral();
+	}
+
+	private static boolean canInsertIntToBooleanConversion(MethodNode mth, RegisterArg useArg) {
+		InsnNode useInsn = useArg.getParentInsn();
+		if (useInsn == null) {
+			return false;
+		}
+		BlockNode block = BlockUtils.getBlockByInsn(mth, useInsn);
+		return block != null && InsnList.getIndex(block.getInstructions(), useInsn) != -1;
+	}
+
+	private void insertIntToBooleanConversion(MethodNode mth, RegisterArg useArg) {
+		InsnNode useInsn = Objects.requireNonNull(useArg.getParentInsn());
+		BlockNode block = Objects.requireNonNull(BlockUtils.getBlockByInsn(mth, useInsn));
+		List<InsnNode> insns = block.getInstructions();
+		int useIndex = InsnList.getIndex(insns, useInsn);
+
+		RegisterArg resultArg = useArg.duplicateWithNewSSAVar(mth);
+		resultArg.forceSetInitType(ArgType.BOOLEAN);
+		RegisterArg intArg = useArg.duplicate();
+		intArg.forceSetInitType(ArgType.INT);
+		IfNode ifNode = new IfNode(IfOp.NE, -1, intArg, LiteralArg.make(0, ArgType.INT));
+		TernaryInsn convertInsn = new TernaryInsn(
+				IfCondition.fromIfNode(ifNode), resultArg, LiteralArg.litTrue(), LiteralArg.litFalse());
+		convertInsn.add(AFlag.SYNTHETIC);
+		insns.add(useIndex, convertInsn);
+		useInsn.replaceArg(useArg, resultArg.duplicate());
 	}
 
 	private boolean fixBooleanUsage(MethodNode mth, RegisterArg boundArg) {

@@ -79,7 +79,9 @@ public class AnonymousClassVisitor extends AbstractVisitor {
 		List<RegisterArg> argList = mth.getArgRegs();
 		ClassNode outerCls = mth.getUseIn().get(0).getParentClass();
 		int startArg = 0;
-		if (callMth.getArgsCount() != 0 && callMth.getArgumentsTypes().get(0).equals(outerCls.getClassInfo().getType())) {
+		if (cls.isInner()
+				&& callMth.getArgsCount() != 0
+				&& callMth.getArgumentsTypes().get(0).equals(outerCls.getClassInfo().getType())) {
 			startArg = 1;
 		}
 		Map<InsnArg, FieldNode> map = new LinkedHashMap<>();

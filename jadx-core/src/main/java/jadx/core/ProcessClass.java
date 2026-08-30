@@ -25,6 +25,7 @@ import jadx.core.dex.visitors.DepthTraversal;
 import jadx.core.dex.visitors.IDexTreeVisitor;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
+import jadx.core.utils.exceptions.JadxTaskCancelledException;
 
 import static jadx.core.dex.nodes.ProcessState.GENERATED_AND_UNLOADED;
 import static jadx.core.dex.nodes.ProcessState.LOADED;
@@ -52,15 +53,7 @@ public class ProcessClass {
 		Utils.checkThreadInterrupt();
 		synchronized (cls.getClassInfo()) {
 			try {
-				if (cls.contains(AFlag.CLASS_DEEP_RELOAD)) {
-					cls.remove(AFlag.CLASS_DEEP_RELOAD);
-					cls.deepUnload();
-					cls.add(AFlag.CLASS_UNLOADED);
-				}
-				if (cls.contains(AFlag.CLASS_UNLOADED)) {
-					cls.root().runPreDecompileStageForClass(cls);
-					cls.remove(AFlag.CLASS_UNLOADED);
-				}
+				prepareForProcessing(cls);
 				if (cls.getState() == GENERATED_AND_UNLOADED) {
 					// force loading code again
 					cls.setState(NOT_LOADED);
@@ -80,6 +73,7 @@ public class ProcessClass {
 				if (cls.getState() == LOADED) {
 					cls.setState(PROCESS_STARTED);
 					for (IDexTreeVisitor visitor : passes) {
+						Utils.checkThreadInterrupt();
 						DepthTraversal.visit(visitor, cls);
 					}
 					cls.setState(PROCESS_COMPLETE);
@@ -94,6 +88,9 @@ public class ProcessClass {
 					return code;
 				}
 				return null;
+			} catch (JadxTaskCancelledException e) {
+				recoverAfterCancellation(cls);
+				throw e;
 			} catch (StackOverflowError | Exception e) {
 				if (codegen) {
 					throw e;
@@ -104,6 +101,35 @@ public class ProcessClass {
 		}
 	}
 
+	private static void recoverAfterCancellation(ClassNode cls) {
+		boolean restoreInterrupt = Thread.interrupted();
+		try {
+			cls.unloadFromCache();
+			cls.deepUnload();
+		} finally {
+			if (restoreInterrupt) {
+				Thread.currentThread().interrupt();
+			}
+		}
+	}
+
+	/**
+	 * Restore class data and pre-decompile attributes before reading its dependency lists.
+	 * Must be called with the class lock held or from a path that does not yet expose the
+	 * reloaded class to another processing thread.
+	 */
+	private static void prepareForProcessing(ClassNode cls) {
+		if (cls.contains(AFlag.CLASS_DEEP_RELOAD)) {
+			cls.remove(AFlag.CLASS_DEEP_RELOAD);
+			cls.deepUnload();
+			cls.add(AFlag.CLASS_UNLOADED);
+		}
+		if (cls.contains(AFlag.CLASS_UNLOADED)) {
+			cls.root().runPreDecompileStageForClass(cls);
+			cls.remove(AFlag.CLASS_UNLOADED);
+		}
+	}
+
 	@NotNull
 	public ICodeInfo generateCode(ClassNode cls) {
 		ClassNode topParentClass = cls.getTopParentClass();
@@ -111,16 +137,30 @@ public class ProcessClass {
 			return generateCode(topParentClass);
 		}
 		try {
+			// Deep reload rebuilds dependency and codegen-dependency attributes. Do it
+			// before traversing these lists, otherwise this generation uses stale data.
+			synchronized (cls.getClassInfo()) {
+				prepareForProcessing(cls);
+			}
 			if (cls.contains(AFlag.DONT_GENERATE)) {
 				process(cls, false);
 				return NOT_GENERATED;
 			}
+			List<ClassNode> codegenDeps = cls.getCodegenDeps();
 			for (ClassNode depCls : cls.getDependencies()) {
+				if (depCls.getState() == GENERATED_AND_UNLOADED
+						&& depCls.contains(AFlag.CLASS_DEEP_RELOAD)
+						&& codegenDeps.contains(depCls)) {
+					// Keep persistent information from the previous generation available
+					// while processing this class. The dependency will be deeply reloaded
+					// in its intended codegen-dependency slot below.
+					continue;
+				}
 				process(depCls, false);
 			}
-			if (!cls.getCodegenDeps().isEmpty()) {
+			if (!codegenDeps.isEmpty()) {
 				process(cls, false);
-				for (ClassNode codegenDep : cls.getCodegenDeps()) {
+				for (ClassNode codegenDep : codegenDeps) {
 					process(codegenDep, false);
 				}
 			}
@@ -129,6 +169,8 @@ public class ProcessClass {
 				throw new JadxRuntimeException("Codegen failed");
 			}
 			return code;
+		} catch (JadxTaskCancelledException e) {
+			throw e;
 		} catch (StackOverflowError | Exception e) {
 			throw new JadxRuntimeException("Failed to generate code for class: " + cls.getFullName(), e);
 		}
@@ -145,6 +187,8 @@ public class ProcessClass {
 		}
 		try {
 			process(cls, false);
+		} catch (JadxTaskCancelledException e) {
+			throw e;
 		} catch (StackOverflowError | Exception e) {
 			throw new JadxRuntimeException("Failed to process class: " + cls.getFullName(), e);
 		}
@@ -156,6 +200,8 @@ public class ProcessClass {
 	public @Nullable ICodeInfo forceGenerateCode(ClassNode cls) {
 		try {
 			return process(cls, true);
+		} catch (JadxTaskCancelledException e) {
+			throw e;
 		} catch (StackOverflowError | Exception e) {
 			throw new JadxRuntimeException("Failed to generate code for class: " + cls.getFullName(), e);
 		}
@@ -202,6 +248,8 @@ public class ProcessClass {
 		for (IDexTreeVisitor pass : passes) {
 			try {
 				pass.init(root);
+			} catch (JadxTaskCancelledException e) {
+				throw e;
 			} catch (Exception e) {
 				LOG.error("Visitor init failed: {}", pass.getClass().getSimpleName(), e);
 			}
@@ -229,16 +277,21 @@ public class ProcessClass {
 	}
 
 	public boolean processMethodToVisitor(MethodNode mth, IDexTreeVisitor lastPassToProcess) {
-		synchronized (mth.getTopParentClass().getClassInfo()) {
+		ClassNode topCls = mth.getTopParentClass();
+		synchronized (topCls.getClassInfo()) {
 			try {
 				mth.unload();
 				mth.load();
 				for (IDexTreeVisitor pass : passes) {
+					Utils.checkThreadInterrupt();
 					DepthTraversal.visit(pass, mth);
 					if (pass == lastPassToProcess) {
 						return true;
 					}
 				}
+			} catch (JadxTaskCancelledException e) {
+				recoverAfterCancellation(topCls);
+				throw e;
 			} catch (Exception e) {
 				throw new JadxRuntimeException("Failed to process method to visitor: " + lastPassToProcess, e);
 			}

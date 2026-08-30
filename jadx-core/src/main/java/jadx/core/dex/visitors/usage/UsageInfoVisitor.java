@@ -142,7 +142,7 @@ public class UsageInfoVisitor extends AbstractVisitor {
 		switch (insnData.getIndexType()) {
 			case TYPE_REF:
 				insnData.decode();
-				ArgType usedType = ArgType.parse(insnData.getIndexAsType());
+				ArgType usedType = root.getInfoStorage().getType(insnData.getIndexAsType());
 				usageInfo.clsUse(mth, usedType);
 				break;
 
@@ -219,10 +219,8 @@ public class UsageInfoVisitor extends AbstractVisitor {
 	}
 
 	private static void processAnnotation(ICodeNode node, IAnnotation ann, UsageInfo usageInfo) {
-		usageInfo.clsUse(node, ArgType.parse(ann.getAnnotationClass()));
-		for (EncodedValue value : ann.getValues().values()) {
-			processAnnotationValue(node, value, usageInfo);
-		}
+		usageInfo.clsUse(node, node.root().getInfoStorage().getType(ann.getAnnotationClass()));
+		ann.forEachValue((name, value) -> processAnnotationValue(node, value, usageInfo));
 	}
 
 	@SuppressWarnings("unchecked")
@@ -230,7 +228,7 @@ public class UsageInfoVisitor extends AbstractVisitor {
 		Object obj = value.getValue();
 		switch (value.getType()) {
 			case ENCODED_TYPE:
-				usageInfo.clsUse(node, ArgType.parse((String) obj));
+				usageInfo.clsUse(node, node.root().getInfoStorage().getType((String) obj));
 				break;
 			case ENCODED_ENUM:
 			case ENCODED_FIELD:

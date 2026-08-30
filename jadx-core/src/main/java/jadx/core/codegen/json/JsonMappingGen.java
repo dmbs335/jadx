@@ -23,6 +23,7 @@ import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
+import jadx.core.dex.visitors.SaveCode;
 import jadx.core.utils.GsonUtils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 import jadx.core.utils.files.FileUtils;
@@ -49,6 +50,7 @@ public class JsonMappingGen {
 		} catch (Exception e) {
 			throw new JadxRuntimeException("Failed to save mapping json", e);
 		}
+		SaveCode.notifyFileSaved(args, mappingFile);
 	}
 
 	private static void fillMapping(JsonMapping mapping, RootNode root) {

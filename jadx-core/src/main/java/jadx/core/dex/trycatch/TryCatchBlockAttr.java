@@ -37,6 +37,7 @@ public class TryCatchBlockAttr implements IJadxAttribute {
 	private TryCatchBlockAttr outerTryBlock;
 	private List<TryCatchBlockAttr> innerTryBlocks = Collections.emptyList();
 	private boolean merged = false;
+	private boolean narrowRegion;
 
 	private BlockNode topSplitter;
 
@@ -145,6 +146,14 @@ public class TryCatchBlockAttr implements IJadxAttribute {
 
 	public void setMerged(boolean merged) {
 		this.merged = merged;
+	}
+
+	public boolean isNarrowRegion() {
+		return narrowRegion;
+	}
+
+	public void setNarrowRegion(boolean narrowRegion) {
+		this.narrowRegion = narrowRegion;
 	}
 
 	public int id() {
