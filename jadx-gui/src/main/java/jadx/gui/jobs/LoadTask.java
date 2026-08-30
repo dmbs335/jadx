@@ -1,5 +1,6 @@
 package jadx.gui.jobs;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -14,6 +15,7 @@ import jadx.gui.utils.NLS;
 public class LoadTask<T> extends CancelableBackgroundTask {
 	private final String title;
 	private final AtomicReference<T> taskData;
+	private final AtomicBoolean taskDataReady;
 	private final Runnable bgTask;
 	private final Runnable uiTask;
 
@@ -24,7 +26,11 @@ public class LoadTask<T> extends CancelableBackgroundTask {
 	public LoadTask(String title, Supplier<T> loadBgTask, Consumer<T> uiTask) {
 		this.title = title;
 		this.taskData = new AtomicReference<>();
-		this.bgTask = () -> taskData.set(loadBgTask.get());
+		this.taskDataReady = new AtomicBoolean();
+		this.bgTask = () -> {
+			taskData.set(loadBgTask.get());
+			taskDataReady.set(true);
+		};
 		this.uiTask = () -> uiTask.accept(taskData.get());
 	}
 
@@ -42,7 +48,7 @@ public class LoadTask<T> extends CancelableBackgroundTask {
 
 	@Override
 	public void onFinish(ITaskInfo taskInfo) {
-		if (taskInfo.getStatus() == TaskStatus.COMPLETE) {
+		if (taskInfo.getStatus() == TaskStatus.COMPLETE && taskDataReady.get()) {
 			uiTask.run();
 		}
 	}

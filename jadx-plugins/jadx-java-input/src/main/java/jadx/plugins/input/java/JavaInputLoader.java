@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.stream.Collectors;
 
 import org.jetbrains.annotations.Nullable;
@@ -130,22 +131,37 @@ public class JavaInputLoader {
 
 	private List<JavaClassReader> collectFromZip(File file, String name) {
 		List<JavaClassReader> result = new ArrayList<>();
+		boolean androidBundle = isAndroidBundle(name);
 		try (ZipContent zip = zipReader.open(file)) {
 			for (IZipEntry entry : zip.getEntries()) {
 				if (entry.isDirectory()) {
 					continue;
 				}
 				String entryName = entry.getName();
+				String lowerEntryName = entryName.toLowerCase(Locale.ROOT);
 				if (entryName.startsWith("META-INF/versions/")) {
 					// skip classes for different java versions
 					continue;
 				}
+				if (androidBundle && lowerEntryName.endsWith(".apk")) {
+					// Split APKs are loaded by the XAPK/APKS/APKM input plugin and then passed
+					// to the DEX loader. Recursing into the same APK here only scans Android
+					// resources for Java class files and used to materialize every split as a
+					// large byte array during startup.
+					continue;
+				}
 				try {
 					List<JavaClassReader> readers;
-					if (entry.preferBytes()) {
+					if (entry.preferBytes() && lowerEntryName.endsWith(".class")) {
 						readers = loadReaderFromZipEntry(entry.getBytes(), entryName, name);
 					} else {
-						readers = loadReader(entry.getInputStream(), entryName, null, name);
+						// Stream the magic check for resources and nested archives. For the common
+						// non-Java entry this consumes only four uncompressed bytes; for a nested
+						// archive loadReader copies directly to a temporary file instead of first
+						// allocating the whole entry and then writing that array back to disk.
+						try (InputStream in = entry.getInputStream()) {
+							readers = loadReader(in, entryName, null, name);
+						}
 					}
 					result.addAll(readers);
 				} catch (Exception e) {
@@ -156,6 +172,13 @@ public class JavaInputLoader {
 			LOG.error("Failed to process zip file: {}", name, e);
 		}
 		return result;
+	}
+
+	private static boolean isAndroidBundle(String name) {
+		String lowerName = name.toLowerCase(Locale.ROOT);
+		return lowerName.endsWith(".xapk")
+				|| lowerName.endsWith(".apks")
+				|| lowerName.endsWith(".apkm");
 	}
 
 	public static boolean isStartWithBytes(byte[] fileMagic, byte[] expectedBytes) {

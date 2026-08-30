@@ -222,15 +222,7 @@ public class SearchDialog extends CommonSearchDialog {
 		resultsModel.clear();
 		removeActiveTabListener();
 		if (firstDispose) {
-			searchBackgroundExecutor.execute(() -> {
-				if (stopSearchTask()) {
-					unloadTempData();
-				} else {
-					// A decompiler worker still owns class state. Unloading here races the
-					// worker and can corrupt a later search; project close/reload will reclaim it.
-					LOG.debug("Skip search cache unload while canceled task is still finishing");
-				}
-			});
+			searchBackgroundExecutor.execute(this::stopSearchAndUnloadOnDispose);
 			searchBackgroundExecutor.shutdown();
 		}
 		super.dispose();
@@ -880,6 +872,35 @@ public class SearchDialog extends CommonSearchDialog {
 			return finished;
 		}
 		return true;
+	}
+
+	private void stopSearchAndUnloadOnDispose() {
+		UiUtils.notUiThreadGuard();
+		SearchTask task = searchTask;
+		boolean interrupted = false;
+		try {
+			if (task != null) {
+				task.cancel();
+				while (!task.waitTask()) {
+					if (Thread.interrupted()) {
+						interrupted = true;
+					}
+					if (!lifecycle.ownsCurrentGeneration()) {
+						return;
+					}
+				}
+				if (searchTask == task) {
+					searchTask = null;
+				}
+			}
+			if (lifecycle.ownsCurrentGeneration()) {
+				unloadTempData();
+			}
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}
 	}
 
 	private void loadMoreResults(boolean all) {

@@ -1,4 +1,4 @@
-package jadx.core.dex.visitors.regions.maker;
+package jadx.core.dex.visitors.kotlin;
 
 import java.util.Map;
 import java.util.Set;
@@ -12,17 +12,17 @@ class KtorCioRecoveryTest {
 	void recognizesPooledReaderByCapturedProtocolInsteadOfGeneratedClassName() {
 		assertThat(KtorCioRecovery.matchesReadShape(true,
 				Set.of("label", "$channel", "$nioChannel", "$selectable", "$selector")))
-				.isTrue();
+						.isTrue();
 	}
 
 	@Test
 	void rejectsIncompletePooledReaderShape() {
 		assertThat(KtorCioRecovery.matchesReadShape(true,
 				Set.of("label", "$channel", "$nioChannel", "$selector")))
-				.isFalse();
+						.isFalse();
 		assertThat(KtorCioRecovery.matchesReadShape(false,
 				Set.of("label", "$channel", "$nioChannel", "$selectable", "$selector")))
-				.isFalse();
+						.isFalse();
 	}
 
 	@Test
@@ -37,6 +37,6 @@ class KtorCioRecoveryTest {
 				"label", "int",
 				"$channel", "java.lang.Object",
 				"$timeout", "io.ktor.network.util.Timeout")))
-				.isFalse();
+						.isFalse();
 	}
 }

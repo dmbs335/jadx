@@ -20,11 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class VendorRecoveryBoundaryTest {
 	private static final Set<String> EXISTING_DIRECT_KTOR_USERS = Set.of(
-			"jadx/core/dex/visitors/blocks/FixMultiEntryLoops.java",
-			"jadx/core/dex/visitors/regions/maker/IfRegionMaker.java",
-			"jadx/core/dex/visitors/regions/maker/KtorCioRecovery.java",
-			"jadx/core/dex/visitors/regions/maker/RegionMaker.java",
-			"jadx/core/dex/visitors/regions/maker/SwitchRegionMaker.java");
+			"jadx/core/dex/visitors/kotlin/KtorCioRecovery.java");
 
 	@Test
 	void directKtorKnowledgeDoesNotSpread() throws IOException {

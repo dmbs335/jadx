@@ -80,11 +80,21 @@ tasks.register<JavaExec>("searchReloadSmoke") {
 	classpath = sourceSets.test.get().runtimeClasspath
 	mainClass.set("jadx.gui.ui.dialog.SearchReloadSmokeRunner")
 	maxHeapSize = providers.gradleProperty("searchReloadSmokeHeap").orElse("11g").get()
+	providers.gradleProperty("searchReloadSmokeJfr").orNull?.let { output ->
+		val jfrOutput = file(output)
+		jfrOutput.parentFile.mkdirs()
+		val jfrFile = jfrOutput.absolutePath
+		jvmArgs("-XX:StartFlightRecording=filename=$jfrFile,settings=profile,dumponexit=true")
+	}
 	doFirst {
-		val input = providers.gradleProperty("searchReloadSmokeInput").orNull
-			?: throw GradleException("Missing -PsearchReloadSmokeInput=<apk>")
-		val output = providers.gradleProperty("searchReloadSmokeOutput")
-			.orElse("build/search-reload-smoke.json").get()
+		val input =
+			providers.gradleProperty("searchReloadSmokeInput").orNull
+				?: throw GradleException("Missing -PsearchReloadSmokeInput=<apk>")
+		val output =
+			providers
+				.gradleProperty("searchReloadSmokeOutput")
+				.orElse("build/search-reload-smoke.json")
+				.get()
 		val rounds = providers.gradleProperty("searchReloadSmokeRounds").orElse("3").get()
 		args(input, output, rounds)
 	}
@@ -132,6 +142,22 @@ tasks.shadowJar {
 	mergeServiceFiles()
 	manifest {
 		from(tasks.jar.get().manifest)
+	}
+}
+
+// The regular Gradle Windows start script expands every runtime dependency into a
+// single CLASSPATH assignment. The GUI distribution has enough dependencies to
+// exceed cmd.exe's command-line limit, so the generated batch file cannot start.
+// Java expands a directory wildcard itself, avoiding both the cmd.exe limit and a
+// generated script whose size grows with every dependency.
+tasks.startScripts {
+	doLast {
+		val script = windowsScript.readText()
+		val classpathLine = Regex("^set CLASSPATH=.*$", RegexOption.MULTILINE)
+		check(classpathLine.containsMatchIn(script)) {
+			"Windows start script does not contain a CLASSPATH assignment"
+		}
+		windowsScript.writeText(script.replace(classpathLine) { "set CLASSPATH=%APP_HOME%\\lib\\*" })
 	}
 }
 

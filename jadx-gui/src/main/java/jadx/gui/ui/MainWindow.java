@@ -562,6 +562,9 @@ public class MainWindow extends JFrame {
 						return;
 					}
 					checkLoadedStatus();
+					// getClasses() in checkLoadedStatus initializes all prepare passes.
+					// Usage cache serialization can now run outside the critical load path.
+					wrapper.persistUsageCacheAsync();
 					onOpen(onFinish);
 				});
 	}

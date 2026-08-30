@@ -16,7 +16,8 @@ public class DexReader {
 	private final String inputFileName;
 	private final ByteBuffer buf;
 	private final DexHeader header;
-	// Cache only strings requested at least twice, keeping one-off debug and annotation values collectible.
+	// Cache only strings requested at least twice, keeping one-off debug and annotation values
+	// collectible.
 	private final AtomicReferenceArray<String> stringCache;
 	private final AtomicLongArray seenStrings;
 
@@ -66,6 +67,22 @@ public class DexReader {
 			consumer.accept(classData);
 			classData.shiftOffset(DexClassData.SIZE);
 		}
+	}
+
+	public int getClassesCount() {
+		return header.getClassDefsSize();
+	}
+
+	public int getMethodsCount() {
+		return header.getMethodIdsSize();
+	}
+
+	public int getFieldsCount() {
+		return header.getFieldIdsSize();
+	}
+
+	public int getTypesCount() {
+		return header.getTypeIdsSize();
 	}
 
 	public ByteBuffer getBuf() {

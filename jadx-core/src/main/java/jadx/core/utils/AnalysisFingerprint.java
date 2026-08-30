@@ -42,13 +42,31 @@ public final class AnalysisFingerprint {
 	}
 
 	public static String build(JadxArgs args, @Nullable JadxDecompiler decompiler) {
+		return build(args, decompiler, buildInputIdentity(args));
+	}
+
+	public static InputIdentity buildInputIdentity(JadxArgs args) {
+		try (AnalysisHashIndex hashIndex = AnalysisHashIndex.openDefault()) {
+			InputIdentity identity = new InputIdentity(
+					buildInputsHash(args.getInputFiles(), hashIndex),
+					buildInputsHash(args.getDependencyInputFiles(), hashIndex));
+			LOG.debug("Analysis input hash index: hits={}, misses={}",
+					hashIndex.getHitCount(), hashIndex.getMissCount());
+			return identity;
+		}
+	}
+
+	public static String build(
+			JadxArgs args,
+			@Nullable JadxDecompiler decompiler,
+			InputIdentity inputIdentity) {
 		try (AnalysisHashIndex hashIndex = AnalysisHashIndex.openDefault()) {
 			MessageDigest digest = MessageDigest.getInstance("SHA-256");
 			add(digest, "schema", Integer.toString(SCHEMA_VERSION));
 			add(digest, "jadx-version", Jadx.getVersion());
 			add(digest, "code-args", args.makeCodeArgsHash(decompiler));
-			add(digest, "primary-inputs", buildInputsHash(args.getInputFiles(), hashIndex));
-			add(digest, "dependency-inputs", buildInputsHash(args.getDependencyInputFiles(), hashIndex));
+			add(digest, "primary-inputs", inputIdentity.primaryInputsHash);
+			add(digest, "dependency-inputs", inputIdentity.dependencyInputsHash);
 			addOptionalFile(digest, "user-mappings", args.getUserRenamesMappingsPath(), hashIndex);
 			if (args.getGeneratedRenamesMappingFileMode().shouldRead()) {
 				File mappingsFile = args.getGeneratedRenamesMappingFile();
@@ -62,6 +80,16 @@ public final class AnalysisFingerprint {
 			return fingerprint;
 		} catch (NoSuchAlgorithmException e) {
 			throw new JadxRuntimeException("SHA-256 is unavailable", e);
+		}
+	}
+
+	public static final class InputIdentity {
+		private final String primaryInputsHash;
+		private final String dependencyInputsHash;
+
+		private InputIdentity(String primaryInputsHash, String dependencyInputsHash) {
+			this.primaryInputsHash = primaryInputsHash;
+			this.dependencyInputsHash = dependencyInputsHash;
 		}
 	}
 

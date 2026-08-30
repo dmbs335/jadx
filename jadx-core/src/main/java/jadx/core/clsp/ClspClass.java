@@ -2,7 +2,6 @@ package jadx.core.clsp;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -11,6 +10,7 @@ import org.intellij.lang.annotations.MagicConstant;
 
 import jadx.api.plugins.input.data.AccessFlags;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.utils.Utils;
 
 /**
  * Class node in classpath graph
@@ -81,7 +81,7 @@ public class ClspClass {
 	}
 
 	public void setMethods(List<ClspMethod> methods) {
-		Map<String, ClspMethod> map = new HashMap<>(methods.size());
+		Map<String, ClspMethod> map = Utils.newHashMap(methods.size());
 		for (ClspMethod mth : methods) {
 			map.put(mth.getMethodInfo().getShortId(), mth);
 		}

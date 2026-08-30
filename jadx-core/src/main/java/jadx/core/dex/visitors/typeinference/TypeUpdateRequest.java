@@ -40,7 +40,8 @@ public class TypeUpdateRequest {
 		return callback;
 	}
 
-	@Nullable TypeUpdateRequest getNextFree() {
+	@Nullable
+	TypeUpdateRequest getNextFree() {
 		return nextFree;
 	}
 

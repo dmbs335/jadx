@@ -35,7 +35,8 @@ public final class SearchReloadSmokeRunner {
 		Path input = Paths.get(args[0]).toAbsolutePath().normalize();
 		Path report = Paths.get(args[1]).toAbsolutePath().normalize();
 		int rounds = args.length > 2 ? Integer.parseInt(args[2]) : 3;
-		if (!Files.isRegularFile(input)) throw new IllegalArgumentException("Input not found: " + input);
+		if (!Files.isRegularFile(input))
+			throw new IllegalArgumentException("Input not found: " + input);
 
 		Set<Long> baselineThreads = threadIds();
 		List<String> uncaught = Collections.synchronizedList(new ArrayList<>());
@@ -59,6 +60,7 @@ public final class SearchReloadSmokeRunner {
 		} finally {
 			if (window != null) {
 				MainWindow closing = window;
+				closing.getWrapper().close();
 				onEdt(() -> {
 					closing.dispose();
 					return null;
@@ -148,7 +150,8 @@ public final class SearchReloadSmokeRunner {
 		CountDownLatch loaded = new CountDownLatch(1);
 		onEdt(() -> {
 			window.addLoadListener(state -> {
-				if (state) loaded.countDown();
+				if (state)
+					loaded.countDown();
 				return state;
 			});
 			window.open(input);
@@ -161,7 +164,7 @@ public final class SearchReloadSmokeRunner {
 
 	private static void awaitReload(MainWindow window) throws Exception {
 		CountDownLatch reloaded = new CountDownLatch(1);
-		boolean[] sawUnload = {false};
+		boolean[] sawUnload = { false };
 		onEdt(() -> {
 			window.addLoadListener(state -> {
 				if (!state) {
@@ -181,7 +184,8 @@ public final class SearchReloadSmokeRunner {
 	}
 
 	private static <T> T onEdt(Callable<T> callable) throws Exception {
-		if (EventQueue.isDispatchThread()) return callable.call();
+		if (EventQueue.isDispatchThread())
+			return callable.call();
 		FutureTask<T> task = new FutureTask<>(callable);
 		EventQueue.invokeAndWait(task);
 		return task.get();
@@ -193,7 +197,8 @@ public final class SearchReloadSmokeRunner {
 
 	private static Set<Long> threadIds() {
 		Set<Long> result = new LinkedHashSet<>();
-		for (Thread thread : Thread.getAllStackTraces().keySet()) result.add(thread.getId());
+		for (Thread thread : Thread.getAllStackTraces().keySet())
+			result.add(thread.getId());
 		return result;
 	}
 
@@ -203,7 +208,8 @@ public final class SearchReloadSmokeRunner {
 		List<String> leaked;
 		do {
 			leaked = taskThreads(baseline);
-			if (leaked.isEmpty()) return leaked;
+			if (leaked.isEmpty())
+				return leaked;
 			Thread.sleep(50);
 		} while (System.nanoTime() < deadline);
 		return leaked;
@@ -225,7 +231,8 @@ public final class SearchReloadSmokeRunner {
 
 	private static void writeReport(Path output, Path input, int rounds, long initialLoadMs,
 			List<RoundResult> results, List<String> uncaught, List<String> leaked) throws Exception {
-		if (output.getParent() != null) Files.createDirectories(output.getParent());
+		if (output.getParent() != null)
+			Files.createDirectories(output.getParent());
 		StringBuilder json = new StringBuilder("{\n  \"schema\": \"rel-1d-search-reload-smoke-v1\",")
 				.append("\n  \"input\": ").append(q(input.toString())).append(',')
 				.append("\n  \"rounds\": ").append(rounds).append(',')
@@ -234,7 +241,8 @@ public final class SearchReloadSmokeRunner {
 				.append("\n  \"leakedTaskThreads\": ").append(strings(leaked)).append(',')
 				.append("\n  \"results\": [");
 		for (int index = 0; index < results.size(); index++) {
-			if (index > 0) json.append(',');
+			if (index > 0)
+				json.append(',');
 			RoundResult result = results.get(index);
 			json.append("\n    {\"round\": ").append(result.round)
 					.append(", \"cancelSearchMs\": ").append(result.cancelSearchMs)
@@ -249,7 +257,8 @@ public final class SearchReloadSmokeRunner {
 	private static String strings(List<String> values) {
 		StringBuilder json = new StringBuilder("[");
 		for (int index = 0; index < values.size(); index++) {
-			if (index > 0) json.append(',');
+			if (index > 0)
+				json.append(',');
 			json.append(q(values.get(index)));
 		}
 		return json.append(']').toString();

@@ -158,10 +158,13 @@ public class DexFileLoader {
 				byte[] dexContent = null;
 				try {
 					List<DexReader> readers;
-					if (entry.preferBytes()) {
+					if (isDexEntry(entry.getName()) && entry.preferBytes()) {
 						dexContent = entry.getBytes();
 						readers = loadFromZipEntry(dexContent, entry.getName());
 					} else {
+						// Do not materialize every APK entry just to inspect its magic.
+						// The streaming path still detects DEX payloads hidden behind an
+						// arbitrary extension and only reads the full entry on a match.
 						readers = load(null, entry.getInputStream(), entry.getName());
 					}
 					if (!readers.isEmpty()) {

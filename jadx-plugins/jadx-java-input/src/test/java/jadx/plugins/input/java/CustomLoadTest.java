@@ -1,5 +1,6 @@
 package jadx.plugins.input.java;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -9,10 +10,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import jadx.api.JadxArgs;
 import jadx.api.JadxDecompiler;
@@ -22,6 +26,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 
 class CustomLoadTest {
+	@TempDir
+	Path tempDir;
+
 	@Test
 	void nestedZipDetectionRequiresContentSignature() {
 		assertThat(JavaInputLoader.isZipContent(new byte[] { 'N', 'O', 'P', 'E' })).isFalse();
@@ -52,6 +59,33 @@ class CustomLoadTest {
 				.hasSize(2)
 				.satisfiesOnlyOnce(cls -> assertThat(cls.getName()).isEqualTo("HelloWorld"))
 				.satisfiesOnlyOnce(cls -> assertThat(cls.getName()).isEqualTo("HelloInner"));
+	}
+
+	@Test
+	void streamNestedJavaArchive() throws IOException {
+		byte[] cls = Files.readAllBytes(getSample("HelloWorld.class"));
+		byte[] nestedJar = zipBytes("HelloWorld.class", cls);
+		Path archive = tempDir.resolve("nested.zip");
+		writeZip(archive, "lib/sample.jar", nestedJar);
+
+		try (ICodeLoader loader = JavaInputPlugin.loadClassFiles(List.of(archive))) {
+			assertThat(loader.getClassesCount()).isEqualTo(1);
+		}
+	}
+
+	@Test
+	void skipSplitApkInAndroidBundle() throws IOException {
+		byte[] cls = Files.readAllBytes(getSample("HelloWorld.class"));
+		byte[] nestedApk = zipBytes("HelloWorld.class", cls);
+		Path archive = tempDir.resolve("sample.xapk");
+		try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(archive))) {
+			writeEntry(out, "base.apk", nestedApk);
+			writeEntry(out, "HelloWorld.class", cls);
+		}
+
+		try (ICodeLoader loader = JavaInputPlugin.loadClassFiles(List.of(archive))) {
+			assertThat(loader.getClassesCount()).isEqualTo(1);
+		}
 	}
 
 	@Test
@@ -131,5 +165,25 @@ class CustomLoadTest {
 		} catch (Exception e) {
 			return fail("Failed to load sample", e);
 		}
+	}
+
+	private static byte[] zipBytes(String name, byte[] content) throws IOException {
+		ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+		try (ZipOutputStream out = new ZipOutputStream(bytes)) {
+			writeEntry(out, name, content);
+		}
+		return bytes.toByteArray();
+	}
+
+	private static void writeZip(Path path, String name, byte[] content) throws IOException {
+		try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(path))) {
+			writeEntry(out, name, content);
+		}
+	}
+
+	private static void writeEntry(ZipOutputStream out, String name, byte[] content) throws IOException {
+		out.putNextEntry(new ZipEntry(name));
+		out.write(content);
+		out.closeEntry();
 	}
 }

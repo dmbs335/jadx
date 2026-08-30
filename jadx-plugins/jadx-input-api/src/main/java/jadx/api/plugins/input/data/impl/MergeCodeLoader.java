@@ -4,6 +4,7 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.ToIntFunction;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -29,6 +30,41 @@ public class MergeCodeLoader implements ICodeLoader {
 		for (ICodeLoader codeLoader : codeLoaders) {
 			codeLoader.visitClasses(consumer);
 		}
+	}
+
+	@Override
+	public int getClassesCount() {
+		return sumCounts(ICodeLoader::getClassesCount);
+	}
+
+	@Override
+	public int getMethodsCount() {
+		return sumCounts(ICodeLoader::getMethodsCount);
+	}
+
+	@Override
+	public int getFieldsCount() {
+		return sumCounts(ICodeLoader::getFieldsCount);
+	}
+
+	@Override
+	public int getTypesCount() {
+		return sumCounts(ICodeLoader::getTypesCount);
+	}
+
+	private int sumCounts(ToIntFunction<ICodeLoader> countGetter) {
+		long count = 0;
+		for (ICodeLoader codeLoader : codeLoaders) {
+			int loaderCount = countGetter.applyAsInt(codeLoader);
+			if (loaderCount < 0) {
+				return -1;
+			}
+			count += loaderCount;
+			if (count > Integer.MAX_VALUE) {
+				return -1;
+			}
+		}
+		return (int) count;
 	}
 
 	@Override

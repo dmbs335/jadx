@@ -16,7 +16,7 @@ public class TestTryProtectedChannelForwardCompletion extends SmaliTest {
 
 		assertThat(searchCls(
 				loadFromSmaliFiles(),
-						"loops.TestTryProtectedChannelForwardCompletion"))
+				"loops.TestTryProtectedChannelForwardCompletion"))
 						.code()
 						.containsOne(
 								"Normalize try-protected channel forward completion"

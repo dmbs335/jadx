@@ -5,6 +5,9 @@ import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -96,6 +99,26 @@ class AnalysisFingerprintTest {
 	}
 
 	@Test
+	void passReloadReusesLoadedInputIdentity() throws Exception {
+		Path input = tempDir.resolve("loaded.jar");
+		try (ZipOutputStream ignored = new ZipOutputStream(Files.newOutputStream(input))) {
+			// valid empty archive
+		}
+		try (JadxArgs args = new JadxArgs();
+				JadxDecompiler decompiler = new JadxDecompiler(args)) {
+			args.getInputFiles().add(input.toFile());
+			decompiler.load();
+			String before = decompiler.getAnalysisFingerprint();
+			Files.delete(input);
+
+			args.setUseImports(!args.isUseImports());
+			decompiler.reloadPasses();
+
+			assertThat(decompiler.getAnalysisFingerprint()).isNotEqualTo(before);
+		}
+	}
+
+	@Test
 	void runtimeContentChangeInvalidatesEvenWithPreservedTimestamp() throws Exception {
 		Path runtimeDir = tempDir.resolve("runtime");
 		Files.createDirectories(runtimeDir);
@@ -129,6 +152,33 @@ class AnalysisFingerprintTest {
 
 		writeStoredArchive(archive, "bbbb");
 		Files.setLastModifiedTime(archive, timestamp);
+		try (AnalysisHashIndex hashIndex = AnalysisHashIndex.open(index)) {
+			assertThat(hashIndex.hash(archive)).isNotEqualTo(first);
+			assertThat(hashIndex.getHitCount()).isZero();
+			assertThat(hashIndex.getMissCount()).isEqualTo(1);
+		}
+	}
+
+	@Test
+	void persistentArchiveHashDetectsPayloadChangeWithPreservedDirectory() throws Exception {
+		Path archive = tempDir.resolve("payload-change.apk");
+		Path index = tempDir.resolve("payload-change-index.properties");
+		writeStoredArchive(archive, "aaaa");
+		FileTime timestamp = Files.getLastModifiedTime(archive);
+		byte[] first;
+		try (AnalysisHashIndex hashIndex = AnalysisHashIndex.open(index)) {
+			first = hashIndex.hash(archive);
+		}
+
+		byte[] archiveBytes = Files.readAllBytes(archive);
+		byte[] payload = "aaaa".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+		int payloadOffset = indexOf(archiveBytes, payload);
+		assertThat(payloadOffset).isGreaterThanOrEqualTo(0);
+		System.arraycopy("bbbb".getBytes(java.nio.charset.StandardCharsets.UTF_8), 0,
+				archiveBytes, payloadOffset, payload.length);
+		Files.write(archive, archiveBytes);
+		Files.setLastModifiedTime(archive, timestamp);
+
 		try (AnalysisHashIndex hashIndex = AnalysisHashIndex.open(index)) {
 			assertThat(hashIndex.hash(archive)).isNotEqualTo(first);
 			assertThat(hashIndex.getHitCount()).isZero();
@@ -181,6 +231,37 @@ class AnalysisFingerprintTest {
 		}
 	}
 
+	@Test
+	void concurrentWritersMergeTheirEntries() throws Exception {
+		Path firstArchive = tempDir.resolve("first.apk");
+		Path secondArchive = tempDir.resolve("second.apk");
+		Path index = tempDir.resolve("shared-index.properties");
+		writeStoredArchive(firstArchive, "first");
+		writeStoredArchive(secondArchive, "second");
+
+		AnalysisHashIndex first = AnalysisHashIndex.open(index);
+		AnalysisHashIndex second = AnalysisHashIndex.open(index);
+		try {
+			first.hash(firstArchive);
+			second.hash(secondArchive);
+			try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+				Future<?> firstClose = executor.submit(first::close);
+				Future<?> secondClose = executor.submit(second::close);
+				firstClose.get();
+				secondClose.get();
+			}
+		} finally {
+			first.close();
+			second.close();
+		}
+
+		try (AnalysisHashIndex verifier = AnalysisHashIndex.open(index)) {
+			verifier.hash(firstArchive);
+			verifier.hash(secondArchive);
+			assertThat(verifier.getHitCount()).isEqualTo(2);
+		}
+	}
+
 	private static void writeStoredArchive(Path archive, String content) throws Exception {
 		byte[] bytes = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
 		CRC32 crc = new CRC32();
@@ -195,5 +276,21 @@ class AnalysisFingerprintTest {
 			output.write(bytes);
 			output.closeEntry();
 		}
+	}
+
+	private static int indexOf(byte[] bytes, byte[] target) {
+		for (int i = 0; i <= bytes.length - target.length; i++) {
+			boolean match = true;
+			for (int j = 0; j < target.length; j++) {
+				if (bytes[i + j] != target[j]) {
+					match = false;
+					break;
+				}
+			}
+			if (match) {
+				return i;
+			}
+		}
+		return -1;
 	}
 }

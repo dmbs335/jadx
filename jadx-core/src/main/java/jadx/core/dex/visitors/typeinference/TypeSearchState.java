@@ -1,10 +1,9 @@
 package jadx.core.dex.visitors.typeinference;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 import org.jetbrains.annotations.NotNull;
 
@@ -18,12 +17,16 @@ import jadx.core.utils.exceptions.JadxRuntimeException;
 public class TypeSearchState {
 
 	private final Map<SSAVar, TypeSearchVarInfo> varInfoMap;
+	private final List<TypeSearchVarInfo> allVars;
 
 	public TypeSearchState(MethodNode mth) {
 		List<SSAVar> vars = mth.getSVars();
-		this.varInfoMap = new LinkedHashMap<>(vars.size());
+		this.varInfoMap = new IdentityHashMap<>(vars.size());
+		this.allVars = new ArrayList<>(vars.size());
 		for (SSAVar var : vars) {
-			varInfoMap.put(var, new TypeSearchVarInfo(var));
+			TypeSearchVarInfo varInfo = new TypeSearchVarInfo(var);
+			varInfoMap.put(var, varInfo);
+			allVars.add(varInfo);
 		}
 	}
 
@@ -45,18 +48,26 @@ public class TypeSearchState {
 	}
 
 	public List<TypeSearchVarInfo> getAllVars() {
-		return new ArrayList<>(varInfoMap.values());
+		return new ArrayList<>(allVars);
 	}
 
 	public List<TypeSearchVarInfo> getUnresolvedVars() {
-		return varInfoMap.values().stream()
-				.filter(varInfo -> !varInfo.isTypeResolved())
-				.collect(Collectors.toList());
+		List<TypeSearchVarInfo> result = new ArrayList<>(allVars.size());
+		for (TypeSearchVarInfo varInfo : allVars) {
+			if (!varInfo.isTypeResolved()) {
+				result.add(varInfo);
+			}
+		}
+		return result;
 	}
 
 	public List<TypeSearchVarInfo> getResolvedVars() {
-		return varInfoMap.values().stream()
-				.filter(TypeSearchVarInfo::isTypeResolved)
-				.collect(Collectors.toList());
+		List<TypeSearchVarInfo> result = new ArrayList<>(allVars.size());
+		for (TypeSearchVarInfo varInfo : allVars) {
+			if (varInfo.isTypeResolved()) {
+				result.add(varInfo);
+			}
+		}
+		return result;
 	}
 }

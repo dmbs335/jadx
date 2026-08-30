@@ -5,6 +5,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import javax.swing.SwingUtilities;
+
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 
@@ -14,6 +16,44 @@ import jadx.gui.ui.panel.ProgressPanel;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class BackgroundExecutorTest {
+	@Test
+	void cancelFromEdtDoesNotWaitForTaskCompletion() throws Exception {
+		BackgroundExecutor executor = newExecutor();
+		CountDownLatch jobStarted = new CountDownLatch(1);
+		CountDownLatch releaseJob = new CountDownLatch(1);
+		CountDownLatch callbackReached = new CountDownLatch(1);
+		executor.execute(new SimpleTask("edt cancel", () -> {
+			jobStarted.countDown();
+			boolean interrupted = false;
+			while (releaseJob.getCount() != 0) {
+				try {
+					releaseJob.await(100, TimeUnit.MILLISECONDS);
+				} catch (InterruptedException e) {
+					interrupted = true;
+				}
+			}
+			if (interrupted) {
+				Thread.currentThread().interrupt();
+			}
+		}, callbackReached::countDown));
+		assertThat(jobStarted.await(1, TimeUnit.SECONDS)).isTrue();
+
+		long start = System.nanoTime();
+		SwingUtilities.invokeAndWait(executor::cancelAll);
+		long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+		assertThat(elapsedMs).isLessThan(500);
+
+		AtomicBoolean replacementRan = new AtomicBoolean();
+		Future<TaskStatus> replacement = executor.executeWithFuture(
+				new SimpleTask("must stay blocked", () -> replacementRan.set(true)));
+		assertThat(replacement.get(1, TimeUnit.SECONDS)).isEqualTo(TaskStatus.CANCEL_BY_USER);
+		assertThat(replacementRan).isFalse();
+
+		releaseJob.countDown();
+		assertThat(callbackReached.await(1, TimeUnit.SECONDS)).isTrue();
+		executor.shutdown();
+	}
+
 	@Test
 	void completionCallbackCanSubmitWhileAnotherThreadWaits() throws Exception {
 		JadxSettings settings = new JadxSettings(null) {

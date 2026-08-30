@@ -16,7 +16,7 @@ public class TestTryProtectedTwoStateIteratorActionLoop extends SmaliTest {
 
 		assertThat(searchCls(
 				loadFromSmaliFiles(),
-						"loops.TestTryProtectedTwoStateIteratorActionLoop"))
+				"loops.TestTryProtectedTwoStateIteratorActionLoop"))
 						.code()
 						.containsOne(
 								"Normalize try-protected two-state iterator/action completions"

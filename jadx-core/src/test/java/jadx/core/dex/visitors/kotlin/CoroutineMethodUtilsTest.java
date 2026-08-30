@@ -13,42 +13,42 @@ class CoroutineMethodUtilsTest {
 	void acceptsCanonicalStateMachineSignature() {
 		assertThat(CoroutineMethodUtils.isStateMachineSignature(
 				"invokeSuspend", false, List.of(ArgType.OBJECT), ArgType.OBJECT))
-				.isTrue();
+						.isTrue();
 	}
 
 	@Test
 	void acceptsKnownKotlinCoroutineBases() {
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.BaseContinuationImpl")))
-				.isTrue();
+						.isTrue();
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.ContinuationImpl")))
-				.isTrue();
+						.isTrue();
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.RestrictedContinuationImpl")))
-				.isTrue();
+						.isTrue();
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.SuspendLambda")))
-				.isTrue();
+						.isTrue();
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.RestrictedSuspendLambda")))
-				.isTrue();
+						.isTrue();
 	}
 
 	@Test
 	void rejectsCoroutineBaseLookalikes() {
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.ContinuationImplLike")))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.SuspendLambdaImpl")))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.sub.SuspendLambda")))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("example.kotlin.coroutines.jvm.internal.ContinuationImpl")))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(ArgType.OBJECT))
 				.isFalse();
 	}
@@ -57,69 +57,69 @@ class CoroutineMethodUtilsTest {
 	void distinguishesSuspendLambdaBasesFromOtherStateMachines() {
 		assertThat(CoroutineMethodUtils.isSuspendLambdaBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.SuspendLambda")))
-				.isTrue();
+						.isTrue();
 		assertThat(CoroutineMethodUtils.isSuspendLambdaBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.RestrictedSuspendLambda")))
-				.isTrue();
+						.isTrue();
 		assertThat(CoroutineMethodUtils.isSuspendLambdaBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.ContinuationImpl")))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isSuspendLambdaBase(
 				ArgType.object("example.SuspendLambda")))
-				.isFalse();
+						.isFalse();
 	}
 
 	@Test
 	void preservesCanonicalContinuationBoundaryForGenericPasses() {
 		assertThat(CoroutineMethodUtils.isContinuationType(
 				ArgType.object("kotlin.coroutines.Continuation")))
-				.isTrue();
+						.isTrue();
 		assertThat(CoroutineMethodUtils.isContinuationType(
 				ArgType.object("kotlin.coroutines.jvm.internal.ContinuationImpl")))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isContinuationType(
 				ArgType.object("kotlin.coroutines.jvm.internal.RestrictedContinuationImpl")))
-				.isFalse();
+						.isFalse();
 	}
 
 	@Test
 	void recognizesConcreteRuntimeBasesOnlyAtExplicitKnownTypeBoundary() {
 		assertThat(CoroutineMethodUtils.isKnownContinuationType(
 				ArgType.object("kotlin.coroutines.Continuation")))
-				.isTrue();
+						.isTrue();
 		assertThat(CoroutineMethodUtils.isKnownContinuationType(
 				ArgType.object("kotlin.coroutines.jvm.internal.ContinuationImpl")))
-				.isTrue();
+						.isTrue();
 		assertThat(CoroutineMethodUtils.isKnownContinuationType(
 				ArgType.object("kotlin.coroutines.jvm.internal.RestrictedContinuationImpl")))
-				.isTrue();
+						.isTrue();
 		assertThat(CoroutineMethodUtils.isKnownContinuationType(
 				ArgType.object("kotlin.coroutines.ContinuationImpl")))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isKnownContinuationType(
 				ArgType.object("kotlin.coroutines.ContinuationLike")))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isKnownContinuationType(
 				ArgType.object("java.lang.Object")))
-				.isFalse();
+						.isFalse();
 	}
 
 	@Test
 	void rejectsStateMachineNameCollisions() {
 		assertThat(CoroutineMethodUtils.isStateMachineSignature(
 				"invokeSuspend", false, List.of(), ArgType.OBJECT))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isStateMachineSignature(
 				"invokeSuspend", true, List.of(ArgType.OBJECT), ArgType.OBJECT))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isStateMachineSignature(
 				"invokeSuspend", false, List.of(ArgType.INT), ArgType.OBJECT))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isStateMachineSignature(
 				"invokeSuspend", false, List.of(ArgType.OBJECT), ArgType.VOID))
-				.isFalse();
+						.isFalse();
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("example.InvokeSuspendBase")))
-				.isFalse();
+						.isFalse();
 	}
 }

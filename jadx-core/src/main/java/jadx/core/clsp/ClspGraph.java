@@ -3,7 +3,6 @@ package jadx.core.clsp;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +18,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.IMethodDetails;
 import jadx.core.dex.nodes.RootNode;
+import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.DecodeException;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
@@ -47,7 +47,7 @@ public class ClspGraph {
 
 	public void addClasspath(ClsSet set) {
 		if (nameMap == null) {
-			nameMap = new HashMap<>(set.getClassesCount());
+			nameMap = Utils.newHashMap(set.getClassesCount());
 			set.addToMap(nameMap);
 		} else {
 			throw new JadxRuntimeException("Classpath already loaded");
@@ -56,7 +56,11 @@ public class ClspGraph {
 
 	public void addApp(List<ClassNode> classes) {
 		if (nameMap == null) {
-			nameMap = new HashMap<>(classes.size());
+			nameMap = Utils.newHashMap(classes.size());
+		} else if (!classes.isEmpty()) {
+			Map<String, ClspClass> expandedMap = Utils.newHashMap(nameMap.size() + classes.size());
+			expandedMap.putAll(nameMap);
+			nameMap = expandedMap;
 		}
 		for (ClassNode cls : classes) {
 			addClass(cls);
@@ -152,7 +156,7 @@ public class ClspGraph {
 	}
 
 	private void fillImplementsCache() {
-		Map<String, List<ArgType>> map = new HashMap<>(nameMap.size());
+		Map<String, List<ArgType>> map = Utils.newHashMap(nameMap.size());
 		List<String> classes = new ArrayList<>(nameMap.keySet());
 		Collections.sort(classes);
 		for (String clsName : classes) {
@@ -205,7 +209,7 @@ public class ClspGraph {
 	private static final Set<String> OBJECT_SINGLE_SET = Collections.singleton(Consts.CLASS_OBJECT);
 
 	private void fillSuperTypesCache() {
-		Map<String, Set<String>> map = new HashMap<>(nameMap.size());
+		Map<String, Set<String>> map = Utils.newHashMap(nameMap.size());
 		Set<String> tmpSet = new HashSet<>();
 		for (Map.Entry<String, ClspClass> entry : nameMap.entrySet()) {
 			ClspClass cls = entry.getValue();

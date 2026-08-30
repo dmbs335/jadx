@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Predicate;
+import java.util.function.ToIntFunction;
 import java.util.stream.Collectors;
 
 import org.jetbrains.annotations.NotNull;
@@ -85,8 +86,8 @@ public class RootNode extends AttrNode {
 	private final List<ICodeDataUpdateListener> codeDataUpdateListeners = new ArrayList<>();
 	private final GradleInfoStorage gradleInfoStorage = new GradleInfoStorage();
 
-	private final Map<ClassInfo, ClassNode> clsMap = new HashMap<>();
-	private final Map<String, ClassNode> rawClsMap = new HashMap<>();
+	private Map<ClassInfo, ClassNode> clsMap = new HashMap<>();
+	private Map<String, ClassNode> rawClsMap = new HashMap<>();
 	private List<ClassNode> classes = new ArrayList<>();
 
 	private final Map<String, PackageNode> pkgMap = new HashMap<>();
@@ -140,6 +141,7 @@ public class RootNode extends AttrNode {
 	}
 
 	public void loadClasses(List<ICodeLoader> loadedInputs) {
+		prepareClassIndexes(loadedInputs);
 		for (ICodeLoader codeLoader : loadedInputs) {
 			codeLoader.visitClasses(cls -> {
 				try {
@@ -150,6 +152,40 @@ public class RootNode extends AttrNode {
 				Utils.checkThreadInterrupt();
 			});
 		}
+	}
+
+	private void prepareClassIndexes(List<ICodeLoader> loadedInputs) {
+		if (!classes.isEmpty()) {
+			return;
+		}
+		int expectedClasses = sumInputCounts(loadedInputs, ICodeLoader::getClassesCount);
+		int expectedMethods = sumInputCounts(loadedInputs, ICodeLoader::getMethodsCount);
+		int expectedFields = sumInputCounts(loadedInputs, ICodeLoader::getFieldsCount);
+		int expectedTypes = sumInputCounts(loadedInputs, ICodeLoader::getTypesCount);
+		LOG.debug("Input index capacity hints: classes={}, methods={}, fields={}, types={}",
+				expectedClasses, expectedMethods, expectedFields, expectedTypes);
+		infoStorage.prepare(expectedClasses, expectedMethods, expectedFields, expectedTypes);
+		if (expectedClasses <= 0) {
+			return;
+		}
+		clsMap = Utils.newHashMap(expectedClasses);
+		rawClsMap = Utils.newHashMap(expectedClasses);
+		classes = new ArrayList<>(expectedClasses);
+	}
+
+	private static int sumInputCounts(List<ICodeLoader> loadedInputs, ToIntFunction<ICodeLoader> countGetter) {
+		long total = 0;
+		for (ICodeLoader codeLoader : loadedInputs) {
+			int count = countGetter.applyAsInt(codeLoader);
+			if (count < 0) {
+				return -1;
+			}
+			total += count;
+			if (total > Integer.MAX_VALUE) {
+				return -1;
+			}
+		}
+		return (int) total;
 	}
 
 	public void finishClassLoad() {
@@ -508,7 +544,10 @@ public class RootNode extends AttrNode {
 			return null;
 		}
 		if (clsType.isGeneric()) {
-			clsType = ArgType.object(clsType.getObject());
+			// Generic arguments don't participate in class identity. The raw-name index already
+			// contains the canonical ClassNode, so avoid allocating a stripped ArgType and then
+			// repeating the ClassInfo and class-map lookups for every type-inference query.
+			return resolveRawClass(clsType.getObject());
 		}
 		return resolveClass(ClassInfo.fromType(this, clsType));
 	}

@@ -2,7 +2,6 @@ package jadx.plugins.input.dex.sections.annotations;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,46 +50,28 @@ public class AnnotationsParser extends SectionReader {
 		return readAnnotationList(classAnnotationsOffset);
 	}
 
-	public Map<Integer, Integer> readFieldsAnnotationOffsetMap() {
+	public AnnotationsOffsets readFieldsAnnotationOffsets() {
 		if (fieldsCount == 0) {
-			return Collections.emptyMap();
+			return AnnotationsOffsets.empty();
 		}
 		pos(4 * 4);
-		Map<Integer, Integer> map = new HashMap<>(fieldsCount);
-		for (int i = 0; i < fieldsCount; i++) {
-			int fieldIdx = readInt();
-			int fieldAnnOffset = readInt();
-			map.put(fieldIdx, fieldAnnOffset);
-		}
-		return map;
+		return AnnotationsOffsets.read(this, fieldsCount);
 	}
 
-	public Map<Integer, Integer> readMethodsAnnotationOffsetMap() {
+	public AnnotationsOffsets readMethodsAnnotationOffsets() {
 		if (methodsCount == 0) {
-			return Collections.emptyMap();
+			return AnnotationsOffsets.empty();
 		}
 		pos(4 * 4 + fieldsCount * 2 * 4);
-		Map<Integer, Integer> map = new HashMap<>(methodsCount);
-		for (int i = 0; i < methodsCount; i++) {
-			int methodIdx = readInt();
-			int methodAnnOffset = readInt();
-			map.put(methodIdx, methodAnnOffset);
-		}
-		return map;
+		return AnnotationsOffsets.read(this, methodsCount);
 	}
 
-	public Map<Integer, Integer> readMethodParamsAnnRefOffsetMap() {
+	public AnnotationsOffsets readMethodParamsAnnRefOffsets() {
 		if (paramsRefCount == 0) {
-			return Collections.emptyMap();
+			return AnnotationsOffsets.empty();
 		}
 		pos(4 * 4 + fieldsCount * 2 * 4 + methodsCount * 2 * 4);
-		Map<Integer, Integer> map = new HashMap<>(paramsRefCount);
-		for (int i = 0; i < paramsRefCount; i++) {
-			int methodIdx = readInt();
-			int methodAnnRefOffset = readInt();
-			map.put(methodIdx, methodAnnRefOffset);
-		}
-		return map;
+		return AnnotationsOffsets.read(this, paramsRefCount);
 	}
 
 	public List<IAnnotation> readAnnotationList(int offset) {
@@ -146,7 +127,7 @@ public class AnnotationsParser extends SectionReader {
 		}
 		Map<String, EncodedValue> values = new LinkedHashMap<>(size);
 		for (int i = 0; i < size; i++) {
-			String name = ext.getString(in.readUleb128());
+			String name = ext.getStringCached(in.readUleb128());
 			values.put(name, EncodedValueParser.parseValue(in, ext));
 		}
 		return new JadxAnnotation(visibility, type, values);

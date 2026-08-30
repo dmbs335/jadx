@@ -83,8 +83,12 @@ fun ClassNode.hasKotlinClassMetadataKind(): Boolean {
 }
 
 fun ClassNode.getKotlinClassMetadata(): KotlinClassMetadata? {
-	if (contains(MalformedKotlinMetadataAttr.TYPE)) return null
 	val metadata = getMetadata() ?: return null
+	return getKotlinClassMetadata(metadata)
+}
+
+fun ClassNode.getKotlinClassMetadata(metadata: Metadata): KotlinClassMetadata? {
+	if (contains(MalformedKotlinMetadataAttr.TYPE)) return null
 	if (metadata.metadataVersion.isEmpty()) {
 		root().errorsCounter.addAnalysisExclusion(
 			MALFORMED_METADATA_CATEGORY,

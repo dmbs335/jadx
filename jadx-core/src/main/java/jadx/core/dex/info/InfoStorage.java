@@ -6,19 +6,37 @@ import java.util.Map;
 import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.utils.Utils;
 
 public class InfoStorage {
 
-	private final Map<ArgType, ClassInfo> classes = new HashMap<>();
-	private final Map<String, ArgType> types = new HashMap<>();
-	private final Map<String, ClassInfo> classesByInputName = new HashMap<>();
-	private final Map<FieldInfo, FieldInfo> fields = new HashMap<>();
+	private Map<ArgType, ClassInfo> classes = new HashMap<>();
+	private Map<String, ArgType> types = new HashMap<>();
+	private Map<String, ClassInfo> classesByInputName = new HashMap<>();
+	private Map<FieldInfo, FieldInfo> fields = new HashMap<>();
 	// use only one MethodInfo instance
-	private final Map<MethodInfo, MethodInfo> uniqueMethods = new HashMap<>();
+	private Map<MethodInfo, MethodInfo> uniqueMethods = new HashMap<>();
 	// can contain same method with different ids (from different files)
-	private final Map<Integer, MethodInfo> methods = new HashMap<>();
+	private Map<Integer, MethodInfo> methods = new HashMap<>();
 
 	private final Map<String, PackageInfo> packages = new HashMap<>();
+
+	public void prepare(int classesCount, int methodsCount, int fieldsCount, int typesCount) {
+		if (!classes.isEmpty() || !types.isEmpty() || !classesByInputName.isEmpty()
+				|| !fields.isEmpty() || !uniqueMethods.isEmpty() || !methods.isEmpty()) {
+			return;
+		}
+		classes = newMap(typesCount);
+		types = newMap(typesCount);
+		classesByInputName = newMap(classesCount);
+		fields = newMap(fieldsCount);
+		uniqueMethods = newMap(methodsCount);
+		methods = newMap(methodsCount);
+	}
+
+	private static <K, V> Map<K, V> newMap(int expectedSize) {
+		return expectedSize > 0 ? Utils.newHashMap(expectedSize) : new HashMap<>();
+	}
 
 	public ClassInfo getCls(ArgType type) {
 		return classes.get(type);

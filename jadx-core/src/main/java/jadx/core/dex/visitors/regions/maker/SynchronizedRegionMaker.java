@@ -131,7 +131,7 @@ public class SynchronizedRegionMaker {
 			}
 			if (isDirectLoopBack(next, innerLoop)) {
 				// Keep a branch which only releases the monitor and continues the loop inside
-				// the synchronized region.  A different exit can still have real work which
+				// the synchronized region. A different exit can still have real work which
 				// must be emitted after the monitor (for example Okio's watchdog callback).
 				directLoopBacks.add(next);
 				continue;

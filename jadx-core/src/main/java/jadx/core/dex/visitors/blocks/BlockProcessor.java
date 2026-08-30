@@ -77,8 +77,15 @@ public class BlockProcessor extends AbstractVisitor {
 			computeDominators(mth);
 		}
 		FixMultiEntryLoops.ProcessResult multiEntryResult = FixMultiEntryLoops.process(mth);
-		if (multiEntryResult.isChanged()) {
+		if (multiEntryResult.isFailed()) {
+			validateGraphIntegrity(mth);
+			throw new JadxRuntimeException(
+					"Multi-entry loop recovery failed after a possible CFG mutation; further transforms aborted");
+		}
+		if (multiEntryResult.isGraphRefreshRequired()) {
 			computeDominators(mth);
+		}
+		if (multiEntryResult.isChanged()) {
 			if (multiEntryResult.processAdditionalCoroutinePasses()) {
 				int additionalMultiEntryFixPass = 0;
 				while (FixMultiEntryLoops.processAdditionalCoroutinePass(mth)) {
@@ -135,6 +142,46 @@ public class BlockProcessor extends AbstractVisitor {
 		PostDominatorTree.compute(mth);
 
 		updateCleanSuccessors(mth);
+	}
+
+	/**
+	 * Check the minimum invariants required before any later CFG pass can safely run. This is kept
+	 * independent of dominance data so it can also validate a recovery pass which failed while
+	 * rewriting edges.
+	 */
+	static void validateGraphIntegrity(MethodNode mth) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		Set<BlockNode> blockSet = new HashSet<>(blocks);
+		if (blockSet.size() != blocks.size()) {
+			throw new JadxRuntimeException("Duplicate block in method CFG");
+		}
+		if (!blockSet.contains(mth.getEnterBlock()) || !blockSet.contains(mth.getExitBlock())) {
+			throw new JadxRuntimeException("Method entry or exit is missing from CFG");
+		}
+		for (BlockNode block : blocks) {
+			validateConnectedBlocks(block, block.getSuccessors(), blockSet, true);
+			validateConnectedBlocks(block, block.getPredecessors(), blockSet, false);
+		}
+	}
+
+	private static void validateConnectedBlocks(
+			BlockNode block,
+			List<BlockNode> connected,
+			Set<BlockNode> blockSet,
+			boolean successors) {
+		Set<BlockNode> unique = new HashSet<>();
+		for (BlockNode other : connected) {
+			if (other == null || !blockSet.contains(other)) {
+				throw new JadxRuntimeException("CFG edge points outside method: " + block + " -> " + other);
+			}
+			if (!unique.add(other)) {
+				throw new JadxRuntimeException("Duplicate CFG edge: " + block + " -> " + other);
+			}
+			List<BlockNode> reverse = successors ? other.getPredecessors() : other.getSuccessors();
+			if (!reverse.contains(block)) {
+				throw new JadxRuntimeException("One-sided CFG edge: " + block + " -> " + other);
+			}
+		}
 	}
 
 	/**

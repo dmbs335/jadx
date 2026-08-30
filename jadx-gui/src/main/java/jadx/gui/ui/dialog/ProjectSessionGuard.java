@@ -15,7 +15,11 @@ final class ProjectSessionGuard {
 	}
 
 	boolean isActive() {
-		return !closed.get() && currentGeneration.getAsLong() == ownerGeneration;
+		return !closed.get() && ownsCurrentGeneration();
+	}
+
+	boolean ownsCurrentGeneration() {
+		return currentGeneration.getAsLong() == ownerGeneration;
 	}
 
 	boolean close() {

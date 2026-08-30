@@ -4,6 +4,7 @@ import jadx.core.dex.nodes.ClassNode
 import kotlin.metadata.KmClass
 import kotlin.metadata.isData
 import kotlin.metadata.jvm.KotlinClassMetadata
+import kotlin.metadata.jvm.Metadata
 
 // don't expose kotlinx.metadata.* types ?
 class KmClassWrapper private constructor(
@@ -30,7 +31,13 @@ class KmClassWrapper private constructor(
 
 		fun ClassNode.getWrapper(): KmClassWrapper? {
 			if (!hasKotlinClassMetadataKind()) return null
-			val metadata = getKotlinClassMetadata()
+			val metadata = getMetadata() ?: return null
+			return getWrapper(metadata)
+		}
+
+		fun ClassNode.getWrapper(metadata: Metadata): KmClassWrapper? {
+			if (!hasKotlinClassMetadataKind()) return null
+			val metadata = getKotlinClassMetadata(metadata)
 			val kmCls = (metadata as? KotlinClassMetadata.Class)?.kmClass ?: return null
 			return KmClassWrapper(this, kmCls)
 		}

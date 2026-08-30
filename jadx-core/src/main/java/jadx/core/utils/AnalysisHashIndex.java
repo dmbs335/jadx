@@ -3,9 +3,8 @@ package jadx.core.utils;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.channels.SeekableByteChannel;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -13,16 +12,16 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
-import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
-import java.util.zip.ZipEntry;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.ZipException;
 import java.util.zip.ZipFile;
 
@@ -30,28 +29,28 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import jadx.core.utils.exceptions.JadxRuntimeException;
 import jadx.core.utils.files.FileUtils;
 
 /**
- * Persistent exact-hash index guarded by a cheap semantic archive digest.
+ * Persistent exact-hash index for ZIP-family analysis inputs.
  *
  * <p>
- * Only valid ZIP-family inputs can hit the cache. Every entry's central-directory identity,
- * order, CRC and sizes are included, along with the raw central directory and APK signing block.
- * Non-archives, ZIP64 layouts and malformed archives deliberately fall back to a full SHA-256.
+ * A cryptographic hash of the complete archive is always calculated before a persisted entry can
+ * be reported as a hit. ZIP CRC and filesystem metadata are intentionally insufficient because an
+ * input can preserve both while changing payload bytes. Non-archives and malformed archives are
+ * deliberately treated as misses.
  * </p>
  */
 final class AnalysisHashIndex implements AutoCloseable {
 	private static final Logger LOG = LoggerFactory.getLogger(AnalysisHashIndex.class);
 	private static final int FORMAT_VERSION = 1;
 	private static final int MAX_ENTRIES = 4_096;
-	private static final int EOCD_MAX_SIZE = 65_557;
-	private static final byte[] APK_SIG_BLOCK_MAGIC = "APK Sig Block 42".getBytes(StandardCharsets.US_ASCII);
 	private static final String CACHE_PATH_PROPERTY = "jadx.analysis.hash-index";
+	private static final Map<Path, ReentrantLock> JVM_INDEX_LOCKS = new ConcurrentHashMap<>();
 
 	private final Path indexPath;
 	private final Map<String, CacheEntry> entries = new LinkedHashMap<>();
+	private final Set<String> updatedKeys = new HashSet<>();
 	private boolean dirty;
 	private long hitCount;
 	private long missCount;
@@ -72,14 +71,13 @@ final class AnalysisHashIndex implements AutoCloseable {
 	byte[] hash(Path file) throws IOException {
 		Path normalized = file.toAbsolutePath().normalize();
 		BasicFileAttributes attributes = Files.readAttributes(normalized, BasicFileAttributes.class);
-		String archiveDigest = buildArchiveDigest(normalized, attributes.size());
+		String contentHash = FileUtils.sha256Sum(normalized);
+		ensureUnchanged(normalized, attributes);
+		String archiveDigest = validateArchive(normalized) ? contentHash : null;
 		if (archiveDigest == null) {
 			missCount++;
-			byte[] hash = hexToBytes(FileUtils.sha256Sum(normalized));
-			ensureUnchanged(normalized, attributes);
-			return hash;
+			return hexToBytes(contentHash);
 		}
-		ensureUnchanged(normalized, attributes);
 		String key = encode(normalized.toString());
 		String fileKey = attributes.fileKey() == null ? "" : attributes.fileKey().toString();
 		String modified = attributes.lastModifiedTime().toString();
@@ -93,8 +91,6 @@ final class AnalysisHashIndex implements AutoCloseable {
 			return hexToBytes(cached.contentHash);
 		}
 		missCount++;
-		String contentHash = FileUtils.sha256Sum(normalized);
-		ensureUnchanged(normalized, attributes);
 		if (!entries.containsKey(key) && entries.size() >= MAX_ENTRIES) {
 			Iterator<String> iterator = entries.keySet().iterator();
 			if (iterator.hasNext()) {
@@ -104,6 +100,7 @@ final class AnalysisHashIndex implements AutoCloseable {
 		}
 		entries.put(key, new CacheEntry(
 				attributes.size(), modified, fileKey, archiveDigest, contentHash));
+		updatedKeys.add(key);
 		dirty = true;
 		return hexToBytes(contentHash);
 	}
@@ -131,15 +128,77 @@ final class AnalysisHashIndex implements AutoCloseable {
 			return;
 		}
 		try {
-			Files.createDirectories(indexPath.getParent());
-			Properties properties = new Properties();
-			properties.setProperty("format", Integer.toString(FORMAT_VERSION));
-			for (Map.Entry<String, CacheEntry> entry : entries.entrySet()) {
-				properties.setProperty("entry." + entry.getKey(), entry.getValue().serialize());
+			Path parent = indexPath.getParent();
+			Files.createDirectories(parent);
+			Path lockPath = indexPath.resolveSibling(indexPath.getFileName() + ".lock");
+			ReentrantLock jvmLock = JVM_INDEX_LOCKS.computeIfAbsent(lockPath, key -> new ReentrantLock());
+			jvmLock.lock();
+			try {
+				try (FileChannel lockChannel = FileChannel.open(
+						lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+						FileLock ignored = lockChannel.lock()) {
+					Map<String, CacheEntry> merged = loadEntries(indexPath);
+					for (String key : updatedKeys) {
+						CacheEntry entry = entries.get(key);
+						if (entry != null) {
+							merged.remove(key);
+							merged.put(key, entry);
+						}
+					}
+					trimToLimit(merged);
+					persistEntries(parent, merged);
+				}
+				dirty = false;
+				updatedKeys.clear();
+			} finally {
+				jvmLock.unlock();
 			}
-			Path temporary = indexPath.resolveSibling(indexPath.getFileName() + ".tmp");
+		} catch (Exception e) {
+			LOG.debug("Failed to persist analysis hash index: {}", indexPath, e);
+		}
+	}
+
+	private void load() {
+		entries.putAll(loadEntries(indexPath));
+	}
+
+	private static Map<String, CacheEntry> loadEntries(Path path) {
+		Map<String, CacheEntry> loaded = new LinkedHashMap<>();
+		if (!Files.isRegularFile(path)) {
+			return loaded;
+		}
+		try (InputStream input = Files.newInputStream(path)) {
+			Properties properties = new Properties();
+			properties.load(input);
+			if (!Integer.toString(FORMAT_VERSION).equals(properties.getProperty("format"))) {
+				return loaded;
+			}
+			for (String name : properties.stringPropertyNames()) {
+				if (!name.startsWith("entry.") || loaded.size() >= MAX_ENTRIES) {
+					continue;
+				}
+				CacheEntry entry = CacheEntry.parse(properties.getProperty(name));
+				if (entry != null) {
+					loaded.put(name.substring("entry.".length()), entry);
+				}
+			}
+		} catch (Exception e) {
+			LOG.debug("Ignoring unreadable analysis hash index: {}", path, e);
+			loaded.clear();
+		}
+		return loaded;
+	}
+
+	private void persistEntries(Path parent, Map<String, CacheEntry> merged) throws IOException {
+		Properties properties = new Properties();
+		properties.setProperty("format", Integer.toString(FORMAT_VERSION));
+		for (Map.Entry<String, CacheEntry> entry : merged.entrySet()) {
+			properties.setProperty("entry." + entry.getKey(), entry.getValue().serialize());
+		}
+		Path temporary = Files.createTempFile(parent, indexPath.getFileName().toString(), ".tmp");
+		try {
 			try (OutputStream output = Files.newOutputStream(
-					temporary, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+					temporary, StandardOpenOption.TRUNCATE_EXISTING)) {
 				properties.store(output, "jadx verified analysis content hashes");
 			}
 			try {
@@ -148,183 +207,33 @@ final class AnalysisHashIndex implements AutoCloseable {
 			} catch (AtomicMoveNotSupportedException e) {
 				Files.move(temporary, indexPath, StandardCopyOption.REPLACE_EXISTING);
 			}
-		} catch (Exception e) {
-			LOG.debug("Failed to persist analysis hash index: {}", indexPath, e);
+		} finally {
+			Files.deleteIfExists(temporary);
 		}
 	}
 
-	private void load() {
-		if (!Files.isRegularFile(indexPath)) {
-			return;
-		}
-		try (InputStream input = Files.newInputStream(indexPath)) {
-			Properties properties = new Properties();
-			properties.load(input);
-			if (!Integer.toString(FORMAT_VERSION).equals(properties.getProperty("format"))) {
+	private static void trimToLimit(Map<String, CacheEntry> values) {
+		while (values.size() > MAX_ENTRIES) {
+			Iterator<String> iterator = values.keySet().iterator();
+			if (!iterator.hasNext()) {
 				return;
 			}
-			for (String name : properties.stringPropertyNames()) {
-				if (!name.startsWith("entry.") || entries.size() >= MAX_ENTRIES) {
-					continue;
-				}
-				CacheEntry entry = CacheEntry.parse(properties.getProperty(name));
-				if (entry != null) {
-					entries.put(name.substring("entry.".length()), entry);
-				}
-			}
-		} catch (Exception e) {
-			LOG.debug("Ignoring unreadable analysis hash index: {}", indexPath, e);
-			entries.clear();
+			iterator.next();
+			iterator.remove();
 		}
 	}
 
-	private static @Nullable String buildArchiveDigest(Path file, long fileSize) throws IOException {
+	private static boolean validateArchive(Path file) throws IOException {
 		String name = file.getFileName().toString().toLowerCase(Locale.ROOT);
 		if (!(name.endsWith(".apk") || name.endsWith(".xapk") || name.endsWith(".apks")
 				|| name.endsWith(".aab") || name.endsWith(".jar") || name.endsWith(".zip"))) {
-			return null;
+			return false;
 		}
 		try (ZipFile zip = new ZipFile(file.toFile())) {
-			MessageDigest digest = sha256();
-			Enumeration<? extends ZipEntry> enumeration = zip.entries();
-			while (enumeration.hasMoreElements()) {
-				ZipEntry entry = enumeration.nextElement();
-				update(digest, entry.getName());
-				update(digest, entry.getCrc());
-				update(digest, entry.getSize());
-				update(digest, entry.getCompressedSize());
-				update(digest, entry.getMethod());
-				byte[] extra = entry.getExtra();
-				if (extra != null) {
-					update(digest, extra.length);
-					digest.update(extra);
-				} else {
-					update(digest, 0);
-				}
-			}
-			if (!hashArchiveFooter(file, fileSize, digest)) {
-				return null;
-			}
-			return FileUtils.bytesToHex(digest.digest());
-		} catch (ZipException e) {
-			return null;
-		}
-	}
-
-	private static boolean hashArchiveFooter(Path file, long fileSize, MessageDigest digest) throws IOException {
-		int tailSize = (int) Math.min(fileSize, EOCD_MAX_SIZE);
-		byte[] tail = new byte[tailSize];
-		try (SeekableByteChannel channel = Files.newByteChannel(file, StandardOpenOption.READ)) {
-			channel.position(fileSize - tailSize);
-			readFully(channel, ByteBuffer.wrap(tail));
-			int eocd = findEocd(tail);
-			if (eocd == -1) {
-				return false;
-			}
-			long centralSize = uint32(tail, eocd + 12);
-			long centralOffset = uint32(tail, eocd + 16);
-			if (centralSize == 0xFFFF_FFFFL || centralOffset == 0xFFFF_FFFFL
-					|| centralOffset + centralSize > fileSize) {
-				return false;
-			}
-			hashRange(channel, centralOffset, fileSize - centralOffset, digest);
-			hashApkSigningBlock(channel, centralOffset, digest);
+			zip.size();
 			return true;
-		}
-	}
-
-	private static void hashApkSigningBlock(
-			SeekableByteChannel channel, long centralOffset, MessageDigest digest) throws IOException {
-		if (centralOffset < 24) {
-			return;
-		}
-		ByteBuffer footer = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN);
-		channel.position(centralOffset - 24);
-		readFully(channel, footer);
-		byte[] bytes = footer.array();
-		for (int i = 0; i < APK_SIG_BLOCK_MAGIC.length; i++) {
-			if (bytes[8 + i] != APK_SIG_BLOCK_MAGIC[i]) {
-				return;
-			}
-		}
-		long payloadSize = footer.getLong(0);
-		long totalSize = payloadSize + 8;
-		if (payloadSize < 24 || totalSize > centralOffset) {
-			throw new IOException("Invalid APK signing block size");
-		}
-		hashRange(channel, centralOffset - totalSize, totalSize, digest);
-	}
-
-	private static int findEocd(byte[] tail) {
-		for (int i = tail.length - 22; i >= 0; i--) {
-			if (tail[i] == 0x50 && tail[i + 1] == 0x4b
-					&& tail[i + 2] == 0x05 && tail[i + 3] == 0x06
-					&& i + 22 + uint16(tail, i + 20) == tail.length) {
-				return i;
-			}
-		}
-		return -1;
-	}
-
-	private static long uint32(byte[] bytes, int offset) {
-		return Integer.toUnsignedLong(ByteBuffer.wrap(bytes, offset, 4)
-				.order(ByteOrder.LITTLE_ENDIAN).getInt());
-	}
-
-	private static int uint16(byte[] bytes, int offset) {
-		return Short.toUnsignedInt(ByteBuffer.wrap(bytes, offset, 2)
-				.order(ByteOrder.LITTLE_ENDIAN).getShort());
-	}
-
-	private static void hashRange(
-			SeekableByteChannel channel, long offset, long length, MessageDigest digest) throws IOException {
-		channel.position(offset);
-		ByteBuffer buffer = ByteBuffer.allocate(64 * 1024);
-		long remaining = length;
-		while (remaining > 0) {
-			buffer.clear();
-			buffer.limit((int) Math.min(buffer.capacity(), remaining));
-			int read = channel.read(buffer);
-			if (read < 0) {
-				throw new IOException("Unexpected end of archive");
-			}
-			if (read == 0) {
-				throw new IOException("Unable to make progress while hashing archive");
-			}
-			digest.update(buffer.array(), 0, read);
-			remaining -= read;
-		}
-	}
-
-	private static void readFully(SeekableByteChannel channel, ByteBuffer buffer) throws IOException {
-		while (buffer.hasRemaining()) {
-			int read = channel.read(buffer);
-			if (read < 0) {
-				throw new IOException("Unexpected end of archive");
-			}
-			if (read == 0) {
-				throw new IOException("Unable to make progress while reading archive");
-			}
-		}
-	}
-
-	private static MessageDigest sha256() {
-		try {
-			return MessageDigest.getInstance("SHA-256");
-		} catch (NoSuchAlgorithmException e) {
-			throw new JadxRuntimeException("SHA-256 is unavailable", e);
-		}
-	}
-
-	private static void update(MessageDigest digest, String value) {
-		byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-		update(digest, bytes.length);
-		digest.update(bytes);
-	}
-
-	private static void update(MessageDigest digest, long value) {
-		for (int shift = 56; shift >= 0; shift -= 8) {
-			digest.update((byte) (value >>> shift));
+		} catch (ZipException e) {
+			return false;
 		}
 	}
 

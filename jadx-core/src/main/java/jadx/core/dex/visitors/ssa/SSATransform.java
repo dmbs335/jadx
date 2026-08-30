@@ -307,7 +307,9 @@ public class SSATransform extends AbstractVisitor {
 			for (int i = 0; i < instructionsCount; i++) {
 				InsnNode insn = instructions.get(i);
 				if (insn.getType() != InsnType.PHI) {
-					for (InsnArg arg : insn.getArguments()) {
+					int argsCount = insn.getArgsCount();
+					for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+						InsnArg arg = insn.getArg(argIndex);
 						if (arg.isRegister()) {
 							state.set(((RegisterArg) arg).getRegNum());
 						}
@@ -326,7 +328,8 @@ public class SSATransform extends AbstractVisitor {
 				availableRegs[dominated.getId()] = (BitSet) state.clone();
 				stack.push(dominated);
 			} else if (dominatedCount > 1) {
-				for (BlockNode dominated : dominatesOn) {
+				for (int dominatedIndex = 0; dominatedIndex < dominatedCount; dominatedIndex++) {
+					BlockNode dominated = dominatesOn.get(dominatedIndex);
 					BitSet dominatedState = (BitSet) state.clone();
 					availableRegs[dominated.getId()] = dominatedState;
 					stack.push(dominated);

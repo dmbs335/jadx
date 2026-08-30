@@ -17,19 +17,19 @@ public class TestTryProtectedIteratorBooleanActionResumeTail extends SmaliTest {
 		assertThat(searchCls(
 				loadFromSmaliFiles(),
 				"loops.TestTryProtectedIteratorBooleanActionResumeTail"))
-					.code()
-					.containsOne(
-							"Split try-protected iterator Boolean action resume tail before loop")
-					.contains("while (")
-					.contains("hasNext()")
-					.contains("next()")
-					.contains("action(")
-					.contains("booleanValue()")
-					.contains("cleanup()")
-					.contains("catch (Throwable")
-					.doesNotContain("Unsupported multi-entry loop pattern")
-					.doesNotContain("Recursive region processing prevented")
-					.doesNotContain("Method not decompiled")
-					.doesNotContain("JADX ERROR");
+						.code()
+						.containsOne(
+								"Split try-protected iterator Boolean action resume tail before loop")
+						.contains("while (")
+						.contains("hasNext()")
+						.contains("next()")
+						.contains("action(")
+						.contains("booleanValue()")
+						.contains("cleanup()")
+						.contains("catch (Throwable")
+						.doesNotContain("Unsupported multi-entry loop pattern")
+						.doesNotContain("Recursive region processing prevented")
+						.doesNotContain("Method not decompiled")
+						.doesNotContain("JADX ERROR");
 	}
 }

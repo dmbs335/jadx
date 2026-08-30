@@ -1,7 +1,6 @@
 package jadx.core.dex.visitors.rename;
 
 import java.io.File;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -19,6 +18,7 @@ import jadx.core.dex.attributes.nodes.MethodOverrideAttr;
 import jadx.core.dex.attributes.nodes.RenameReasonAttr;
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.info.FieldInfo;
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.MethodNode;
@@ -196,13 +196,10 @@ public class RenameVisitor extends AbstractVisitor {
 	}
 
 	private static void checkMethods(IAliasProvider aliasProvider, ClassNode cls, JadxArgs args) {
-		List<MethodNode> methods = new ArrayList<>(cls.getMethods().size());
-		for (MethodNode method : cls.getMethods()) {
-			if (!method.getAccessFlags().isConstructor()) {
-				methods.add(method);
+		for (MethodNode mth : cls.getMethods()) {
+			if (mth.getAccessFlags().isConstructor()) {
+				continue;
 			}
-		}
-		for (MethodNode mth : methods) {
 			String alias = mth.getAlias();
 			boolean notValid = args.isRenameValid() && !NameMapper.isValidIdentifier(alias);
 			boolean notPrintable = args.isRenamePrintable() && !NameMapper.isAllCharsPrintable(alias);
@@ -213,14 +210,46 @@ public class RenameVisitor extends AbstractVisitor {
 		}
 		// Rename methods with same signature
 		if (args.isRenameValid()) {
-			Set<String> names = new HashSet<>(methods.size());
-			for (MethodNode mth : methods) {
-				String signature = mth.getMethodInfo().makeSignature(true, false);
+			Set<MethodSignature> names = new HashSet<>(cls.getMethods().size());
+			for (MethodNode mth : cls.getMethods()) {
+				if (mth.getAccessFlags().isConstructor()) {
+					continue;
+				}
+				MethodSignature signature = new MethodSignature(mth.getAlias(), mth.getArgTypes());
 				if (!names.add(signature) && canRename(mth)) {
 					mth.rename(aliasProvider.forMethod(mth));
 					mth.addAttr(new RenameReasonAttr("collision with other method in class"));
 				}
 			}
+		}
+	}
+
+	private static final class MethodSignature {
+		private final String name;
+		private final List<ArgType> argTypes;
+		private final int hash;
+
+		private MethodSignature(String name, List<ArgType> argTypes) {
+			this.name = name;
+			this.argTypes = argTypes;
+			this.hash = 31 * name.hashCode() + argTypes.hashCode();
+		}
+
+		@Override
+		public int hashCode() {
+			return hash;
+		}
+
+		@Override
+		public boolean equals(Object obj) {
+			if (this == obj) {
+				return true;
+			}
+			if (!(obj instanceof MethodSignature)) {
+				return false;
+			}
+			MethodSignature other = (MethodSignature) obj;
+			return name.equals(other.name) && argTypes.equals(other.argTypes);
 		}
 	}
 

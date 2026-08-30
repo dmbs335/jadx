@@ -49,16 +49,37 @@ public class DataAdapterHelper {
 	 * Read unsigned variable length integer (ULEB128 encoding)
 	 */
 	public static int readUVInt(DataInput in) throws IOException {
-		int result = 0;
-		for (int shift = 0; shift <= 28; shift += 7) {
-			int value = in.readUnsignedByte();
-			if (shift == 28 && (value & 0x78) != 0) {
-				throw new IOException("Unsigned variable integer overflow");
-			}
-			result |= (value & 0x7f) << shift;
-			if ((value & 0x80) == 0) {
-				return result;
-			}
+		int value = in.readUnsignedByte();
+		if ((value & 0x80) == 0) {
+			return value;
+		}
+		int result = value & 0x7f;
+
+		value = in.readUnsignedByte();
+		result |= (value & 0x7f) << 7;
+		if ((value & 0x80) == 0) {
+			return result;
+		}
+
+		value = in.readUnsignedByte();
+		result |= (value & 0x7f) << 14;
+		if ((value & 0x80) == 0) {
+			return result;
+		}
+
+		value = in.readUnsignedByte();
+		result |= (value & 0x7f) << 21;
+		if ((value & 0x80) == 0) {
+			return result;
+		}
+
+		value = in.readUnsignedByte();
+		if ((value & 0x78) != 0) {
+			throw new IOException("Unsigned variable integer overflow");
+		}
+		result |= (value & 0x7f) << 28;
+		if ((value & 0x80) == 0) {
+			return result;
 		}
 		throw new IOException("Unsigned variable integer is too long");
 	}

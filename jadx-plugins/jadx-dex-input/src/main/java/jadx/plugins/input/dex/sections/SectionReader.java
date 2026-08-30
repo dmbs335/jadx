@@ -164,11 +164,19 @@ public class SectionReader {
 		int typeIdsOff = dexReader.getHeader().getTypeIdsOff();
 		absPos(typeIdsOff + idx * 4);
 		int strIdx = readInt();
-		return getString(strIdx);
+		return getStringCached(strIdx);
 	}
 
 	@Nullable
 	public String getString(int idx) {
+		return getString(idx, false);
+	}
+
+	public String getStringCached(int idx) {
+		return getString(idx, true);
+	}
+
+	private String getString(int idx, boolean cacheImmediately) {
 		if (idx == NO_INDEX) {
 			return null;
 		}
@@ -177,7 +185,7 @@ public class SectionReader {
 			return cached;
 		}
 		// The first read only marks this index; repeated values are decoded once more and then cached.
-		boolean cacheString = dexReader.shouldCacheString(idx);
+		boolean cacheString = cacheImmediately || dexReader.shouldCacheString(idx);
 		int stringIdsOff = dexReader.getHeader().getStringIdsOff();
 		absPos(stringIdsOff + idx * 4);
 		int strOff = readInt();
@@ -199,7 +207,7 @@ public class SectionReader {
 		int classTypeIdx = readUShort();
 		int typeIdx = readUShort();
 		int nameIdx = readInt();
-		visitor.accept(getType(classTypeIdx), getString(nameIdx), getType(typeIdx));
+		visitor.accept(getType(classTypeIdx), getStringCached(nameIdx), getType(typeIdx));
 	}
 
 	public int fillFieldData(DexFieldData fieldData, int idx) {
@@ -209,7 +217,7 @@ public class SectionReader {
 		int typeIdx = readUShort();
 		int nameIdx = readInt();
 		fieldData.setType(getType(typeIdx));
-		fieldData.setName(getString(nameIdx));
+		fieldData.setName(getStringCached(nameIdx));
 		return classTypeIdx;
 	}
 
@@ -285,7 +293,7 @@ public class SectionReader {
 
 		List<String> argTypes = readTypeListAt(paramsOff);
 		methodRef.setParentClassType(getType(classTypeIdx));
-		methodRef.setName(getString(nameIdx));
+		methodRef.setName(getStringCached(nameIdx));
 		methodRef.setReturnType(getType(returnTypeIdx));
 		methodRef.setArgTypes(argTypes);
 	}

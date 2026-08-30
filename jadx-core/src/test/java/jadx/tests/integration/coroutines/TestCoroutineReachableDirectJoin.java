@@ -12,9 +12,9 @@ public class TestCoroutineReachableDirectJoin extends SmaliTest {
 	public void test() {
 		disableCompilation();
 		assertThat(getClassNodeFromSmali())
-						.code()
-						.doesNotContain("Code duplicated")
-						.containsOne("tail();")
-						.containsOne("emit(continuation)");
+				.code()
+				.doesNotContain("Code duplicated")
+				.containsOne("tail();")
+				.containsOne("emit(continuation)");
 	}
 }

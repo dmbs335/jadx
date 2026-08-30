@@ -56,6 +56,7 @@ import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 import jadx.core.utils.files.FileUtils;
 import jadx.core.utils.tasks.TaskExecutor;
+import jadx.core.xmlgen.ResourceOutputRegistry;
 import jadx.core.xmlgen.ResourcesSaver;
 import jadx.zip.ZipReader;
 
@@ -112,6 +113,7 @@ public final class JadxDecompiler implements Closeable {
 
 	private IJadxEvents events = new JadxEventsImpl();
 	private @Nullable String analysisFingerprint;
+	private @Nullable AnalysisFingerprint.InputIdentity analysisInputIdentity;
 
 	public JadxDecompiler() {
 		this(new JadxArgs());
@@ -200,6 +202,7 @@ public final class JadxDecompiler implements Closeable {
 		classes = null;
 		resources = null;
 		analysisFingerprint = null;
+		analysisInputIdentity = null;
 		pendingInputErrors.clear();
 		pendingInputExclusions.clear();
 		events.reset();
@@ -211,7 +214,10 @@ public final class JadxDecompiler implements Closeable {
 	 */
 	public synchronized String getAnalysisFingerprint() {
 		if (analysisFingerprint == null) {
-			analysisFingerprint = AnalysisFingerprint.build(args, this);
+			if (analysisInputIdentity == null) {
+				analysisInputIdentity = AnalysisFingerprint.buildInputIdentity(args);
+			}
+			analysisFingerprint = AnalysisFingerprint.build(args, this, analysisInputIdentity);
 		}
 		return analysisFingerprint;
 	}
@@ -413,10 +419,16 @@ public final class JadxDecompiler implements Closeable {
 		if (args.isSkipFilesSave()) {
 			return;
 		}
+		List<ResourceFile> resourceFiles = getResources();
+		List<String> knownOutputPaths = resourceFiles.stream()
+				.map(ResourceFile::getDeobfName)
+				.collect(Collectors.toCollection(ArrayList::new));
+		knownOutputPaths.add("res/values/public.xml");
+		ResourceOutputRegistry outputRegistry = new ResourceOutputRegistry(knownOutputPaths);
 		// process AndroidManifest.xml first to load complete resource ids table
-		for (ResourceFile resourceFile : getResources()) {
+		for (ResourceFile resourceFile : resourceFiles) {
 			if (resourceFile.getType() == ResourceType.MANIFEST) {
-				new ResourcesSaver(this, outDir, resourceFile).run();
+				new ResourcesSaver(this, outDir, resourceFile, outputRegistry).run();
 				break;
 			}
 		}
@@ -426,7 +438,7 @@ public final class JadxDecompiler implements Closeable {
 		Set<String> codeSources = collectCodeSources();
 
 		List<Runnable> tasks = new ArrayList<>();
-		for (ResourceFile resourceFile : getResources()) {
+		for (ResourceFile resourceFile : resourceFiles) {
 			ResourceType resType = resourceFile.getType();
 			if (resType == ResourceType.MANIFEST) {
 				// already processed
@@ -442,7 +454,7 @@ public final class JadxDecompiler implements Closeable {
 				// do not trust file extensions, use only sources set as class inputs
 				continue;
 			}
-			tasks.add(new ResourcesSaver(this, outDir, resourceFile));
+			tasks.add(new ResourcesSaver(this, outDir, resourceFile, outputRegistry));
 		}
 		addOutputTaskWaves(executor, tasks);
 	}
@@ -503,7 +515,7 @@ public final class JadxDecompiler implements Closeable {
 					} catch (Exception e) {
 						LOG.error("Error saving class: {}", cls, e);
 					}
-			}
+				}
 
 			});
 		}
@@ -618,9 +630,11 @@ public final class JadxDecompiler implements Closeable {
 	 * Release transient class decompilation data after a completed task while keeping generated
 	 * code in the configured code cache. A later cache miss rebuilds the class from its input.
 	 *
-	 * <p>This method must only be called at a task boundary, when no decompiler worker is running.
+	 * <p>
+	 * This method must only be called at a task boundary, when no decompiler worker is running.
 	 * It is intentionally not used between parallel decompilation batches because dependencies can
-	 * still reference the current class graph until the whole task has completed.</p>
+	 * still reference the current class graph until the whole task has completed.
+	 * </p>
 	 *
 	 * @return number of top-level classes whose transient data was released
 	 */

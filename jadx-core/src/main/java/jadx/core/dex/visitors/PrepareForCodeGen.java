@@ -756,7 +756,8 @@ public class PrepareForCodeGen extends AbstractVisitor {
 
 	/**
 	 * Fold the common prefix
-	 * {@code finalStatic = OWNER.FIELD; requireNonNull(value); this/super(...)} into constructor arguments.
+	 * {@code finalStatic = OWNER.FIELD; requireNonNull(value); this/super(...)} into constructor
+	 * arguments.
 	 * Both operations are inserted at their first direct constructor uses only when the argument order
 	 * reproduces the original prefix evaluation order exactly.
 	 */

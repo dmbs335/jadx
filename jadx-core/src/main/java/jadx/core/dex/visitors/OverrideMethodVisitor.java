@@ -105,15 +105,9 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 			} else {
 				ClspClass clsDetails = mth.root().getClsp().getClsDetails(superType);
 				if (clsDetails != null) {
-					Map<String, ClspMethod> methodsMap = clsDetails.getMethodsMap();
-					for (Map.Entry<String, ClspMethod> entry : methodsMap.entrySet()) {
-						String mthShortId = entry.getKey();
-						// do not check full signature, classpath methods can be trusted
-						// i.e. doesn't contain methods with same signature in one class
-						if (mthShortId.startsWith(signature)) {
-							overrideList.add(entry.getValue());
-							break;
-						}
+					ClspMethod overrideMth = searchOverriddenMethod(clsDetails, mth, signature);
+					if (overrideMth != null) {
+						overrideList.add(overrideMth);
 					}
 				}
 			}
@@ -137,10 +131,9 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 		// search by exact full signature (with return value) to fight obfuscation (see test
 		// 'TestOverrideWithSameName')
 		String shortId = mth.getMethodInfo().getShortId();
-		for (MethodNode supMth : cls.getMethods()) {
-			if (supMth.getMethodInfo().getShortId().equals(shortId) && !supMth.getAccessFlags().isStatic()) {
-				return supMth;
-			}
+		MethodNode exactMth = cls.searchMethodByShortId(shortId);
+		if (exactMth != null && !exactMth.getAccessFlags().isStatic()) {
+			return exactMth;
 		}
 		// search by signature without return value and check if return value is wider type
 		for (MethodNode supMth : cls.getMethods()) {
@@ -155,6 +148,23 @@ public class OverrideMethodVisitor extends AbstractVisitor {
 				if (res == TypeCompareEnum.UNKNOWN || res == TypeCompareEnum.CONFLICT) {
 					mth.addDebugComment("Possible override for method " + supMth.getMethodInfo().getFullId());
 				}
+			}
+		}
+		return null;
+	}
+
+	@Nullable
+	private ClspMethod searchOverriddenMethod(ClspClass cls, MethodNode mth, String signature) {
+		Map<String, ClspMethod> methodsMap = cls.getMethodsMap();
+		ClspMethod exactMth = methodsMap.get(mth.getMethodInfo().getShortId());
+		if (exactMth != null) {
+			return exactMth;
+		}
+		// Return types can be covariant, so an exact short id is not always available.
+		// Classpath methods can be trusted not to contain duplicate name-and-argument signatures.
+		for (Map.Entry<String, ClspMethod> entry : methodsMap.entrySet()) {
+			if (entry.getKey().startsWith(signature)) {
+				return entry.getValue();
 			}
 		}
 		return null;

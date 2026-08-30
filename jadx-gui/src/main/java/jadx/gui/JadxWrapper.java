@@ -152,6 +152,21 @@ public class JadxWrapper {
 	}
 
 	/**
+	 * Persist collected usage data after class preparation has completed. Calling
+	 * this immediately after {@link JadxDecompiler#load()} is too early because
+	 * prepare passes are initialized lazily on the first class access.
+	 */
+	public void persistUsageCacheAsync() {
+		JadxDecompiler currentDecompiler = decompiler;
+		if (currentDecompiler == null) {
+			return;
+		}
+		if (currentDecompiler.getArgs().getUsageInfoCache() instanceof UsageInfoCache) {
+			((UsageInfoCache) currentDecompiler.getArgs().getUsageInfoCache()).persistAsync();
+		}
+	}
+
+	/**
 	 * Disk cache require loaded classes to operate, but cache should be set before 'after load' event
 	 * to allow plugins decompile classes with cache enabled.
 	 * To resolve this, register last 'prepare' pass for cache initialization.
@@ -191,14 +206,15 @@ public class JadxWrapper {
 		switch (getSettings().getUsageCacheMode()) {
 			case NONE:
 				jadxArgs.setUsageInfoCache(new EmptyUsageInfoCache());
-				break;
+				return;
 			case MEMORY:
 				jadxArgs.setUsageInfoCache(new InMemoryUsageInfoCache());
-				break;
+				return;
 			case DISK:
 				jadxArgs.setUsageInfoCache(new UsageInfoCache(getProject().getCacheDir(), jadxArgs.getInputFiles()));
-				break;
+				return;
 		}
+		throw new IllegalStateException("Unexpected usage cache mode: " + getSettings().getUsageCacheMode());
 	}
 
 	public static CommonGuiPluginsContext initGuiPluginsContext(JadxDecompiler decompiler, MainWindow mainWindow) {

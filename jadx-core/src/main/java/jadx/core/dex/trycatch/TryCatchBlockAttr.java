@@ -183,14 +183,14 @@ public class TryCatchBlockAttr implements IJadxAttribute {
 
 	public List<TryEdge> getFallthroughTryEdges() {
 		List<TryEdge> edges = new LinkedList<>();
-		List<BlockNode> exploredBlocks = new ArrayList<>();
+		Set<BlockNode> exploredBlocks = new HashSet<>();
 		List<TryCatchBlockAttr> exploredTrys = new LinkedList<>();
 
 		getFallthroughTryEdges(edges, exploredBlocks, exploredTrys);
 		return edges;
 	}
 
-	public void getFallthroughTryEdges(List<TryEdge> edges, List<BlockNode> exploredBlocks, List<TryCatchBlockAttr> exploredTrys) {
+	public void getFallthroughTryEdges(List<TryEdge> edges, Set<BlockNode> exploredBlocks, List<TryCatchBlockAttr> exploredTrys) {
 		List<ExceptionHandler> mergedHandlers = getMergedHandlers();
 		Set<BlockNode> searchBlocks = new HashSet<>(getBlocks());
 		for (ExceptionHandler handler : mergedHandlers) {
@@ -204,15 +204,17 @@ public class TryCatchBlockAttr implements IJadxAttribute {
 	}
 
 	public List<TryEdge> getTryEdges() {
-		List<TryEdge> handlerEdges = getHandlerTryEdges();
-		List<TryEdge> fallthroughEdges = getFallthroughTryEdges();
-		List<TryEdge> edges = new ArrayList<>(handlerEdges.size() + fallthroughEdges.size());
-		edges.addAll(handlerEdges);
-		edges.addAll(fallthroughEdges);
-		return Collections.unmodifiableList(edges);
+		try (BlockUtils.PathCacheScope ignored = BlockUtils.enterPathCache()) {
+			List<TryEdge> handlerEdges = getHandlerTryEdges();
+			List<TryEdge> fallthroughEdges = getFallthroughTryEdges();
+			List<TryEdge> edges = new ArrayList<>(handlerEdges.size() + fallthroughEdges.size());
+			edges.addAll(handlerEdges);
+			edges.addAll(fallthroughEdges);
+			return Collections.unmodifiableList(edges);
+		}
 	}
 
-	private void exploreTryPath(List<TryEdge> edges, BlockNode blk, Set<BlockNode> searchBlocks, List<BlockNode> exploredBlocks,
+	private void exploreTryPath(List<TryEdge> edges, BlockNode blk, Set<BlockNode> searchBlocks, Set<BlockNode> exploredBlocks,
 			List<TryCatchBlockAttr> exploredTrys) {
 		for (BlockNode successor : blk.getSuccessors()) {
 			// If a separate branch has already explored this block, we don't need to recalculate its exits.
@@ -247,14 +249,16 @@ public class TryCatchBlockAttr implements IJadxAttribute {
 				}
 			}
 
-			boolean isPathToAnySearchBlock = false;
-			for (BlockNode searchBlock : searchBlocks) {
-				if (BlockUtils.isPathExists(successor, searchBlock)) {
-					isPathToAnySearchBlock = true;
-					break;
+			boolean isPathToAnySearchBlock = searchBlocks.contains(successor);
+			if (!isPathToAnySearchBlock) {
+				for (BlockNode searchBlock : searchBlocks) {
+					if (BlockUtils.isPathExists(successor, searchBlock)) {
+						isPathToAnySearchBlock = true;
+						break;
+					}
 				}
 			}
-			if (!searchBlocks.contains(successor) && !isPathToAnySearchBlock) {
+			if (!isPathToAnySearchBlock) {
 				// This block is not contained within this try's block list. This can either be since it is an exit
 				// to the try or it is a block which leads to an exit (for example, an exception handler).
 

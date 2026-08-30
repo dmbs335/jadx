@@ -1,6 +1,9 @@
 package jadx.plugins.input.dex;
 
+import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -25,6 +28,10 @@ import jadx.plugins.input.dex.sections.DexCodeReader;
 import jadx.plugins.input.dex.sections.SectionReader;
 import jadx.plugins.input.dex.sections.annotations.AnnotationsParser;
 import jadx.plugins.input.dex.utils.SmaliTestUtils;
+import jadx.zip.IZipEntry;
+import jadx.zip.IZipParser;
+import jadx.zip.ZipContent;
+import jadx.zip.ZipReader;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -33,6 +40,86 @@ class DexInputPluginTest {
 	@Test
 	public void loadSampleApk() throws Exception {
 		processFile(Paths.get(ClassLoader.getSystemResource("samples/app-with-fake-dex.apk").toURI()));
+	}
+
+	@Test
+	void inspectsNonDexEntriesWithoutMaterializingThem() {
+		byte[] resource = new byte[1024 * 1024];
+		resource[0] = (byte) 0x89;
+		resource[1] = 'P';
+		resource[2] = 'N';
+		resource[3] = 'G';
+		AtomicInteger streamBytesRead = new AtomicInteger();
+		IZipEntry entry = new IZipEntry() {
+			@Override
+			public String getName() {
+				return "res/drawable/large.png";
+			}
+
+			@Override
+			public byte[] getBytes() {
+				throw new AssertionError("Non-DEX entry must not be materialized");
+			}
+
+			@Override
+			public InputStream getInputStream() {
+				return new ByteArrayInputStream(resource) {
+					@Override
+					public synchronized int read(byte[] bytes, int offset, int length) {
+						int count = super.read(bytes, offset, length);
+						if (count > 0) {
+							streamBytesRead.addAndGet(count);
+						}
+						return count;
+					}
+				};
+			}
+
+			@Override
+			public long getCompressedSize() {
+				return resource.length;
+			}
+
+			@Override
+			public long getUncompressedSize() {
+				return resource.length;
+			}
+
+			@Override
+			public boolean isDirectory() {
+				return false;
+			}
+
+			@Override
+			public File getZipFile() {
+				return new File("sample.apk");
+			}
+
+			@Override
+			public boolean preferBytes() {
+				return true;
+			}
+		};
+		IZipParser parser = new IZipParser() {
+			@Override
+			public ZipContent open() {
+				return new ZipContent(this, List.of(entry));
+			}
+
+			@Override
+			public void close() {
+			}
+		};
+		DexFileLoader loader = new DexFileLoader(new DexInputOptions());
+		loader.setZipReader(new ZipReader() {
+			@Override
+			public ZipContent open(File file) throws IOException {
+				return parser.open();
+			}
+		});
+
+		assertThat(loader.collectDexFiles(List.of(Paths.get("sample.apk")))).isEmpty();
+		assertThat(streamBytesRead).hasValueLessThan(resource.length);
 	}
 
 	@Test
@@ -60,6 +147,21 @@ class DexInputPluginTest {
 
 		assertThat(first).isEqualTo(second).isNotSameAs(second);
 		assertThat(second).isSameAs(third);
+	}
+
+	@Test
+	public void cacheDexStructuralStringOnFirstRead() throws Exception {
+		Path sample = Paths.get(ClassLoader.getSystemResource("samples/hello.dex").toURI());
+		byte[] content = Files.readAllBytes(sample);
+		DexReader dexReader = new DexFileLoader(new DexInputOptions())
+				.loadDexReaders(sample.toString(), content)
+				.get(0);
+		SectionReader reader = new SectionReader(dexReader, 0);
+
+		String first = reader.getStringCached(0);
+		String second = reader.getString(0);
+
+		assertThat(first).isSameAs(second);
 	}
 
 	@Test
@@ -227,6 +329,10 @@ class DexInputPluginTest {
 		long start = System.currentTimeMillis();
 		List<Path> files = Collections.singletonList(sample);
 		try (ICodeLoader result = new DexInputPlugin().loadFiles(files)) {
+			assertThat(result.getClassesCount()).isPositive();
+			assertThat(result.getMethodsCount()).isPositive();
+			assertThat(result.getFieldsCount()).isNotNegative();
+			assertThat(result.getTypesCount()).isPositive();
 			AtomicInteger count = new AtomicInteger();
 			result.visitClasses(cls -> {
 				System.out.println();
@@ -257,7 +363,7 @@ class DexInputPluginTest {
 				System.out.println(cls.getDisassembledCode());
 				System.out.println("----");
 			});
-			assertThat(count.get()).isGreaterThan(0);
+			assertThat(count.get()).isEqualTo(result.getClassesCount());
 		}
 		System.out.println("Time: " + (System.currentTimeMillis() - start) + "ms");
 	}

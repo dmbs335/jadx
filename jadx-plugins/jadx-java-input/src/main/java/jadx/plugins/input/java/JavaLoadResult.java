@@ -40,6 +40,11 @@ public class JavaLoadResult implements ICodeLoader {
 	}
 
 	@Override
+	public int getClassesCount() {
+		return readers.size();
+	}
+
+	@Override
 	public boolean isEmpty() {
 		return readers.isEmpty();
 	}

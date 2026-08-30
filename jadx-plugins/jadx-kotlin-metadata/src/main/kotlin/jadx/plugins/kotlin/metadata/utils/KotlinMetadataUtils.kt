@@ -18,8 +18,10 @@ object KotlinMetadataUtils {
 	@JvmStatic
 	fun getAlias(cls: ClassNode): ClassAliasRename? {
 		val annotation = cls.getMetadata() ?: return null
-		return getClassAlias(cls, annotation)
+		return getAlias(cls, annotation)
 	}
+
+	fun getAlias(cls: ClassNode, annotation: Metadata): ClassAliasRename? = getClassAlias(cls, annotation)
 
 	/**
 	 * Try to get class info from Kotlin Metadata annotation

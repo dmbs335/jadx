@@ -57,6 +57,7 @@ import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.trycatch.TryCatchBlockAttr;
 import jadx.core.dex.visitors.ProcessAnonymous;
 import jadx.core.dex.visitors.kotlin.CoroutineMethodUtils;
+import jadx.core.dex.visitors.kotlin.KtorCioRecovery;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.ListUtils;
 
@@ -269,8 +270,8 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		if (!hasExclusivePredecessor(
-						settingsCompletion.directSuccess,
-						settingsCompletion.suspendCheck)
+				settingsCompletion.directSuccess,
+				settingsCompletion.suspendCheck)
 				&& (!isMoveBlock(settingsCompletion.directSuccess, 4)
 						|| !settingsCompletion.directSuccess.getPredecessors()
 								.contains(settingsCompletion.suspendCheck))) {
@@ -900,8 +901,7 @@ public class FixMultiEntryLoops {
 				findObfuscatedThrowOnFailureArg(resumeEntry);
 		return obfuscatedArg != null
 				&& obfuscatedArg.getParentInsn() == invoke
-				&& obfuscatedArg.getRegNum()
-						== resultArg.getRegNum();
+				&& obfuscatedArg.getRegNum() == resultArg.getRegNum();
 	}
 
 	private static boolean areCoroutineMergeTypesCompatible(ArgType directType, ArgType resumeType) {
@@ -1034,8 +1034,8 @@ public class FixMultiEntryLoops {
 		return hasExclusivePredecessor(
 				obsoleteDirectPath, completion.suspendCheck)
 				&& obsoleteDirectPath.getSuccessors().stream()
-				.allMatch(successor -> successor.getPredecessors().stream()
-						.anyMatch(predecessor -> predecessor != obsoleteDirectPath));
+						.allMatch(successor -> successor.getPredecessors().stream()
+								.anyMatch(predecessor -> predecessor != obsoleteDirectPath));
 	}
 
 	static boolean hasExclusivePredecessor(
@@ -2066,8 +2066,7 @@ public class FixMultiEntryLoops {
 					break;
 				case SGET:
 					if (!(insn instanceof IndexInsnNode)
-							|| !(((IndexInsnNode) insn).getIndex()
-									instanceof FieldInfo)) {
+							|| !(((IndexInsnNode) insn).getIndex() instanceof FieldInfo)) {
 						return false;
 					}
 					FieldNode field = mth.root().resolveField(
@@ -2519,23 +2518,32 @@ public class FixMultiEntryLoops {
 	}
 
 	static final class ProcessResult {
-		private static final ProcessResult NO_CHANGE = new ProcessResult(false, false);
-		private static final ProcessResult CHANGED = new ProcessResult(true, false);
+		private static final ProcessResult NO_CHANGE = new ProcessResult(false, false, false, false);
+		private static final ProcessResult CHANGED = new ProcessResult(true, false, true, false);
+		private static final ProcessResult FAILED_MAY_HAVE_CHANGED = new ProcessResult(false, false, true, true);
 
 		private final boolean changed;
 		private final boolean additionalCoroutinePasses;
+		private final boolean graphRefreshRequired;
+		private final boolean failed;
 
-		private ProcessResult(boolean changed, boolean additionalCoroutinePasses) {
+		private ProcessResult(
+				boolean changed,
+				boolean additionalCoroutinePasses,
+				boolean graphRefreshRequired,
+				boolean failed) {
 			this.changed = changed;
 			this.additionalCoroutinePasses = additionalCoroutinePasses;
+			this.graphRefreshRequired = graphRefreshRequired;
+			this.failed = failed;
 		}
 
 		private static ProcessResult splitResumeLatch(boolean hasSequentialResumeLatch) {
-			return hasSequentialResumeLatch ? new ProcessResult(true, true) : CHANGED;
+			return hasSequentialResumeLatch ? new ProcessResult(true, true, true, false) : CHANGED;
 		}
 
 		private static ProcessResult continueCoroutinePass(boolean continuePass) {
-			return continuePass ? new ProcessResult(true, true) : CHANGED;
+			return continuePass ? new ProcessResult(true, true, true, false) : CHANGED;
 		}
 
 		boolean isChanged() {
@@ -2544,6 +2552,14 @@ public class FixMultiEntryLoops {
 
 		boolean processAdditionalCoroutinePasses() {
 			return additionalCoroutinePasses;
+		}
+
+		boolean isGraphRefreshRequired() {
+			return graphRefreshRequired;
+		}
+
+		boolean isFailed() {
+			return failed;
 		}
 	}
 
@@ -2581,9 +2597,8 @@ public class FixMultiEntryLoops {
 	 * Reuse it as the result transport only when it is large enough that dispatcher normalization
 	 * reduces, rather than expands, the region tree. Small bridges remain in their original form.
 	 */
-	private static boolean
-			normalizeDiscardedSequentialSuspendCompletionThroughStateDispatch(
-					MethodNode mth) {
+	private static boolean normalizeDiscardedSequentialSuspendCompletionThroughStateDispatch(
+			MethodNode mth) {
 		BlockNode reusableSuspendCheck = null;
 		DiscardedSequentialSuspendPlan reusablePlan = null;
 		for (BlockNode suspendCheck : mth.getBasicBlocks()) {
@@ -2594,9 +2609,8 @@ public class FixMultiEntryLoops {
 			}
 			if (plan.reuseDirectBridge) {
 				if (reusablePlan == null
-						|| plan.directSuccess.getInstructions().size()
-								> reusablePlan.directSuccess
-										.getInstructions().size()) {
+						|| plan.directSuccess.getInstructions().size() > reusablePlan.directSuccess
+								.getInstructions().size()) {
 					reusableSuspendCheck = suspendCheck;
 					reusablePlan = plan;
 				}
@@ -2606,8 +2620,7 @@ public class FixMultiEntryLoops {
 					BlockSplitter.insertBlockBetween(
 							mth, suspendCheck, plan.directSuccess);
 			dispatchBridge.add(AFlag.SYNTHETIC);
-			if (plan.transportSource.getRegNum()
-					!= plan.resumeResult.getRegNum()) {
+			if (plan.transportSource.getRegNum() != plan.resumeResult.getRegNum()) {
 				InsnNode transport = new InsnNode(InsnType.MOVE, 1);
 				transport.setResult(plan.resumeResult.duplicate());
 				transport.addArg(plan.transportSource.duplicate());
@@ -2628,7 +2641,7 @@ public class FixMultiEntryLoops {
 				block.updateCleanSuccessors();
 			}
 			if (!ListUtils.isSingleElement(
-							dispatchBridge.getPredecessors(), suspendCheck)
+					dispatchBridge.getPredecessors(), suspendCheck)
 					|| !ListUtils.isSingleElement(
 							dispatchBridge.getSuccessors(), plan.stateDispatch)
 					|| suspendCheck.getSuccessors()
@@ -2685,9 +2698,8 @@ public class FixMultiEntryLoops {
 		return false;
 	}
 
-	private static @Nullable DiscardedSequentialSuspendPlan
-			findDiscardedSequentialSuspendPlan(
-					MethodNode mth, BlockNode suspendCheck) {
+	private static @Nullable DiscardedSequentialSuspendPlan findDiscardedSequentialSuspendPlan(
+			MethodNode mth, BlockNode suspendCheck) {
 		InsnNode lastInsn = BlockUtils.getLastInsn(suspendCheck);
 		if (!(lastInsn instanceof IfNode)
 				|| suspendCheck.getPredecessors().size() != 1
@@ -2740,10 +2752,9 @@ public class FixMultiEntryLoops {
 		BlockNode resumeJoin = directSuccess;
 		boolean reuseDirectBridge = false;
 		if (ListUtils.isSingleElement(
-						directSuccess.getPredecessors(), suspendCheck)
+				directSuccess.getPredecessors(), suspendCheck)
 				&& directSuccess.getSuccessors().size() == 1
-				&& directSuccess.getInstructions().size()
-						>= MIN_WIDE_COROUTINE_MOVE_BRIDGE_SIZE
+				&& directSuccess.getInstructions().size() >= MIN_WIDE_COROUTINE_MOVE_BRIDGE_SIZE
 				&& isMoveBlock(directSuccess, 16)) {
 			BlockNode candidateJoin =
 					directSuccess.getSuccessors().get(0);
@@ -2879,8 +2890,7 @@ public class FixMultiEntryLoops {
 				continue;
 			}
 			if (match != null
-					&& match.getRegNum()
-							!= ((RegisterArg) arg).getRegNum()) {
+					&& match.getRegNum() != ((RegisterArg) arg).getRegNum()) {
 				return null;
 			}
 			match = (RegisterArg) arg;
@@ -2897,11 +2907,9 @@ public class FixMultiEntryLoops {
 		BlockNode block = start;
 		Set<BlockNode> visited = new HashSet<>();
 		boolean failureChecked = false;
-		for (int depth = 0;
-				depth <= maxDepth
-						&& block != null
-						&& visited.add(block);
-				depth++) {
+		for (int depth = 0; depth <= maxDepth
+				&& block != null
+				&& visited.add(block); depth++) {
 			if (block == join) {
 				return failureChecked
 						&& (allowOverwriteAfterFailureCheck
@@ -2924,8 +2932,7 @@ public class FixMultiEntryLoops {
 					failureChecked = true;
 				}
 				if (insn.getResult() != null
-						&& insn.getResult().getRegNum()
-								== resumeResult.getRegNum()) {
+						&& insn.getResult().getRegNum() == resumeResult.getRegNum()) {
 					return allowOverwriteAfterFailureCheck
 							&& failureChecked;
 				}
@@ -2945,9 +2952,7 @@ public class FixMultiEntryLoops {
 			int continuationReg,
 			int maxDepth) {
 		BlockNode block = start;
-		for (int depth = 0;
-				depth <= maxDepth && block != null;
-				depth++) {
+		for (int depth = 0; depth <= maxDepth && block != null; depth++) {
 			IndexInsnNode labelPut = findLabelPut(block);
 			if (labelPut != null
 					&& labelField.equals(labelPut.getIndex())) {
@@ -3685,7 +3690,9 @@ public class FixMultiEntryLoops {
 			if (reportUnsupported) {
 				mth.addWarnComment("Failed to fix multi-entry loops", e);
 			}
-			return ProcessResult.NO_CHANGE;
+			// Matchers are expected to validate before mutation, but this shared recovery boundary
+			// cannot prove that every matcher rolled back a partially-applied graph rewrite.
+			return ProcessResult.FAILED_MAY_HAVE_CHANGED;
 		}
 	}
 
@@ -4718,11 +4725,10 @@ public class FixMultiEntryLoops {
 	 * that exact dispatcher. Partial or ambiguous maps are rejected because redirecting only some
 	 * direct completions can merge a resumed result into the wrong post-suspend body.
 	 */
-	private static List<CoroutineSuspendCompletion>
-			findLocalObfuscatedCoroutineCompletions(
-					MethodNode mth,
-					Set<BlockNode> suspendChecks,
-					CoroutineSuspendCompletion reportedCompletion) {
+	private static List<CoroutineSuspendCompletion> findLocalObfuscatedCoroutineCompletions(
+			MethodNode mth,
+			Set<BlockNode> suspendChecks,
+			CoroutineSuspendCompletion reportedCompletion) {
 		List<CoroutineSuspendCompletion> completions = new ArrayList<>();
 		Set<Integer> stateKeys = new HashSet<>();
 		for (BlockNode suspendCheck : mth.getBasicBlocks()) {
@@ -4736,8 +4742,7 @@ public class FixMultiEntryLoops {
 								mth, suspendCheck, reportedCompletion);
 			}
 			if (completion == null
-					|| completion.stateDispatch
-							!= reportedCompletion.stateDispatch
+					|| completion.stateDispatch != reportedCompletion.stateDispatch
 					|| !completion.labelField.equals(
 							reportedCompletion.labelField)
 					|| !isCoroutineCompletionOutsideExceptionRegions(
@@ -4750,12 +4755,9 @@ public class FixMultiEntryLoops {
 			completions.add(completion);
 		}
 		boolean containsReported = completions.stream().anyMatch(
-				completion -> completion.suspendCheck
-								== reportedCompletion.suspendCheck
-						&& completion.stateKey
-								== reportedCompletion.stateKey
-						&& completion.stateDispatch
-								== reportedCompletion.stateDispatch
+				completion -> completion.suspendCheck == reportedCompletion.suspendCheck
+						&& completion.stateKey == reportedCompletion.stateKey
+						&& completion.stateDispatch == reportedCompletion.stateDispatch
 						&& completion.labelField.equals(
 								reportedCompletion.labelField));
 		if (!containsReported) {
@@ -4810,11 +4812,10 @@ public class FixMultiEntryLoops {
 	 * transport value, but only after proving the result-less continuation call, both final
 	 * singleton producers, the matching resume key and the shared local dispatcher.
 	 */
-	private static @Nullable CoroutineSuspendCompletion
-			findLocalObfuscatedDiscardedCoroutineCompletion(
-					MethodNode mth,
-					BlockNode suspendCheck,
-					CoroutineSuspendCompletion reportedCompletion) {
+	private static @Nullable CoroutineSuspendCompletion findLocalObfuscatedDiscardedCoroutineCompletion(
+			MethodNode mth,
+			BlockNode suspendCheck,
+			CoroutineSuspendCompletion reportedCompletion) {
 		InsnNode lastInsn = BlockUtils.getLastInsn(suspendCheck);
 		if (!(lastInsn instanceof IfNode)
 				|| suspendCheck.getPredecessors().size() != 1
@@ -4838,8 +4839,7 @@ public class FixMultiEntryLoops {
 		if (suspendInvoke == null
 				|| suspendInvoke.getResult() != null
 				|| !suspendInvoke.getCallMth().getReturnType().isObject()
-				|| suspendSetup.getInstructions().indexOf(labelPut)
-						>= suspendSetup.getInstructions().indexOf(suspendInvoke)) {
+				|| suspendSetup.getInstructions().indexOf(labelPut) >= suspendSetup.getInstructions().indexOf(suspendInvoke)) {
 			return null;
 		}
 		Integer stateKey =
@@ -4868,12 +4868,11 @@ public class FixMultiEntryLoops {
 				|| directSuccess == null
 				|| transportSource == null
 				|| findDiscardedCompletionValueProducer(
-								mth,
-								suspendSetup,
-								suspendInvoke,
-								(IfNode) lastInsn,
-								suspendedToken)
-						== null) {
+						mth,
+						suspendSetup,
+						suspendInvoke,
+						(IfNode) lastInsn,
+						suspendedToken) == null) {
 			return null;
 		}
 		IndexInsnNode labelGet =
@@ -4953,8 +4952,7 @@ public class FixMultiEntryLoops {
 					|| insn.getType() != InsnType.SGET
 					|| insn.getResult() == null
 					|| insn.getResult().getRegNum() != regNum
-					|| !(((IndexInsnNode) insn).getIndex()
-							instanceof FieldInfo)) {
+					|| !(((IndexInsnNode) insn).getIndex() instanceof FieldInfo)) {
 				continue;
 			}
 			FieldInfo field =
@@ -4980,8 +4978,7 @@ public class FixMultiEntryLoops {
 		RegisterArg comparedValue = null;
 		for (InsnArg arg : suspendIf.getArguments()) {
 			if (!(arg instanceof RegisterArg)
-					|| ((RegisterArg) arg).getRegNum()
-							== suspendedToken.getRegNum()) {
+					|| ((RegisterArg) arg).getRegNum() == suspendedToken.getRegNum()) {
 				continue;
 			}
 			if (comparedValue != null) {
@@ -4995,31 +4992,27 @@ public class FixMultiEntryLoops {
 		int invokeIndex =
 				suspendSetup.getInstructions().indexOf(suspendInvoke);
 		RegisterArg producer = null;
-		for (int i = invokeIndex + 1;
-				i < suspendSetup.getInstructions().size();
-				i++) {
+		for (int i = invokeIndex + 1; i < suspendSetup.getInstructions().size(); i++) {
 			InsnNode insn = suspendSetup.getInstructions().get(i);
 			if (insn.getResult() != null
-					&& insn.getResult().getRegNum()
-							== comparedValue.getRegNum()) {
+					&& insn.getResult().getRegNum() == comparedValue.getRegNum()) {
 				producer = insn.getResult();
 			}
 		}
 		if (producer == null
 				|| !(producer.getParentInsn() instanceof IndexInsnNode)
 				|| producer.getParentInsn().getType() != InsnType.SGET
-				|| !(((IndexInsnNode) producer.getParentInsn()).getIndex()
-						instanceof FieldInfo)) {
+				|| !(((IndexInsnNode) producer.getParentInsn()).getIndex() instanceof FieldInfo)) {
 			return null;
 		}
 		FieldInfo field =
 				(FieldInfo) ((IndexInsnNode) producer.getParentInsn()).getIndex();
 		FieldNode fieldNode = mth.root().resolveField(field);
 		return fieldNode != null
-						&& fieldNode.getAccessFlags().isStatic()
-						&& fieldNode.getAccessFlags().isFinal()
-				? producer
-				: null;
+				&& fieldNode.getAccessFlags().isStatic()
+				&& fieldNode.getAccessFlags().isFinal()
+						? producer
+						: null;
 	}
 
 	private static boolean hasCompetingCoroutineStateDispatch(
@@ -5303,19 +5296,16 @@ public class FixMultiEntryLoops {
 				isThreeStateSharedEmitReceiveLoopCandidate(mth, suspendChecks, multiEntryLoops);
 		boolean hasIteratorSuspend = suspendChecks.stream()
 				.map(
-						block ->
-								findLastResultInvoke(
-										block.getPredecessors().get(0)))
+						block -> findLastResultInvoke(
+								block.getPredecessors().get(0)))
 				.filter(invoke -> invoke != null)
 				.anyMatch(
-						invoke ->
-								isSuspendInvokeNamed(
-										invoke, "hasNext"));
+						invoke -> isSuspendInvokeNamed(
+								invoke, "hasNext"));
 		boolean hasOrdinaryIteratorTraversal = blocks.stream()
 				.anyMatch(
-						block ->
-								containsNonSuspendInvokeNamed(
-										block, "hasNext"));
+						block -> containsNonSuspendInvokeNamed(
+								block, "hasNext"));
 		if (suspendChecks.size() < 2
 				|| hasIteratorSuspend && !channelIteratorStateMachine
 				|| hasOrdinaryIteratorTraversal
@@ -5549,8 +5539,8 @@ public class FixMultiEntryLoops {
 								+ "-state sequential coroutine pipeline"
 								+ " through shared state dispatch"
 						: frameScaleAwaitLoop
-						? "Normalize two-state frame/scale await completions"
-								+ " through shared state dispatch"
+								? "Normalize two-state frame/scale await completions"
+										+ " through shared state dispatch"
 						: "Normalize " + completions.size()
 								+ "-state switch coroutine completions"
 								+ " through shared state dispatch");
@@ -5644,7 +5634,7 @@ public class FixMultiEntryLoops {
 		BlockNode frameCheck = frameCompletion.suspendCheck;
 		BlockNode frameDirect = frameCompletion.directSuccess;
 		if (!ListUtils.isSingleElement(
-					awaitDirect.getPredecessors(), awaitCompletion.suspendCheck)
+				awaitDirect.getPredecessors(), awaitCompletion.suspendCheck)
 				|| !ListUtils.isSingleElement(awaitDirect.getSuccessors(), frameCall)
 				|| frameCall.getPredecessors().size() != 2
 				|| !frameCall.getPredecessors().contains(awaitDirect)
@@ -5852,11 +5842,9 @@ public class FixMultiEntryLoops {
 		boolean callSetMatches =
 				suspendCalls.equals(Set.of("awaitFrameRequest", "withFrameNanos"));
 		boolean edgesMatch = multiEntryLoops.stream()
-						.allMatch(edge -> completions.stream()
-								.anyMatch(completion ->
-										edge.getStart() == completion.suspendCheck
-												|| edge.getEnd()
-														== completion.directSuccess));
+				.allMatch(edge -> completions.stream()
+						.anyMatch(completion -> edge.getStart() == completion.suspendCheck
+								|| edge.getEnd() == completion.directSuccess));
 		return callSetMatches && edgesMatch;
 	}
 
@@ -6275,11 +6263,11 @@ public class FixMultiEntryLoops {
 						|| !completion.labelField.equals(first.labelField));
 		boolean hasCompletionEdge = multiEntryLoops.stream()
 				.anyMatch(edge -> completions.stream().anyMatch(completion -> edge.getStart() == completion.suspendCheck
-								&& edge.getEnd() == completion.directSuccess
-								|| isShortCleanLinearPath(
-										completion.directSuccess, edge.getStart(), 3)
-										&& isShortCleanLinearPath(
-												edge.getEnd(), loopHeader, 4)));
+						&& edge.getEnd() == completion.directSuccess
+						|| isShortCleanLinearPath(
+								completion.directSuccess, edge.getStart(), 3)
+								&& isShortCleanLinearPath(
+										edge.getEnd(), loopHeader, 4)));
 		if (completionMismatch) {
 			return false;
 		}
@@ -6296,8 +6284,8 @@ public class FixMultiEntryLoops {
 							completion.resumeEntry, tailStart, 6);
 			List<BlockNode> tail = tailStart == null
 					? null
-						: collectBoundedDecisionSubgraph(
-								tailStart, loopHeader, 8);
+					: collectBoundedDecisionSubgraph(
+							tailStart, loopHeader, 8);
 			if (resumeSource == null
 					|| tail == null
 					|| tail.isEmpty()
@@ -8019,8 +8007,8 @@ public class FixMultiEntryLoops {
 						? "Normalize try-protected channel forward completion"
 								+ " through state dispatch"
 						: protectedActionOnly
-						? "Normalize try-protected two-state iterator/action completions"
-								+ " through state dispatch"
+								? "Normalize try-protected two-state iterator/action completions"
+										+ " through state dispatch"
 						: "Normalize two-state iterator/action completions through state dispatch");
 	}
 
@@ -8434,7 +8422,7 @@ public class FixMultiEntryLoops {
 						 */
 						|| allowSharedLatchTarget
 								&& isShortCleanLinearPath(
-								completion.resumeEntry, edge.getEnd(), 8))
+										completion.resumeEntry, edge.getEnd(), 8))
 				&& isPathExists(edge.getEnd(), completion.suspendCheck);
 	}
 
@@ -9367,8 +9355,8 @@ public class FixMultiEntryLoops {
 		if (!(BlockUtils.getLastInsn(iteratorDecision) instanceof IfNode)) {
 			iteratorDecision.updateCleanSuccessors();
 			iteratorDecision = iteratorDecision.getCleanSuccessors().size() == 1
-						? iteratorDecision.getCleanSuccessors().get(0)
-						: null;
+					? iteratorDecision.getCleanSuccessors().get(0)
+					: null;
 		}
 		if (iteratorDecision == null
 				|| !(BlockUtils.getLastInsn(iteratorDecision) instanceof IfNode)
@@ -9469,17 +9457,17 @@ public class FixMultiEntryLoops {
 			loopPreHeader.updateCleanSuccessors();
 
 			if (!ListUtils.isSingleElement(
-						resultJoin.getPredecessors(), completion.suspendCheck)
+					resultJoin.getPredecessors(), completion.suspendCheck)
 					|| !ListUtils.isSingleElement(
-						resumeTail.getSuccessors(), projectionCopy)
+							resumeTail.getSuccessors(), projectionCopy)
 					|| !ListUtils.isSingleElement(
-						projectionCopy.getSuccessors(), decisionCopy)
+							projectionCopy.getSuccessors(), decisionCopy)
 					|| decisionCopy.getSuccessors().size() != 2
 					|| !decisionCopy.getSuccessors().contains(loopPreHeader)
 					|| !decisionCopy.getSuccessors().contains(actionExit)
 					|| loopPreHeader.getPredecessors().size() != 2
 					|| !ListUtils.isSingleElement(
-						loopPreHeader.getSuccessors(), iteratorHeader)) {
+							loopPreHeader.getSuccessors(), iteratorHeader)) {
 				rollbackTryProtectedIteratorBooleanActionSplit(
 						mth,
 						completion,
@@ -9548,9 +9536,8 @@ public class FixMultiEntryLoops {
 		}
 	}
 
-	private static @Nullable CoroutineSuspendCompletion
-			findTryProtectedObfuscatedSuspendCompletion(
-					MethodNode mth, SpecialEdgeAttr reportedEdge) {
+	private static @Nullable CoroutineSuspendCompletion findTryProtectedObfuscatedSuspendCompletion(
+			MethodNode mth, SpecialEdgeAttr reportedEdge) {
 		BlockNode suspendCheck = reportedEdge.getStart();
 		if (!(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
 				|| suspendCheck.getPredecessors().size() != 1
@@ -9606,10 +9593,10 @@ public class FixMultiEntryLoops {
 					continue;
 				}
 				if (!hasStableConstValueBeforeInsn(
-								suspendCall,
-								labelPut,
-								labelPut.getArg(0),
-								stateBranch.stateKey)
+						suspendCall,
+						labelPut,
+						labelPut.getArg(0),
+						stateBranch.stateKey)
 						|| !isShortCleanLinearPath(
 								resume, reportedEdge.getEnd(), 6)) {
 					continue;
@@ -9928,9 +9915,7 @@ public class FixMultiEntryLoops {
 			BlockNode start, int maxDepth) {
 		BlockNode block = start;
 		Set<BlockNode> visited = new HashSet<>();
-		for (int depth = 0;
-				depth <= maxDepth && block != null && visited.add(block);
-				depth++) {
+		for (int depth = 0; depth <= maxDepth && block != null && visited.add(block); depth++) {
 			if (isBooleanProjection(block)) {
 				return true;
 			}
@@ -10529,9 +10514,7 @@ public class FixMultiEntryLoops {
 						field -> field.getName(),
 						field -> field.getType().toString(),
 						(first, second) -> first));
-		return "io.ktor.utils.io.ByteReadChannel".equals(fieldTypes.get("$this_split"))
-				&& "io.ktor.utils.io.ByteChannel".equals(fieldTypes.get("$first"))
-				&& "io.ktor.utils.io.ByteChannel".equals(fieldTypes.get("$second"));
+		return KtorCioRecovery.matchesPooledFanOutFields(fieldTypes);
 	}
 
 	/**
@@ -10661,9 +10644,7 @@ public class FixMultiEntryLoops {
 						field -> field.getName(),
 						field -> field.getType().toString(),
 						(first, second) -> first));
-		return "io.ktor.utils.io.ByteReadChannel".equals(fieldTypes.get("$this_observable"))
-				&& "io.ktor.client.content.ProgressListener".equals(fieldTypes.get("$listener"))
-				&& "java.lang.Long".equals(fieldTypes.get("$contentLength"));
+		return KtorCioRecovery.matchesPooledObservableFields(fieldTypes);
 	}
 
 	private static boolean isIteratorTerminalSuspendOperator(MethodNode mth) {
@@ -11095,16 +11076,13 @@ public class FixMultiEntryLoops {
 						field -> field.getName(),
 						field -> field.getType().toString(),
 						(first, second) -> first));
-		if (!"okio.BufferedSource".equals(fieldTypes.get("$this_toChannel"))
-				|| !"kotlin.coroutines.CoroutineContext".equals(fieldTypes.get("$context"))
-				|| !"io.ktor.client.request.HttpRequestData".equals(fieldTypes.get("$requestData"))) {
+		if (!KtorCioRecovery.matchesOkHttpSourceFields(fieldTypes)) {
 			return false;
 		}
 		BlockNode suspendCall = completion.suspendCheck.getPredecessors().get(0);
 		InvokeNode flushInvoke = findResultInvoke(suspendCall, "flush");
 		return flushInvoke != null
-				&& flushInvoke.getCallMth().getDeclClass().getFullName()
-						.equals("io.ktor.utils.io.ByteWriteChannel")
+				&& KtorCioRecovery.isByteWriteChannelInvoke(flushInvoke)
 				&& isPathExists(completion.directSuccess, completion.suspendCheck);
 	}
 
@@ -11183,7 +11161,7 @@ public class FixMultiEntryLoops {
 	 */
 	private static boolean isKtorByteChannelCopyCompletion(
 			MethodNode mth, CoroutineSuspendCompletion completion) {
-		if (!mth.getParentClass().getRawName().equals("io.ktor.utils.io.ByteReadChannelOperationsKt")
+		if (!KtorCioRecovery.isByteReadChannelOperations(mth)
 				|| !(mth.getName().equals("copyTo") || mth.getName().equals("copyAndClose"))
 				|| mth.getExceptionHandlersCount() < 2
 				|| completion.suspendCheck.getPredecessors().size() != 1
@@ -11852,11 +11830,10 @@ public class FixMultiEntryLoops {
 	 * the if-chain. Resolve the exact label written before the suspend call and prove that the
 	 * existing dispatch chain routes that label to the shared resume block.
 	 */
-	private static @Nullable CoroutineSuspendCompletion
-			findSharedIfChainCoroutineSuspendCompletion(
-					MethodNode mth,
-					BlockNode suspendCheck,
-					List<BlockNode> resumeBlocks) {
+	private static @Nullable CoroutineSuspendCompletion findSharedIfChainCoroutineSuspendCompletion(
+			MethodNode mth,
+			BlockNode suspendCheck,
+			List<BlockNode> resumeBlocks) {
 		if (!(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
 				|| suspendCheck.getPredecessors().size() != 1
 				|| suspendCheck.getSuccessors().size() != 2) {
@@ -14975,9 +14952,7 @@ public class FixMultiEntryLoops {
 	private static boolean isOptionalActionExitDiamond(BlockNode condition) {
 		// Field/argument loads and a preceding side effect can occupy two linear setup blocks.
 		// This exit path stays shared, so accepting the bridge doesn't duplicate its effects.
-		for (int depth = 0;
-				depth < 2 && !(BlockUtils.getLastInsn(condition) instanceof IfNode);
-				depth++) {
+		for (int depth = 0; depth < 2 && !(BlockUtils.getLastInsn(condition) instanceof IfNode); depth++) {
 			condition.updateCleanSuccessors();
 			if (condition.getCleanSuccessors().size() != 1) {
 				return false;
@@ -15994,8 +15969,7 @@ public class FixMultiEntryLoops {
 						.equals(outerField.getType())
 				&& accessor.getArgsCount() == 1
 				&& accessor.getArg(0) instanceof RegisterArg
-				&& ((RegisterArg) accessor.getArg(0)).getRegNum()
-						== outerGet.getResult().getRegNum()
+				&& ((RegisterArg) accessor.getArg(0)).getRegNum() == outerGet.getResult().getRegNum()
 				&& accessor.getResult() != null
 				&& accessor.getCallMth().getReturnType().isObject();
 	}
@@ -16087,8 +16061,7 @@ public class FixMultiEntryLoops {
 				|| !(instanceOf.getArg(0) instanceof RegisterArg)) {
 			return false;
 		}
-		return ((RegisterArg) instanceOf.getArg(0)).getRegNum()
-				== castResult.getRegNum();
+		return ((RegisterArg) instanceOf.getArg(0)).getRegNum() == castResult.getRegNum();
 	}
 
 	/**
@@ -16580,7 +16553,7 @@ public class FixMultiEntryLoops {
 		BlockNode directBridge = backEdge.getStart();
 		BlockNode effectLatch = backEdge.getEnd();
 		if (!(directBridge.getInstructions().isEmpty()
-						|| isMoveBlock(directBridge, 8))
+				|| isMoveBlock(directBridge, 8))
 				|| directBridge.getPredecessors().size() != 1
 				|| !ListUtils.isSingleElement(
 						directBridge.getSuccessors(), effectLatch)
@@ -16688,8 +16661,7 @@ public class FixMultiEntryLoops {
 					mth, source, sharedLatch);
 			latchCopy.add(AFlag.SYNTHETIC);
 			BlockSplitter.copyBlockData(sharedLatch, latchCopy);
-			if (sharedLatch.getInstructions().size()
-					!= latchCopy.getInstructions().size()
+			if (sharedLatch.getInstructions().size() != latchCopy.getInstructions().size()
 					|| (VERIFY_COPIED_BLOCK_INSNS
 							&& !BlockUtils.isSameInsnsBlocks(
 									sharedLatch, latchCopy))) {
@@ -16795,7 +16767,7 @@ public class FixMultiEntryLoops {
 				&& argTypes.size() == 3
 				&& argTypes.get(1).equals(ArgType.INT);
 		if ((!discard && !readBuffer)
-				|| !mth.getParentClass().getRawName().equals("io.ktor.utils.io.ByteReadChannelOperationsKt")) {
+				|| !KtorCioRecovery.isByteReadChannelOperations(mth)) {
 			return false;
 		}
 		BlockNode directBridge = backEdge.getStart();
@@ -16862,7 +16834,7 @@ public class FixMultiEntryLoops {
 				&& argTypes.size() == 5
 				&& argTypes.get(2).equals(ArgType.INT)
 				&& argTypes.get(3).equals(ArgType.INT)
-				&& mth.getParentClass().getRawName().equals("io.ktor.utils.io.ByteReadChannelOperationsKt");
+				&& KtorCioRecovery.isByteReadChannelOperations(mth);
 	}
 
 	private static boolean isKtorByteReadChannelReadPacket(MethodNode mth) {
@@ -16870,7 +16842,7 @@ public class FixMultiEntryLoops {
 		return mth.getName().equals("readPacket")
 				&& argTypes.size() == 3
 				&& argTypes.get(1).equals(ArgType.INT)
-				&& mth.getParentClass().getRawName().equals("io.ktor.utils.io.ByteReadChannelOperationsKt");
+				&& KtorCioRecovery.isByteReadChannelOperations(mth);
 	}
 
 	/**
@@ -17873,8 +17845,7 @@ public class FixMultiEntryLoops {
 			}
 		}
 		if (spillInsertIndex < 1
-				|| commonInsns.get(spillInsertIndex).getType()
-						!= InsnType.CMP_L
+				|| commonInsns.get(spillInsertIndex).getType() != InsnType.CMP_L
 				|| spillInsertIndex != commonInsns.size() - 1) {
 			return false;
 		}
@@ -17889,8 +17860,7 @@ public class FixMultiEntryLoops {
 					&& insn.getType() == InsnType.IPUT
 					&& insn.getArgsCount() == 2
 					&& insn.getArg(1) instanceof RegisterArg
-					&& ((RegisterArg) insn.getArg(1)).getRegNum()
-							== continuationReg) {
+					&& ((RegisterArg) insn.getArg(1)).getRegNum() == continuationReg) {
 				continuationStoreCount++;
 			}
 			Boolean containsDelay =
@@ -17919,8 +17889,7 @@ public class FixMultiEntryLoops {
 					&& insn.getType() == InsnType.IPUT
 					&& insn.getArgsCount() == 2
 					&& insn.getArg(1) instanceof RegisterArg
-					&& ((RegisterArg) insn.getArg(1)).getRegNum()
-							== continuationReg) {
+					&& ((RegisterArg) insn.getArg(1)).getRegNum() == continuationReg) {
 				continue;
 			}
 			if (insn instanceof InvokeNode
@@ -17951,8 +17920,7 @@ public class FixMultiEntryLoops {
 				if (store.getType() != InsnType.IPUT
 						|| store.getArgsCount() != 2
 						|| !(store.getArg(0) instanceof RegisterArg)
-						|| ((RegisterArg) store.getArg(0)).getRegNum()
-								!= conditionReg) {
+						|| ((RegisterArg) store.getArg(0)).getRegNum() != conditionReg) {
 					return false;
 				}
 				IndexInsnNode directStore =
@@ -17980,8 +17948,7 @@ public class FixMultiEntryLoops {
 				zeroDelayBridge.getInstructions(),
 				insn -> insn.getType() == InsnType.MOVE
 						&& insn.getResult() != null
-						&& insn.getResult().getRegNum()
-								== matchedDirectResultArg.getRegNum()
+						&& insn.getResult().getRegNum() == matchedDirectResultArg.getRegNum()
 						&& insn.getArgsCount() == 1
 						&& insn.getArg(0) instanceof RegisterArg);
 		if (zeroTokenMove == null || zeroTokenMove.getResult() == null) {
@@ -18081,8 +18048,8 @@ public class FixMultiEntryLoops {
 				null,
 				new InsnNode[] { null, zeroContinue },
 				new CoroutineDirectPathMode[] {
-					CoroutineDirectPathMode.INSERT,
-					CoroutineDirectPathMode.REUSE_PRESERVE
+						CoroutineDirectPathMode.INSERT,
+						CoroutineDirectPathMode.REUSE_PRESERVE
 				},
 				null,
 				false,
@@ -19855,8 +19822,7 @@ public class FixMultiEntryLoops {
 						suspendCheck);
 		if (requestCompletion == null
 				|| sharedStateDispatch == null
-				|| requestCompletion.stateDispatch
-						!= sharedStateDispatch
+				|| requestCompletion.stateDispatch != sharedStateDispatch
 				|| !isPathExists(sharedStateDispatch, resume)) {
 			return false;
 		}
@@ -19911,8 +19877,7 @@ public class FixMultiEntryLoops {
 		CoroutineSuspendCompletion match = null;
 		for (BlockNode suspendCheck : mth.getBasicBlocks()) {
 			if (suspendCheck == mergedDelayCheck
-					|| !(BlockUtils.getLastInsn(suspendCheck)
-							instanceof IfNode)
+					|| !(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
 					|| suspendCheck.getPredecessors().size() != 1
 					|| suspendCheck.getSuccessors().size() != 2) {
 				continue;
@@ -19951,9 +19916,7 @@ public class FixMultiEntryLoops {
 			}
 			BlockNode join = directSuccess;
 			CoroutineSuspendCompletion candidateMatch = null;
-			for (int depth = 0;
-					depth <= 3 && join != null;
-					depth++) {
+			for (int depth = 0; depth <= 3 && join != null; depth++) {
 				CoroutineSuspendCompletion depthMatch = null;
 				for (BlockNode resume : mth.getBasicBlocks()) {
 					if (!containsInvoke(resume, "throwOnFailure")
@@ -20020,10 +19983,8 @@ public class FixMultiEntryLoops {
 					|| insn.getType() != InsnType.IPUT
 					|| insn.getArgsCount() != 2
 					|| !(insn.getArg(1) instanceof RegisterArg)
-					|| ((RegisterArg) insn.getArg(1)).getRegNum()
-							!= continuationReg
-					|| !(((IndexInsnNode) insn).getIndex()
-							instanceof FieldInfo)
+					|| ((RegisterArg) insn.getArg(1)).getRegNum() != continuationReg
+					|| !(((IndexInsnNode) insn).getIndex() instanceof FieldInfo)
 					|| !((FieldInfo) ((IndexInsnNode) insn).getIndex())
 							.getType().equals(ArgType.INT)) {
 				continue;
@@ -21337,8 +21298,7 @@ public class FixMultiEntryLoops {
 					block.getSuccessors(),
 					successor -> !BlockUtils.isExceptionHandlerPath(successor)
 							&& !(BlockUtils.getFirstInsn(successor) != null
-									&& BlockUtils.getFirstInsn(successor).getType()
-											== InsnType.MOVE_EXCEPTION));
+									&& BlockUtils.getFirstInsn(successor).getType() == InsnType.MOVE_EXCEPTION));
 		}
 		if (throwIndex == -1) {
 			return null;
@@ -21567,8 +21527,7 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		InsnNode continuationMove = null;
-		if (restorePath.directContinuation.getRegNum()
-				!= restorePath.restoreContinuation.getRegNum()) {
+		if (restorePath.directContinuation.getRegNum() != restorePath.restoreContinuation.getRegNum()) {
 			continuationMove = new InsnNode(InsnType.MOVE, 1);
 			continuationMove.setResult(
 					restorePath.restoreContinuation.duplicate());
@@ -21614,9 +21573,8 @@ public class FixMultiEntryLoops {
 				|| !(labelPut.getArg(1) instanceof RegisterArg)
 				|| !(suspendInvoke.getArg(
 						suspendInvoke.getArgsCount() - 1) instanceof RegisterArg)
-				|| ((RegisterArg) labelPut.getArg(1)).getRegNum()
-						!= ((RegisterArg) suspendInvoke.getArg(
-								suspendInvoke.getArgsCount() - 1)).getRegNum()) {
+				|| ((RegisterArg) labelPut.getArg(1)).getRegNum() != ((RegisterArg) suspendInvoke.getArg(
+						suspendInvoke.getArgsCount() - 1)).getRegNum()) {
 			return null;
 		}
 		return new SplitCoroutineSuspendPath(
@@ -21671,8 +21629,7 @@ public class FixMultiEntryLoops {
 					block.getSuccessors(),
 					successor -> !BlockUtils.isExceptionHandlerPath(successor)
 							&& !(BlockUtils.getFirstInsn(successor) != null
-									&& BlockUtils.getFirstInsn(successor).getType()
-											== InsnType.MOVE_EXCEPTION));
+									&& BlockUtils.getFirstInsn(successor).getType() == InsnType.MOVE_EXCEPTION));
 		}
 		return false;
 	}
@@ -21923,8 +21880,7 @@ public class FixMultiEntryLoops {
 					|| !(((IndexInsnNode) insn).getIndex() instanceof FieldInfo)
 					|| insn.getArgsCount() != 2
 					|| !(insn.getArg(1) instanceof RegisterArg)
-					|| ((RegisterArg) insn.getArg(1)).getRegNum()
-							!= continuationReg) {
+					|| ((RegisterArg) insn.getArg(1)).getRegNum() != continuationReg) {
 				continue;
 			}
 			FieldInfo field =
@@ -22796,9 +22752,7 @@ public class FixMultiEntryLoops {
 		SpecialEdgeAttr reportedEdge = multiEntryLoops.get(0);
 		BlockNode loopHeader = reportedEdge.getEnd();
 		BlockNode activeCheck = loopHeader;
-		for (int depth = 0;
-				depth < 2 && !(BlockUtils.getLastInsn(activeCheck) instanceof IfNode);
-				depth++) {
+		for (int depth = 0; depth < 2 && !(BlockUtils.getLastInsn(activeCheck) instanceof IfNode); depth++) {
 			activeCheck.updateCleanSuccessors();
 			if (activeCheck.getCleanSuccessors().size() != 1) {
 				return false;
@@ -22917,9 +22871,8 @@ public class FixMultiEntryLoops {
 						suspendCheck, labelPut, continuationReg, 5) != null;
 	}
 
-	private static @Nullable CoroutineSuspendCompletion
-			findTryProtectedInlineCoroutineSuspendCompletion(
-					MethodNode mth, BlockNode suspendCheck) {
+	private static @Nullable CoroutineSuspendCompletion findTryProtectedInlineCoroutineSuspendCompletion(
+			MethodNode mth, BlockNode suspendCheck) {
 		if (!isInlineTryProtectedLabeledSuspendCheck(suspendCheck)) {
 			return null;
 		}
@@ -23018,14 +22971,11 @@ public class FixMultiEntryLoops {
 		return match;
 	}
 
-	private static @Nullable RegisterArg
-			findRegisterProducerOnTryProtectedPredecessorPath(
-					BlockNode start, int regNum, int maxBlocks) {
+	private static @Nullable RegisterArg findRegisterProducerOnTryProtectedPredecessorPath(
+			BlockNode start, int regNum, int maxBlocks) {
 		BlockNode block = start;
 		Set<BlockNode> visited = new HashSet<>();
-		for (int depth = 0;
-			depth < maxBlocks && block != null && visited.add(block);
-			depth++) {
+		for (int depth = 0; depth < maxBlocks && block != null && visited.add(block); depth++) {
 			List<InsnNode> instructions = block.getInstructions();
 			for (int i = instructions.size() - 1; i >= 0; i--) {
 				RegisterArg result = instructions.get(i).getResult();
@@ -23082,9 +23032,7 @@ public class FixMultiEntryLoops {
 			BlockNode start, int maxBlocks) {
 		BlockNode block = start;
 		Set<BlockNode> visited = new HashSet<>();
-		for (int depth = 0;
-			depth < maxBlocks && block != null && visited.add(block);
-			depth++) {
+		for (int depth = 0; depth < maxBlocks && block != null && visited.add(block); depth++) {
 			IndexInsnNode labelPut = findLabelPut(block);
 			if (labelPut != null) {
 				return labelPut;
@@ -23109,9 +23057,7 @@ public class FixMultiEntryLoops {
 		List<BlockNode> reversePath = new ArrayList<>(maxBlocks);
 		BlockNode block = start;
 		Set<BlockNode> visited = new HashSet<>();
-		for (int depth = 0;
-			depth < maxBlocks && block != null && visited.add(block);
-			depth++) {
+		for (int depth = 0; depth < maxBlocks && block != null && visited.add(block); depth++) {
 			reversePath.add(block);
 			if (block.getInstructions().contains(labelPut)) {
 				break;
@@ -23198,8 +23144,7 @@ public class FixMultiEntryLoops {
 						|| predecessor.contains(AFlag.EXC_TOP_SPLITTER)
 						|| predecessor.getSuccessors().stream()
 								.filter(successor -> successor != pathSuccessor)
-								.allMatch(successor ->
-										successor.contains(AFlag.EXC_BOTTOM_SPLITTER)));
+								.allMatch(successor -> successor.contains(AFlag.EXC_BOTTOM_SPLITTER)));
 	}
 
 	/**
@@ -23297,9 +23242,8 @@ public class FixMultiEntryLoops {
 							&& directMapping.getPredecessors().contains(suspendCheck)
 							&& directMapping.getPredecessors().contains(completion.resumeEntry)
 							&& multiEntryLoops.stream().anyMatch(
-									edge ->
-											edge.getStart() == suspendCheck
-													&& edge.getEnd() == directMapping);
+									edge -> edge.getStart() == suspendCheck
+											&& edge.getEnd() == directMapping);
 			if (resumeMapping == null
 					|| resultDecision == null
 					|| !sharedMappingEntry
@@ -23314,10 +23258,9 @@ public class FixMultiEntryLoops {
 					? null
 					: ListUtils.filterOnlyOne(
 							resultDecision.getPredecessors(),
-							predecessor ->
-									predecessor != directMapping
-											&& assignsKotlinUnitToRegister(
-													predecessor, mappedResultReg));
+							predecessor -> predecessor != directMapping
+									&& assignsKotlinUnitToRegister(
+											predecessor, mappedResultReg));
 			ExceptionHandler handler = findOnlyCatchHandler(completion.resumeEntry);
 			BlockNode handlerEntry =
 					handler == null ? null : findHandlerEntry(mth, handler);
@@ -23493,18 +23436,16 @@ public class FixMultiEntryLoops {
 				}
 				BlockNode splitMapping = ListUtils.filterOnlyOne(
 						decision.getPredecessors(),
-						predecessor ->
-								predecessor != successor
-										&& BlockUtils.isSameInsnsBlocks(
-												successor, predecessor));
+						predecessor -> predecessor != successor
+								&& BlockUtils.isSameInsnsBlocks(
+										successor, predecessor));
 				BlockNode splitResume = splitMapping == null
 						? null
 						: ListUtils.filterOnlyOne(
 								splitMapping.getPredecessors(),
-								predecessor ->
-										containsInvoke(
-												predecessor,
-												"throwOnFailure"));
+								predecessor -> containsInvoke(
+										predecessor,
+										"throwOnFailure"));
 				if (splitMapping != null && splitResume != null) {
 					directMapping = successor;
 					resumeMapping = splitMapping;
@@ -23534,23 +23475,18 @@ public class FixMultiEntryLoops {
 			boolean sharedMappingEntry =
 					handlerPreSplit
 							? directMapping != resumeMapping
-									&& getOnlyNormalSuccessor(resumeMapping)
-											== resultDecision
+									&& getOnlyNormalSuccessor(resumeMapping) == resultDecision
 									&& multiEntryLoops.stream().anyMatch(
-											edge ->
-													edge.getStart() == directMappingNode
-															&& edge.getEnd()
-																	== resultDecisionNode)
+											edge -> edge.getStart() == directMappingNode
+													&& edge.getEnd() == resultDecisionNode)
 							: directMapping == resumeMapping
 									&& directMapping.getPredecessors()
 											.contains(suspendCheck)
 									&& directMapping.getPredecessors()
 											.contains(resumeEntry)
 									&& multiEntryLoops.stream().anyMatch(
-											edge ->
-													edge.getStart() == suspendCheck
-															&& edge.getEnd()
-																	== directMappingNode);
+											edge -> edge.getStart() == suspendCheck
+													&& edge.getEnd() == directMappingNode);
 			if (resumeMapping == null
 					|| resultDecision == null
 					|| directMapping.getInstructions().isEmpty()
@@ -23560,17 +23496,15 @@ public class FixMultiEntryLoops {
 							.get(suspendedExitPath.size() - 1)
 							.isReturnBlock()
 					|| !sharedMappingEntry
-					|| !(BlockUtils.getLastInsn(resultDecision)
-							instanceof IfNode)
+					|| !(BlockUtils.getLastInsn(resultDecision) instanceof IfNode)
 					|| resultDecision.getSuccessors().size() != 2) {
 				continue;
 			}
 			BlockNode loopHeader = ListUtils.filterOnlyOne(
 					resultDecision.getSuccessors(),
-					successor ->
-							isPathExists(successor, suspendCheck)
-									&& reachesIteratorCondition(
-											successor, 2));
+					successor -> isPathExists(successor, suspendCheck)
+							&& reachesIteratorCondition(
+									successor, 2));
 			BlockNode resultExit = ListUtils.filterOnlyOne(
 					resultDecision.getSuccessors(),
 					successor -> successor != loopHeader);
@@ -23579,14 +23513,12 @@ public class FixMultiEntryLoops {
 			}
 			BlockNode initialEntry = ListUtils.filterOnlyOne(
 					loopHeader.getPredecessors(),
-					predecessor ->
-							predecessor != resultDecisionNode
-									&& !isPathExists(
-											loopHeader, predecessor));
+					predecessor -> predecessor != resultDecisionNode
+							&& !isPathExists(
+									loopHeader, predecessor));
 			RegisterArg mappedResult = null;
-			for (InsnArg arg :
-					BlockUtils.getLastInsn(resultDecision)
-							.getArguments()) {
+			for (InsnArg arg : BlockUtils.getLastInsn(resultDecision)
+					.getArguments()) {
 				if (arg instanceof RegisterArg) {
 					if (mappedResult != null) {
 						mappedResult = null;
@@ -23603,12 +23535,11 @@ public class FixMultiEntryLoops {
 					? List.of()
 					: ListUtils.filter(
 							resultDecision.getPredecessors(),
-							predecessor ->
-									predecessor != directMappingNode
-											&& predecessor != resumeMappingNode
-											&& assignsKotlinUnitToRegister(
-													predecessor,
-													mappedResultReg));
+							predecessor -> predecessor != directMappingNode
+									&& predecessor != resumeMappingNode
+									&& assignsKotlinUnitToRegister(
+											predecessor,
+											mappedResultReg));
 			if (initialEntry == null
 					|| mappedResult == null
 					|| catchExits.isEmpty()
@@ -23678,8 +23609,7 @@ public class FixMultiEntryLoops {
 						resumeMappingCopy, loopPreHeader);
 			}
 			if (!handlerPreSplit) {
-				for (BlockNode successor :
-						directMapping.getSuccessors()) {
+				for (BlockNode successor : directMapping.getSuccessors()) {
 					if (successor != resultDecision) {
 						BlockSplitter.connect(
 								resumeMappingCopy, successor);
@@ -23708,8 +23638,7 @@ public class FixMultiEntryLoops {
 				|| lastInsn.getType() != InsnType.SGET
 				|| lastInsn.getResult() == null
 				|| lastInsn.getResult().getRegNum() != regNum
-				|| !(((IndexInsnNode) lastInsn).getIndex()
-						instanceof FieldInfo)) {
+				|| !(((IndexInsnNode) lastInsn).getIndex() instanceof FieldInfo)) {
 			return false;
 		}
 		FieldInfo field =
@@ -24114,20 +24043,7 @@ public class FixMultiEntryLoops {
 	private static boolean isTryProtectedReadTransformSuspendLoop(MethodNode mth) {
 		if (mth.getName().equals("invokeSuspend")
 				|| !isCoroutineMethod(mth)
-				|| mth.getArgTypes().size() != 5
-				|| !isObjectType(
-						mth.getArgTypes().get(0),
-						"io.ktor.utils.io.ByteReadChannel")
-				|| !isObjectType(
-						mth.getArgTypes().get(1),
-						"io.ktor.utils.io.ByteWriteChannel")
-				|| !ArgType.BOOLEAN.equals(mth.getArgTypes().get(2))
-				|| !isObjectType(
-						mth.getArgTypes().get(3),
-						"io.ktor.utils.io.pool.ObjectPool")
-				|| !isObjectType(
-						mth.getArgTypes().get(4),
-						"kotlin.coroutines.Continuation")) {
+				|| !KtorCioRecovery.matchesReadTransformArgs(mth.getArgTypes())) {
 			return false;
 		}
 		return mth.referencesMethodNamed("readAvailable")
@@ -24302,9 +24218,7 @@ public class FixMultiEntryLoops {
 		List<BlockNode> resumePath =
 				collectLinearSuccessorPath(
 						resumeHandler.getHandlerBlock(), maxDepth);
-		for (int sourceIndex = 1;
-				sourceIndex < sourcePath.size();
-				sourceIndex++) {
+		for (int sourceIndex = 1; sourceIndex < sourcePath.size(); sourceIndex++) {
 			BlockNode candidate = sourcePath.get(sourceIndex);
 			int resumeIndex = resumePath.indexOf(candidate);
 			if (resumeIndex > 0
@@ -24344,9 +24258,7 @@ public class FixMultiEntryLoops {
 		List<BlockNode> path =
 				new ArrayList<>(Math.min(maxDepth + 1, 10));
 		BlockNode block = start;
-		for (int depth = 0;
-				depth <= maxDepth && block != null;
-				depth++) {
+		for (int depth = 0; depth <= maxDepth && block != null; depth++) {
 			path.add(block);
 			block = block.getSuccessors().size() == 1
 					? block.getSuccessors().get(0)
@@ -24431,8 +24343,7 @@ public class FixMultiEntryLoops {
 					return false;
 				}
 			}
-			if (block.getSuccessors().size()
-					!= block.getCleanSuccessors().size()) {
+			if (block.getSuccessors().size() != block.getCleanSuccessors().size()) {
 				return false;
 			}
 		}
@@ -26836,8 +26747,7 @@ public class FixMultiEntryLoops {
 			MethodNode mth, BlockNode suspendCall, InvokeNode suspendInvoke) {
 		if (suspendInvoke.getArgsCount() == 0
 				|| !(suspendInvoke.getArg(
-						suspendInvoke.getArgsCount() - 1)
-						instanceof RegisterArg)) {
+						suspendInvoke.getArgsCount() - 1) instanceof RegisterArg)) {
 			return null;
 		}
 		int continuationReg = ((RegisterArg) suspendInvoke.getArg(
@@ -26848,10 +26758,8 @@ public class FixMultiEntryLoops {
 					|| insn.getType() != InsnType.IPUT
 					|| insn.getArgsCount() != 2
 					|| !(insn.getArg(1) instanceof RegisterArg)
-					|| ((RegisterArg) insn.getArg(1)).getRegNum()
-							!= continuationReg
-					|| !(((IndexInsnNode) insn).getIndex()
-							instanceof FieldInfo)) {
+					|| ((RegisterArg) insn.getArg(1)).getRegNum() != continuationReg
+					|| !(((IndexInsnNode) insn).getIndex() instanceof FieldInfo)) {
 				continue;
 			}
 			FieldInfo field =
@@ -26873,9 +26781,7 @@ public class FixMultiEntryLoops {
 			BlockNode start, int maxBlocks) {
 		BlockNode block = start;
 		Set<BlockNode> visited = new HashSet<>();
-		for (int depth = 0;
-				depth < maxBlocks && block != null && visited.add(block);
-				depth++) {
+		for (int depth = 0; depth < maxBlocks && block != null && visited.add(block); depth++) {
 			IndexInsnNode labelPut = findLabelPut(block);
 			if (labelPut != null) {
 				return labelPut;
@@ -27028,8 +26934,7 @@ public class FixMultiEntryLoops {
 											.getArgumentsTypes(),
 									ArgType.OBJECT)
 							|| invoke.getArgsCount() != 1
-							|| !(invoke.getArg(0)
-									instanceof RegisterArg)
+							|| !(invoke.getArg(0) instanceof RegisterArg)
 							|| match != null) {
 						return null;
 					}
@@ -27067,9 +26972,7 @@ public class FixMultiEntryLoops {
 		BlockNode block = start;
 		Set<BlockNode> visited = new HashSet<>();
 		RegisterArg match = null;
-		for (int depth = 0;
-				depth <= maxDepth && block != null && visited.add(block);
-				depth++) {
+		for (int depth = 0; depth <= maxDepth && block != null && visited.add(block); depth++) {
 			for (InsnNode insn : block.getInstructions()) {
 				if (!(insn instanceof InvokeNode)) {
 					continue;
@@ -27690,11 +27593,10 @@ public class FixMultiEntryLoops {
 		return invoke.getCallMth().getName().equals(methodName)
 				&& invoke.getCallMth().getArgumentsTypes().stream()
 						.anyMatch(
-								type ->
-										type.isObject()
-												&& type.getObject()
-														.equals(
-																"kotlin.coroutines.Continuation"));
+								type -> type.isObject()
+										&& type.getObject()
+												.equals(
+														"kotlin.coroutines.Continuation"));
 	}
 
 	private static boolean containsNonSuspendInvokeNamed(
@@ -27703,9 +27605,8 @@ public class FixMultiEntryLoops {
 				.filter(InvokeNode.class::isInstance)
 				.map(InvokeNode.class::cast)
 				.anyMatch(
-						invoke ->
-								invoke.getCallMth().getName().equals(methodName)
-										&& !isSuspendInvokeNamed(invoke, methodName));
+						invoke -> invoke.getCallMth().getName().equals(methodName)
+								&& !isSuspendInvokeNamed(invoke, methodName));
 	}
 
 	private static boolean containsInsnType(BlockNode block, InsnType type) {

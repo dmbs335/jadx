@@ -8,10 +8,23 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.jupiter.api.RepeatedTest;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ProjectSessionGuardTest {
+	@Test
+	void closedOwnerCanFinishCleanupOnlyForItsOriginalProject() {
+		AtomicLong generation = new AtomicLong(3);
+		ProjectSessionGuard guard = new ProjectSessionGuard(generation::get);
+
+		guard.close();
+		assertThat(guard.isActive()).isFalse();
+		assertThat(guard.ownsCurrentGeneration()).isTrue();
+
+		generation.incrementAndGet();
+		assertThat(guard.ownsCurrentGeneration()).isFalse();
+	}
 
 	@RepeatedTest(50)
 	void dropsQueuedOldCallbacksAndAcceptsImmediateNewProjectWork() throws Exception {

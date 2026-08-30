@@ -1,25 +1,29 @@
 package jadx.gui.cache.usage;
 
-import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import org.apache.commons.io.input.UnsynchronizedBufferedInputStream;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +31,9 @@ import org.slf4j.LoggerFactory;
 import jadx.api.JadxDecompiler;
 import jadx.api.plugins.input.data.IMethodRef;
 import jadx.api.usage.IUsageInfoData;
+import jadx.core.dex.info.MethodInfo;
+import jadx.core.dex.nodes.ClassNode;
+import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -40,7 +47,7 @@ import static java.nio.file.StandardOpenOption.WRITE;
 public class UsageFileAdapter extends DataAdapterHelper {
 	private static final Logger LOG = LoggerFactory.getLogger(UsageFileAdapter.class);
 
-	private static final int USAGE_DATA_VERSION = 4;
+	private static final int USAGE_DATA_VERSION = 5;
 	private static final byte[] JADX_USAGE_HEADER = "jadx.usage".getBytes(StandardCharsets.US_ASCII);
 
 	public static synchronized @Nullable RawUsageData load(RootNode root, Path usageFile, List<File> inputs) {
@@ -48,7 +55,9 @@ public class UsageFileAdapter extends DataAdapterHelper {
 			return null;
 		}
 		long start = System.currentTimeMillis();
-		try (DataInputStream in = new DataInputStream(new BufferedInputStream(Files.newInputStream(usageFile)))) {
+		try (InputStream fileInput = Files.newInputStream(usageFile);
+				DataInputStream in = new DataInputStream(
+						new UnsynchronizedBufferedInputStream.Builder().setInputStream(fileInput).get())) {
 			in.skipBytes(JADX_USAGE_HEADER.length);
 			int dataVersion = in.readInt();
 			if (dataVersion != USAGE_DATA_VERSION) {
@@ -86,18 +95,27 @@ public class UsageFileAdapter extends DataAdapterHelper {
 		String inputsHash = buildInputsHash(root, inputs);
 		RawUsageData usageData = new RawUsageData();
 		data.visitUsageData(new CollectUsageData(usageData));
-		try (OutputStream fileOutput = Files.newOutputStream(usageFile, WRITE, CREATE, TRUNCATE_EXISTING);
-				DataOutputStream out = new DataOutputStream(new BufferedOutputStream(fileOutput))) {
-			out.write(JADX_USAGE_HEADER);
-			out.writeInt(USAGE_DATA_VERSION);
-			out.writeUTF(inputsHash);
-			writeData(out, usageData);
+		Path temporary = null;
+		try {
+			temporary = Files.createTempFile(usageFile.getParent(), usageFile.getFileName().toString(), ".tmp");
+			try (OutputStream fileOutput = Files.newOutputStream(temporary, WRITE, CREATE, TRUNCATE_EXISTING);
+					DataOutputStream out = new DataOutputStream(new BufferedOutputStream(fileOutput))) {
+				out.write(JADX_USAGE_HEADER);
+				out.writeInt(USAGE_DATA_VERSION);
+				out.writeUTF(inputsHash);
+				writeData(root, out, usageData);
+			}
+			moveReplace(temporary, usageFile);
+			temporary = null;
 		} catch (Exception e) {
 			LOG.error("Failed to save usage data file", e);
+		} finally {
 			try {
-				FileUtils.deleteFileIfExists(usageFile);
-			} catch (IOException ex) {
-				LOG.error("Failed to delete usage data file: {}", usageFile, ex);
+				if (temporary != null) {
+					Files.deleteIfExists(temporary);
+				}
+			} catch (IOException e) {
+				LOG.debug("Failed to delete temporary usage data file: {}", temporary, e);
 			}
 		}
 		if (LOG.isDebugEnabled()) {
@@ -105,10 +123,18 @@ public class UsageFileAdapter extends DataAdapterHelper {
 		}
 	}
 
+	private static void moveReplace(Path source, Path target) throws IOException {
+		try {
+			Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+		} catch (AtomicMoveNotSupportedException e) {
+			Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
+		}
+	}
+
 	private static RawUsageData readData(RootNode root, DataInputStream in) throws IOException {
-		RawUsageData data = new RawUsageData();
 		int clsCount = readUVInt(in);
 		int clsWithoutDataCount = readUVInt(in);
+		RawUsageData data = new RawUsageData(clsCount);
 
 		// Class information
 		String[] clsNames = new String[clsCount + clsWithoutDataCount];
@@ -122,6 +148,10 @@ public class UsageFileAdapter extends DataAdapterHelper {
 		for (int i = 0; i < clsWithoutDataCount; i++) {
 			clsNames[c++] = in.readUTF();
 		}
+		ClassNode[] resolvedClasses = new ClassNode[clsNames.length];
+		for (int i = 0; i < clsNames.length; i++) {
+			resolvedClasses[i] = root.resolveRawClass(clsNames[i]);
+		}
 		int uClsCount = readUVInt(in);
 		String[] uClsNames = new String[uClsCount];
 		for (int i = 0; i < uClsCount; i++) {
@@ -133,9 +163,12 @@ public class UsageFileAdapter extends DataAdapterHelper {
 		MthRef[] methods = new MthRef[mthCount];
 		for (int i = 0; i < mthCount; i++) {
 			int clsId = readUVInt(in);
-			String mthShortId = in.readUTF();
+			int methodIndex = readUVInt(in);
 			ClsUsageData cls = classes[clsId];
-			MthRef mthRef = new MthRef(cls.getRawName(), mthShortId);
+			ClassNode clsNode = resolvedClasses[clsId];
+			MethodNode method = clsNode.getMethods().get(methodIndex);
+			String mthShortId = method.getMethodInfo().getShortId();
+			MthRef mthRef = new MthRef(method);
 			cls.getMthUsage().put(mthShortId, new MthUsageData(mthRef));
 			methods[i] = mthRef;
 		}
@@ -154,21 +187,25 @@ public class UsageFileAdapter extends DataAdapterHelper {
 			}
 			unresolvedMethods[i] = new CachedMethodRef(uClsNames[clsId], name, returnType, args);
 		}
+		MethodInfo[] resolvedUnresolvedMethods = new MethodInfo[uMthCount];
 
 		// Usage data
 		for (int i = 0; i < clsCount; i++) {
 			ClsUsageData cls = data.getClassData(clsNames[i]);
-			cls.setClsDeps(readClsList(in, clsNames));
-			cls.setClsUsage(readClsList(in, clsNames));
-			cls.setClsUseInMth(readMthList(in, methods));
+			cls.setResolvedClsDeps(readClsNodeList(in, resolvedClasses));
+			cls.setResolvedClsUsage(readClsNodeList(in, resolvedClasses));
+			cls.setResolvedClsUseInMth(readMethodNodeList(in, root, methods));
 
 			int mCount = readUVInt(in);
 			for (int m = 0; m < mCount; m++) {
-				MthRef mthRef = methods[readUVInt(in)];
+				int methodIndex = readUVInt(in);
+				MthRef mthRef = methods[methodIndex];
 				MthUsageData mthUsageData = cls.getMthUsage().get(mthRef.getShortId());
-				mthUsageData.setUsage(readMthList(in, methods));
-				mthUsageData.setUses(readMthList(in, methods));
-				mthUsageData.setUnresolvedUsage(readUnresolvedMthList(in, unresolvedMethods));
+				mthUsageData.setResolvedMethod(mthRef.resolve(root));
+				mthUsageData.setResolvedUsage(readMethodNodeList(in, root, methods));
+				mthUsageData.setResolvedUses(readMethodNodeList(in, root, methods));
+				mthUsageData.setResolvedUnresolvedUsage(
+						readMethodInfoList(in, root, unresolvedMethods, resolvedUnresolvedMethods));
 				mthUsageData.setCallsSelf(in.readBoolean());
 			}
 			int fCount = readUVInt(in);
@@ -176,13 +213,13 @@ public class UsageFileAdapter extends DataAdapterHelper {
 				String fldShortId = in.readUTF();
 				cls.getFldUsage().computeIfAbsent(fldShortId,
 						fldId -> new FldUsageData(new FldRef(cls.getRawName(), fldId)))
-						.setUsage(readMthList(in, methods));
+						.setResolvedUsage(readMethodNodeList(in, root, methods));
 			}
 		}
 		return data;
 	}
 
-	private static void writeData(DataOutputStream out, RawUsageData usageData) throws IOException {
+	private static void writeData(RootNode root, DataOutputStream out, RawUsageData usageData) throws IOException {
 		Map<String, Integer> clsMap = new HashMap<>();
 		Map<MthRef, Integer> mthMap = new HashMap<>();
 		Map<IMethodRef, Integer> uMthMap = new HashMap<>();
@@ -237,9 +274,27 @@ public class UsageFileAdapter extends DataAdapterHelper {
 				.collect(Collectors.toList());
 		writeUVInt(out, methods.size());
 		int j = 0;
+		String currentCls = null;
+		Map<MethodNode, Integer> methodIndexes = Collections.emptyMap();
 		for (MthRef mth : methods) {
+			if (!mth.getCls().equals(currentCls)) {
+				currentCls = mth.getCls();
+				ClassNode clsNode = root.resolveRawClass(currentCls);
+				if (clsNode == null) {
+					throw new JadxRuntimeException("Unknown method class in usage: " + currentCls);
+				}
+				List<MethodNode> classMethods = clsNode.getMethods();
+				methodIndexes = new IdentityHashMap<>(classMethods.size());
+				for (int methodIndex = 0; methodIndex < classMethods.size(); methodIndex++) {
+					methodIndexes.put(classMethods.get(methodIndex), methodIndex);
+				}
+			}
 			writeUVInt(out, clsMap.get(mth.getCls()));
-			out.writeUTF(mth.getShortId());
+			Integer methodIndex = methodIndexes.get(mth.resolve(root));
+			if (methodIndex == null) {
+				throw new JadxRuntimeException("Unknown method in usage: " + mth.getCls() + '.' + mth.getShortId());
+			}
+			writeUVInt(out, methodIndex);
 			mthMap.put(mth, j++);
 		}
 
@@ -282,12 +337,12 @@ public class UsageFileAdapter extends DataAdapterHelper {
 		}
 	}
 
-	private static List<String> readClsList(DataInputStream in, String[] classes) throws IOException {
+	private static List<ClassNode> readClsNodeList(DataInputStream in, ClassNode[] classes) throws IOException {
 		int count = readUVInt(in);
 		if (count == 0) {
 			return Collections.emptyList();
 		}
-		List<String> list = new ArrayList<>(count);
+		List<ClassNode> list = new ArrayList<>(count);
 		for (int i = 0; i < count; i++) {
 			list.add(classes[readUVInt(in)]);
 		}
@@ -309,14 +364,15 @@ public class UsageFileAdapter extends DataAdapterHelper {
 		}
 	}
 
-	private static List<MthRef> readMthList(DataInputStream in, MthRef[] methods) throws IOException {
+	private static List<MethodNode> readMethodNodeList(DataInputStream in, RootNode root, MthRef[] refs) throws IOException {
 		int count = readUVInt(in);
 		if (count == 0) {
 			return Collections.emptyList();
 		}
-		List<MthRef> list = new ArrayList<>(count);
+		List<MethodNode> list = new ArrayList<>(count);
 		for (int i = 0; i < count; i++) {
-			list.add(methods[readUVInt(in)]);
+			int index = readUVInt(in);
+			list.add(refs[index].resolve(root));
 		}
 		return list;
 	}
@@ -332,14 +388,21 @@ public class UsageFileAdapter extends DataAdapterHelper {
 		}
 	}
 
-	private static List<IMethodRef> readUnresolvedMthList(DataInputStream in, IMethodRef[] methods) throws IOException {
+	private static List<MethodInfo> readMethodInfoList(DataInputStream in, RootNode root, IMethodRef[] refs,
+			MethodInfo[] methods) throws IOException {
 		int count = readUVInt(in);
 		if (count == 0) {
 			return Collections.emptyList();
 		}
-		List<IMethodRef> list = new ArrayList<>(count);
+		List<MethodInfo> list = new ArrayList<>(count);
 		for (int i = 0; i < count; i++) {
-			list.add(methods[readUVInt(in)]);
+			int index = readUVInt(in);
+			MethodInfo method = methods[index];
+			if (method == null) {
+				method = MethodInfo.fromRef(root, refs[index]);
+				methods[index] = method;
+			}
+			list.add(method);
 		}
 		return list;
 	}

@@ -93,7 +93,8 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 	private Set<MethodNode> methodsUsed = Collections.emptySet();
 	// True if this method contains a self call
 	private boolean callsSelf = false;
-	// Keep pass state on the method so methods without checked exceptions don't need an attribute object.
+	// Keep pass state on the method so methods without checked exceptions don't need an attribute
+	// object.
 	private boolean methodThrowsVisited;
 
 	private JavaMethod javaNode;
@@ -749,12 +750,20 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 
 	// Do not modify passed list after setting
 	public void setUseIn(List<MethodNode> useIn) {
-		this.useIn = ListUtils.compactList(useIn);
+		setUseInDirect(useIn);
 
 		// Notify all methods (callers) this method (callee) is used in
 		for (MethodNode methodUsedIn : this.useIn) {
 			methodUsedIn.addUsed(this);
 		}
+	}
+
+	/**
+	 * Set callers without rebuilding the reverse "used methods" relation.
+	 * Use only when both directions of the usage graph are restored together.
+	 */
+	public void setUseInDirect(List<MethodNode> useIn) {
+		this.useIn = ListUtils.compactList(useIn);
 	}
 
 	public void addUsed(MethodNode used) {

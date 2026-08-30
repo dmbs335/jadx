@@ -7280,7 +7280,8 @@ public final class FinishTypeInference extends AbstractVisitor {
 			for (RegisterArg use : var.getUseList()) {
 				InsnNode useInsn = use.getParentInsn();
 				SSAVar resultVar = useInsn == null || useInsn.getResult() == null
-						? null : useInsn.getResult().getSVar();
+						? null
+						: useInsn.getResult().getSVar();
 				if (useInsn instanceof PhiInsn
 						&& resultVar != null && resultVar.isCodeVarSet()
 						&& resultVar.getCodeVar() == codeVar) {

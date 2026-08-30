@@ -285,7 +285,9 @@ public class TypeSearch {
 	}
 
 	private boolean addCandidateType(Set<ITypeBound> bounds, Set<ArgType> collectedTypes, ArgType candidateType) {
-		if (candidateType.isTypeKnown() && typeUpdate.inBounds(bounds, candidateType)) {
+		if (candidateType.isTypeKnown()
+				&& !collectedTypes.contains(candidateType)
+				&& typeUpdate.inBounds(bounds, candidateType)) {
 			collectedTypes.add(candidateType);
 			if (collectedTypes.size() > CANDIDATES_COUNT_LIMIT) {
 				return true;

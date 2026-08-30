@@ -28,6 +28,17 @@ import jadx.core.dex.nodes.RootNode;
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 class FixMultiEntryLoopsTest {
+	@Test
+	void failedProcessResultStopsAllFollowUpTransforms() throws Exception {
+		Class<?> resultClass = Class.forName(FixMultiEntryLoops.class.getName() + "$ProcessResult");
+		var field = resultClass.getDeclaredField("FAILED_MAY_HAVE_CHANGED");
+		field.setAccessible(true);
+		FixMultiEntryLoops.ProcessResult result = (FixMultiEntryLoops.ProcessResult) field.get(null);
+
+		assertThat(result.isFailed()).isTrue();
+		assertThat(result.isChanged()).isFalse();
+		assertThat(result.processAdditionalCoroutinePasses()).isFalse();
+	}
 
 	@Test
 	void testRejectSharedDirectPathFromSingleRewriteFastPath() {

@@ -285,6 +285,7 @@ public final class SqliteContentStore implements ContentStore {
 
 	@Override
 	public synchronized CompactionStats compact(long requestedMaxPackBytes) throws IOException {
+		ensureNoActiveIngest("compact");
 		long startNanos = System.nanoTime();
 		long maxPackBytes = requestedMaxPackBytes > 0 ? requestedMaxPackBytes : 512L * 1024 * 1024;
 		Set<String> pinnedObjects = findOutputPinnedObjects();
@@ -344,7 +345,14 @@ public final class SqliteContentStore implements ContentStore {
 
 	@Override
 	public synchronized PruneStats pruneRuns(int keepCompleteRunsPerApplication) throws IOException {
+		ensureNoActiveIngest("prune runs");
 		return pruneRuns(keepCompleteRunsPerApplication, true);
+	}
+
+	private void ensureNoActiveIngest(String operation) throws IOException {
+		if (activeIngestSession != null) {
+			throw new IOException("Can't " + operation + " while a content-store ingest session is active");
+		}
 	}
 
 	private PruneStats pruneRuns(int keepCompleteRunsPerApplication, boolean optimizeDatabase) throws IOException {

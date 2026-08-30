@@ -392,7 +392,8 @@ public class FileUtils {
 	/**
 	 * Convert a validated, host-independent archive path into a path that can be materialized on all
 	 * supported host file systems. ZIP uses '/' as a separator and permits characters such as ':'
-	 * that Windows does not. Percent escaping keeps the mapping deterministic and collision-free.
+	 * that Windows does not. Percent escaping keeps individual path conversion deterministic;
+	 * host-equivalent path collisions are resolved by the resource output registry.
 	 */
 	public static String toSafeFilePath(String archivePath) {
 		String normalizedPath = archivePath.replace('\\', '/');

@@ -1,8 +1,10 @@
 package jadx.core;
 
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -51,7 +53,9 @@ public class ProcessClass {
 			return null;
 		}
 		Utils.checkThreadInterrupt();
-		synchronized (cls.getClassInfo()) {
+		ReentrantLock decompileLock = cls.getDecompileLock();
+		decompileLock.lock();
+		try {
 			try {
 				prepareForProcessing(cls);
 				if (cls.getState() == GENERATED_AND_UNLOADED) {
@@ -98,6 +102,8 @@ public class ProcessClass {
 				cls.addError("Class process error: " + e.getClass().getSimpleName(), e);
 				return null;
 			}
+		} finally {
+			decompileLock.unlock();
 		}
 	}
 
@@ -139,14 +145,19 @@ public class ProcessClass {
 		try {
 			// Deep reload rebuilds dependency and codegen-dependency attributes. Do it
 			// before traversing these lists, otherwise this generation uses stale data.
-			synchronized (cls.getClassInfo()) {
+			ReentrantLock decompileLock = cls.getDecompileLock();
+			decompileLock.lock();
+			try {
 				prepareForProcessing(cls);
+			} finally {
+				decompileLock.unlock();
 			}
 			if (cls.contains(AFlag.DONT_GENERATE)) {
 				process(cls, false);
 				return NOT_GENERATED;
 			}
 			List<ClassNode> codegenDeps = cls.getCodegenDeps();
+			List<ClassNode> deferredDeps = null;
 			for (ClassNode depCls : cls.getDependencies()) {
 				if (depCls.getState() == GENERATED_AND_UNLOADED
 						&& depCls.contains(AFlag.CLASS_DEEP_RELOAD)
@@ -156,7 +167,17 @@ public class ProcessClass {
 					// in its intended codegen-dependency slot below.
 					continue;
 				}
-				process(depCls, false);
+				if (!tryProcessDependency(depCls)) {
+					if (deferredDeps == null) {
+						deferredDeps = new ArrayList<>();
+					}
+					deferredDeps.add(depCls);
+				}
+			}
+			if (deferredDeps != null) {
+				for (ClassNode deferredDep : deferredDeps) {
+					process(deferredDep, false);
+				}
 			}
 			if (!codegenDeps.isEmpty()) {
 				process(cls, false);
@@ -173,6 +194,22 @@ public class ProcessClass {
 			throw e;
 		} catch (StackOverflowError | Exception e) {
 			throw new JadxRuntimeException("Failed to generate code for class: " + cls.getFullName(), e);
+		}
+	}
+
+	private boolean tryProcessDependency(ClassNode cls) {
+		if (cls.getState() == PROCESS_COMPLETE) {
+			return true;
+		}
+		ReentrantLock lock = cls.getDecompileLock();
+		if (!lock.tryLock()) {
+			return false;
+		}
+		try {
+			process(cls, false);
+			return true;
+		} finally {
+			lock.unlock();
 		}
 	}
 
@@ -278,7 +315,9 @@ public class ProcessClass {
 
 	public boolean processMethodToVisitor(MethodNode mth, IDexTreeVisitor lastPassToProcess) {
 		ClassNode topCls = mth.getTopParentClass();
-		synchronized (topCls.getClassInfo()) {
+		ReentrantLock decompileLock = topCls.getDecompileLock();
+		decompileLock.lock();
+		try {
 			try {
 				mth.unload();
 				mth.load();
@@ -296,6 +335,8 @@ public class ProcessClass {
 				throw new JadxRuntimeException("Failed to process method to visitor: " + lastPassToProcess, e);
 			}
 			return false;
+		} finally {
+			decompileLock.unlock();
 		}
 	}
 

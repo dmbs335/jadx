@@ -20,6 +20,26 @@ public class EmptyCodeLoader implements ICodeLoader {
 	}
 
 	@Override
+	public int getClassesCount() {
+		return 0;
+	}
+
+	@Override
+	public int getMethodsCount() {
+		return 0;
+	}
+
+	@Override
+	public int getFieldsCount() {
+		return 0;
+	}
+
+	@Override
+	public int getTypesCount() {
+		return 0;
+	}
+
+	@Override
 	public void close() throws IOException {
 	}
 }

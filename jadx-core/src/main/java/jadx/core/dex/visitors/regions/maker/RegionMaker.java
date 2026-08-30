@@ -46,6 +46,7 @@ import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.conditions.IfRegion;
 import jadx.core.dex.regions.loops.LoopRegion;
 import jadx.core.dex.visitors.kotlin.CoroutineMethodUtils;
+import jadx.core.dex.visitors.kotlin.KtorCioRecovery;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.blocks.BlockSet;
 import jadx.core.utils.exceptions.JadxOverflowException;
@@ -90,7 +91,7 @@ public class RegionMaker {
 		this.loopCarryTailBlocks = BlockSet.empty(mth);
 		this.safeSwitchSharedBlocks = BlockSet.empty(mth);
 		this.regionsLimit = mth.getBasicBlocks().size() * 400;
-		this.allowSinglePredecessorTerminalDuplication = isKtorReadPacketMethod(mth);
+		this.allowSinglePredecessorTerminalDuplication = KtorCioRecovery.isReadPacketMethod(mth);
 	}
 
 	void registerIfRegion(BlockNode block, IfRegion ifRegion) {
@@ -111,14 +112,6 @@ public class RegionMaker {
 
 	void registerSafeSwitchSharedDuplication(BlockNode block) {
 		safeSwitchSharedBlocks.add(block);
-	}
-
-	private static boolean isKtorReadPacketMethod(MethodNode mth) {
-		List<ArgType> argTypes = mth.getMethodInfo().getArgumentsTypes();
-		return mth.getName().equals("readPacket")
-				&& argTypes.size() == 3
-				&& argTypes.get(1).equals(ArgType.INT)
-				&& mth.getParentClass().getRawName().equals("io.ktor.utils.io.ByteReadChannelOperationsKt");
 	}
 
 	public Region makeMthRegion() {

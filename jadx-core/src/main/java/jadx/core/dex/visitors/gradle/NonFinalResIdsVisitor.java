@@ -1,9 +1,6 @@
 package jadx.core.dex.visitors.gradle;
 
-
 import jadx.api.plugins.input.data.annotations.AnnotationVisibility;
-import jadx.api.plugins.input.data.annotations.EncodedValue;
-import jadx.api.plugins.input.data.annotations.IAnnotation;
 import jadx.api.plugins.input.data.attributes.JadxAttrType;
 import jadx.api.plugins.input.data.attributes.types.AnnotationsAttr;
 import jadx.core.dex.attributes.nodes.CodeFeaturesAttr;

@@ -10,8 +10,8 @@ import java.security.MessageDigest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import jadx.api.JadxDecompiler;
 import jadx.api.JadxArgs;
+import jadx.api.JadxDecompiler;
 import jadx.api.ResourceFile;
 import jadx.api.ResourcesLoader;
 import jadx.api.security.IJadxSecurity;
@@ -27,12 +27,15 @@ public class ResourcesSaver implements Runnable {
 	private final File outDir;
 	private final IJadxSecurity security;
 	private final JadxArgs args;
+	private final ResourceOutputRegistry outputRegistry;
 
-	public ResourcesSaver(JadxDecompiler decompiler, File outDir, ResourceFile resourceFile) {
+	public ResourcesSaver(JadxDecompiler decompiler, File outDir, ResourceFile resourceFile,
+			ResourceOutputRegistry outputRegistry) {
 		this.resourceFile = resourceFile;
 		this.outDir = outDir;
 		this.args = decompiler.getArgs();
 		this.security = args.getSecurity();
+		this.outputRegistry = outputRegistry;
 	}
 
 	@Override
@@ -49,7 +52,7 @@ public class ResourcesSaver implements Runnable {
 			return;
 		}
 		if (rc.getDataType() == ResContainer.DataType.RES_TABLE) {
-			saveToFile(rc, new File(outDir, "res/values/public.xml"));
+			saveToFile(rc, resolveOutputFile("res/values/public.xml"));
 			for (ResContainer subFile : rc.getSubFiles()) {
 				saveResources(subFile);
 			}
@@ -59,13 +62,16 @@ public class ResourcesSaver implements Runnable {
 	}
 
 	private void save(ResContainer rc, File outDir) {
-		String safeFileName = FileUtils.toSafeFilePath(rc.getFileName());
-		File outFile = new File(outDir, safeFileName);
+		File outFile = resolveOutputFile(rc.getFileName());
 		if (!security.isInSubDirectory(outDir, outFile)) {
 			LOG.error("Invalid resource name or path traversal attack detected: {}", outFile.getPath());
 			return;
 		}
 		saveToFile(rc, outFile);
+	}
+
+	private File resolveOutputFile(String archivePath) {
+		return new File(outDir, outputRegistry.resolve(archivePath));
 	}
 
 	private void saveToFile(ResContainer rc, File outFile) {

@@ -3,7 +3,6 @@ package jadx.plugins.input.dex.sections;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.function.Consumer;
 
 import org.jetbrains.annotations.Nullable;
@@ -18,6 +17,7 @@ import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.data.annotations.IAnnotation;
 import jadx.api.plugins.input.data.attributes.IJadxAttribute;
 import jadx.api.plugins.input.data.attributes.types.SourceFileAttr;
+import jadx.plugins.input.dex.sections.annotations.AnnotationsOffsets;
 import jadx.plugins.input.dex.sections.annotations.AnnotationsParser;
 import jadx.plugins.input.dex.utils.SmaliUtils;
 
@@ -119,15 +119,15 @@ public class DexClassData extends SectionReader implements IClassData {
 	}
 
 	private void visitFields(Consumer<IFieldData> fieldConsumer, SectionReader data, int staticFieldsCount, int instanceFieldsCount) {
-		Map<Integer, Integer> annotationOffsetMap = annotationsParser.readFieldsAnnotationOffsetMap();
+		AnnotationsOffsets annotationOffsets = annotationsParser.readFieldsAnnotationOffsets();
 		DexFieldData fieldData = new DexFieldData(annotationsParser);
 		fieldData.setParentClassType(getType());
-		readFields(fieldConsumer, data, fieldData, staticFieldsCount, annotationOffsetMap, true);
-		readFields(fieldConsumer, data, fieldData, instanceFieldsCount, annotationOffsetMap, false);
+		readFields(fieldConsumer, data, fieldData, staticFieldsCount, annotationOffsets, true);
+		readFields(fieldConsumer, data, fieldData, instanceFieldsCount, annotationOffsets, false);
 	}
 
 	private void readFields(Consumer<IFieldData> fieldConsumer, SectionReader data, DexFieldData fieldData, int count,
-			Map<Integer, Integer> annOffsetMap, boolean staticFields) {
+			AnnotationsOffsets annotationOffsets, boolean staticFields) {
 		List<EncodedValue> constValues = staticFields ? getStaticFieldInitValues(data.copy()) : null;
 		int fieldId = 0;
 		for (int i = 0; i < count; i++) {
@@ -135,7 +135,7 @@ public class DexClassData extends SectionReader implements IClassData {
 			int accFlags = data.readUleb128();
 			fillFieldData(fieldData, fieldId);
 			fieldData.setAccessFlags(accFlags);
-			fieldData.setAnnotationsOffset(getOffsetFromMap(fieldId, annOffsetMap));
+			fieldData.setAnnotationsOffset(annotationOffsets.get(fieldId));
 			fieldData.setConstValue(staticFields && i < constValues.size() ? constValues.get(i) : null);
 			fieldConsumer.accept(fieldData);
 		}
@@ -144,15 +144,15 @@ public class DexClassData extends SectionReader implements IClassData {
 	private void visitMethods(Consumer<IMethodData> mthConsumer, SectionReader data, int directMthCount, int virtualMthCount) {
 		DexMethodData methodData = new DexMethodData(annotationsParser);
 		methodData.setMethodRef(new DexMethodRef());
-		Map<Integer, Integer> annotationOffsetMap = annotationsParser.readMethodsAnnotationOffsetMap();
-		Map<Integer, Integer> paramsAnnOffsetMap = annotationsParser.readMethodParamsAnnRefOffsetMap();
+		AnnotationsOffsets annotationOffsets = annotationsParser.readMethodsAnnotationOffsets();
+		AnnotationsOffsets paramsAnnotationOffsets = annotationsParser.readMethodParamsAnnRefOffsets();
 
-		readMethods(mthConsumer, data, methodData, directMthCount, annotationOffsetMap, paramsAnnOffsetMap);
-		readMethods(mthConsumer, data, methodData, virtualMthCount, annotationOffsetMap, paramsAnnOffsetMap);
+		readMethods(mthConsumer, data, methodData, directMthCount, annotationOffsets, paramsAnnotationOffsets);
+		readMethods(mthConsumer, data, methodData, virtualMthCount, annotationOffsets, paramsAnnotationOffsets);
 	}
 
 	private void readMethods(Consumer<IMethodData> mthConsumer, SectionReader data, DexMethodData methodData, int count,
-			Map<Integer, Integer> annotationOffsetMap, Map<Integer, Integer> paramsAnnOffsetMap) {
+			AnnotationsOffsets annotationOffsets, AnnotationsOffsets paramsAnnotationOffsets) {
 		DexCodeReader dexCodeReader = new DexCodeReader(super.copy());
 		int mthIdx = 0;
 		for (int i = 0; i < count; i++) {
@@ -171,15 +171,10 @@ public class DexClassData extends SectionReader implements IClassData {
 				dexCodeReader.setOffset(codeOff);
 				methodData.setCodeReader(dexCodeReader);
 			}
-			methodData.setAnnotationsOffset(getOffsetFromMap(mthIdx, annotationOffsetMap));
-			methodData.setParamAnnotationsOffset(getOffsetFromMap(mthIdx, paramsAnnOffsetMap));
+			methodData.setAnnotationsOffset(annotationOffsets.get(mthIdx));
+			methodData.setParamAnnotationsOffset(paramsAnnotationOffsets.get(mthIdx));
 			mthConsumer.accept(methodData);
 		}
-	}
-
-	private static int getOffsetFromMap(int idx, Map<Integer, Integer> annOffsetMap) {
-		Integer offset = annOffsetMap.get(idx);
-		return offset != null ? offset : 0;
 	}
 
 	private List<EncodedValue> getStaticFieldInitValues(SectionReader reader) {

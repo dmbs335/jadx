@@ -34,6 +34,7 @@ import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.SwitchRegion;
 import jadx.core.dex.regions.SwitchRegion.CaseInfo;
+import jadx.core.dex.visitors.kotlin.KtorCioRecovery;
 import jadx.core.dex.visitors.regions.AbstractRegionVisitor;
 import jadx.core.dex.visitors.regions.DepthRegionTraversal;
 import jadx.core.dex.visitors.regions.SwitchBreakVisitor;
@@ -505,9 +506,7 @@ public final class SwitchRegionMaker {
 	private static boolean containsTimeoutStop(BlockNode block) {
 		for (InsnNode insn : block.getInstructions()) {
 			Boolean found = insn.visitInsns(inner -> inner instanceof InvokeNode
-					&& ((InvokeNode) inner).getCallMth().getName().equals("stop")
-					&& ((InvokeNode) inner).getCallMth().getDeclClass().getFullName()
-							.equals("io.ktor.network.util.Timeout") ? Boolean.TRUE : null);
+					&& KtorCioRecovery.isTimeoutStopInvoke((InvokeNode) inner) ? Boolean.TRUE : null);
 			if (found != null) {
 				return true;
 			}
@@ -522,9 +521,7 @@ public final class SwitchRegionMaker {
 					return null;
 				}
 				InvokeNode invoke = (InvokeNode) inner;
-				return invoke.getCallMth().getName().equals("isClosedForWrite")
-						&& invoke.getCallMth().getDeclClass().getFullName()
-								.equals("io.ktor.utils.io.ByteChannel") ? Boolean.TRUE : null;
+				return KtorCioRecovery.isByteChannelClosedForWriteInvoke(invoke) ? Boolean.TRUE : null;
 			});
 			if (found != null) {
 				return true;

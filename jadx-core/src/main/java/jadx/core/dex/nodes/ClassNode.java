@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
@@ -98,6 +99,7 @@ public class ClassNode extends NotificationAttrNode
 	private ClassNode parentClass = this;
 
 	private volatile ProcessState state = ProcessState.NOT_LOADED;
+	private final ReentrantLock decompileLock = new ReentrantLock();
 	private LoadStage loadStage = LoadStage.NONE;
 
 	/**
@@ -118,7 +120,7 @@ public class ClassNode extends NotificationAttrNode
 	private List<MethodNode> useInMth = Collections.emptyList();
 
 	// cache maps
-	private Map<MethodInfo, MethodNode> mthInfoMap = Collections.emptyMap();
+	private Map<String, MethodNode> mthByShortId = Collections.emptyMap();
 
 	private JavaClass javaNode;
 
@@ -545,7 +547,8 @@ public class ClassNode extends NotificationAttrNode
 		if (state == NOT_LOADED) {
 			return;
 		}
-		synchronized (clsInfo) { // decompilation sync
+		decompileLock.lock();
+		try {
 			methods.forEach(MethodNode::unload);
 			innerClasses.forEach(ClassNode::unload);
 			fields.forEach(FieldNode::unload);
@@ -553,13 +556,15 @@ public class ClassNode extends NotificationAttrNode
 			setState(NOT_LOADED);
 			this.loadStage = LoadStage.NONE;
 			this.smali = null;
+		} finally {
+			decompileLock.unlock();
 		}
 	}
 
 	private void buildCache() {
-		mthInfoMap = new HashMap<>(methods.size());
+		mthByShortId = Utils.newHashMap(methods.size());
 		for (MethodNode mth : methods) {
-			mthInfoMap.put(mth.getMethodInfo(), mth);
+			mthByShortId.put(mth.getMethodInfo().getShortId(), mth);
 		}
 	}
 
@@ -769,16 +774,14 @@ public class ClassNode extends NotificationAttrNode
 	}
 
 	public MethodNode searchMethod(MethodInfo mth) {
-		return mthInfoMap.get(mth);
+		if (!mth.getDeclClass().equals(clsInfo)) {
+			return null;
+		}
+		return mthByShortId.get(mth.getShortId());
 	}
 
 	public MethodNode searchMethodByShortId(String shortId) {
-		for (MethodNode m : methods) {
-			if (m.getMethodInfo().getShortId().equals(shortId)) {
-				return m;
-			}
-		}
-		return null;
+		return mthByShortId.get(shortId);
 	}
 
 	/**
@@ -1096,6 +1099,10 @@ public class ClassNode extends NotificationAttrNode
 
 	public void setState(ProcessState state) {
 		this.state = state;
+	}
+
+	public ReentrantLock getDecompileLock() {
+		return decompileLock;
 	}
 
 	public LoadStage getLoadStage() {

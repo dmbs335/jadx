@@ -50,13 +50,14 @@ import jadx.core.dex.nodes.InsnContainer;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.Region;
+import jadx.core.dex.regions.SwitchRegion;
 import jadx.core.dex.regions.conditions.IfCondition;
 import jadx.core.dex.regions.conditions.IfInfo;
 import jadx.core.dex.regions.conditions.IfRegion;
 import jadx.core.dex.regions.loops.LoopRegion;
-import jadx.core.dex.regions.SwitchRegion;
 import jadx.core.dex.trycatch.ExcHandlerAttr;
 import jadx.core.dex.visitors.kotlin.CoroutineMethodUtils;
+import jadx.core.dex.visitors.kotlin.KtorCioRecovery;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.ListUtils;
 import jadx.core.utils.blocks.BlockSet;
@@ -1527,9 +1528,7 @@ final class IfRegionMaker {
 		for (BlockNode predecessor : block.getPredecessors()) {
 			for (InsnNode insn : predecessor.getInstructions()) {
 				if (insn instanceof InvokeNode
-						&& ((InvokeNode) insn).getCallMth().getName().equals("stop")
-						&& ((InvokeNode) insn).getCallMth().getDeclClass().getFullName()
-								.equals("io.ktor.network.util.Timeout")) {
+						&& KtorCioRecovery.isTimeoutStopInvoke((InvokeNode) insn)) {
 					return true;
 				}
 			}
@@ -1736,7 +1735,7 @@ final class IfRegionMaker {
 			}
 		}
 		if (!allPathsReachOwnedOut(action, out, releasedExits, stack,
-						new HashSet<>(), new HashSet<>(), 0)) {
+				new HashSet<>(), new HashSet<>(), 0)) {
 			return null;
 		}
 		Set<BlockNode> duplicatedPath = new HashSet<>();
@@ -3484,7 +3483,7 @@ final class IfRegionMaker {
 			int useCount = useList.size();
 			if (useCount > 1 && insn.visitArgs(arg -> arg.isRegister()
 					&& ((RegisterArg) arg).getRegNum() == res.getRegNum() ? arg : null) != null) {
-				// A condition merge duplicates uses before FORCE_ASSIGN_INLINE is applied.  The
+				// A condition merge duplicates uses before FORCE_ASSIGN_INLINE is applied. The
 				// shrink pass deliberately keeps a self-overwriting assignment (rX = rX.field),
 				// so consuming its block here would leave the copied condition uses undefined.
 				return false;

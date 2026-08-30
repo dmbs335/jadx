@@ -11,11 +11,20 @@ import java.util.Set;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.MethodNode;
+import jadx.core.utils.Utils;
 
 class RawUsageData {
 
-	private final Map<String, ClsUsageData> clsMap = new HashMap<>();
+	private final Map<String, ClsUsageData> clsMap;
 	private List<String> classesWithoutData = Collections.emptyList();
+
+	public RawUsageData() {
+		clsMap = new HashMap<>();
+	}
+
+	public RawUsageData(int expectedClasses) {
+		clsMap = Utils.newHashMap(expectedClasses);
+	}
 
 	public Map<String, ClsUsageData> getClsMap() {
 		return clsMap;
@@ -39,7 +48,7 @@ class RawUsageData {
 		Map<String, MthUsageData> usageMap = getClassData(parentClass).getMthUsage();
 		MthUsageData usageData = usageMap.get(shortId);
 		if (usageData == null) {
-			usageData = new MthUsageData(new MthRef(parentClass.getRawName(), shortId));
+			usageData = new MthUsageData(new MthRef(mth));
 			usageMap.put(shortId, usageData);
 		}
 		return usageData;

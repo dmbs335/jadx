@@ -47,7 +47,7 @@ public class UsageInfo implements IUsageInfoData {
 		clsUsage.visitSorted(ClassNode::setUseIn);
 		clsUseInMth.visitSorted(ClassNode::setUseInMth);
 		fieldUsage.visitSorted(FieldNode::setUseIn);
-		mthUsage.visitSorted(MethodNode::setUseIn);
+		mthUsage.visitSorted(MethodNode::setUseInDirect);
 		mthUses.visitSorted(MethodNode::setUsed);
 		unresolvedMthUsage.visitSorted(MethodNode::setUnresolvedUsed);
 		selfCalls.forEach(MethodNode::setCallsSelf);

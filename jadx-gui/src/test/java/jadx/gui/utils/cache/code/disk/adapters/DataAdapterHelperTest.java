@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import jadx.gui.cache.code.disk.adapters.DataAdapterHelper;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class DataAdapterHelperTest {
 
@@ -27,6 +28,20 @@ class DataAdapterHelperTest {
 		checkUVIntFor(Integer.MAX_VALUE);
 	}
 
+	@Test
+	void rejectOverflowingUVInt() {
+		assertThatThrownBy(() -> readUVInt(0x80, 0x80, 0x80, 0x80, 0x08))
+				.isInstanceOf(IOException.class)
+				.hasMessage("Unsigned variable integer overflow");
+	}
+
+	@Test
+	void rejectTooLongUVInt() {
+		assertThatThrownBy(() -> readUVInt(0x80, 0x80, 0x80, 0x80, 0x80))
+				.isInstanceOf(IOException.class)
+				.hasMessage("Unsigned variable integer is too long");
+	}
+
 	private void checkUVIntFor(int val) throws IOException {
 		assertThat(writeReadUVInt(val)).isEqualTo(val);
 	}
@@ -38,5 +53,13 @@ class DataAdapterHelperTest {
 
 		DataInput in = new DataInputStream(new ByteArrayInputStream(byteOut.toByteArray()));
 		return DataAdapterHelper.readUVInt(in);
+	}
+
+	private static int readUVInt(int... bytes) throws IOException {
+		byte[] input = new byte[bytes.length];
+		for (int i = 0; i < bytes.length; i++) {
+			input[i] = (byte) bytes[i];
+		}
+		return DataAdapterHelper.readUVInt(new DataInputStream(new ByteArrayInputStream(input)));
 	}
 }

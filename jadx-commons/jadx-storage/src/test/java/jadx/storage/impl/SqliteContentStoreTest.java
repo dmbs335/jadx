@@ -1,5 +1,6 @@
 package jadx.storage.impl;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,6 +25,7 @@ import jadx.storage.api.MaterializationMode;
 import jadx.storage.api.PruneStats;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class SqliteContentStoreTest {
 	private static final String SOURCE = "package test;\n"
@@ -144,6 +146,31 @@ class SqliteContentStoreTest {
 		assertThat(stats.getHardLinkCount() + stats.getHardLinkFallbackCount()).isEqualTo(3);
 		for (int i = 0; i < 3; i++) {
 			assertThat(output.resolve("sources/test/Web" + i + ".java")).hasContent(SOURCE);
+		}
+	}
+
+	@Test
+	void maintenanceCannotCommitAnActiveIngestTransaction() throws Exception {
+		Path storeDir = tempDir.resolve("active-transaction-store");
+		Path output = writeOutput("active-transaction-output");
+		Path input = writeFile("active-transaction.apk", "app");
+		try (SqliteContentStore store = SqliteContentStore.open(storeDir);
+				ContentIngestSession session = store.beginIngest(
+						request("active-transaction", input, output, MaterializationMode.KEEP))) {
+			session.ingest(output.resolve("sources/test/Web.java"));
+
+			assertThatThrownBy(() -> store.compact(1024))
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("ingest session is active");
+			assertThatThrownBy(() -> store.pruneRuns(1))
+					.isInstanceOf(IOException.class)
+					.hasMessageContaining("ingest session is active");
+
+			IngestStats stats = session.complete();
+			assertThat(stats.getArtifactCount()).isEqualTo(1);
+			assertThat(store.search("addJavascriptInterface", 10)).hasSize(1);
+			assertThat(store.compact(1024).getObjectCount()).isEqualTo(1);
+			assertThat(store.pruneRuns(1).getRunCount()).isZero();
 		}
 	}
 

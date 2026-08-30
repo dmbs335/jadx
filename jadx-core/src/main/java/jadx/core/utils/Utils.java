@@ -30,7 +30,6 @@ import org.slf4j.LoggerFactory;
 import jadx.api.ICodeWriter;
 import jadx.api.JadxDecompiler;
 import jadx.core.dex.visitors.DepthTraversal;
-import jadx.core.utils.exceptions.JadxRuntimeException;
 import jadx.core.utils.exceptions.JadxTaskCancelledException;
 
 public class Utils {
@@ -443,6 +442,26 @@ public class Utils {
 		result.addAll(first);
 		result.addAll(second);
 		return result;
+	}
+
+	/**
+	 * Allocate a {@link HashMap} for the expected number of mappings, accounting for its default
+	 * load factor. Passing the expected mapping count directly to the constructor causes another
+	 * resize after the map reaches 75% of that value.
+	 */
+	public static <K, V> HashMap<K, V> newHashMap(int expectedSize) {
+		if (expectedSize < 0) {
+			throw new IllegalArgumentException("Negative expected size: " + expectedSize);
+		}
+		int capacity;
+		if (expectedSize < 3) {
+			capacity = expectedSize + 1;
+		} else if (expectedSize < 1 << 30) {
+			capacity = (int) (expectedSize / 0.75f + 1.0f);
+		} else {
+			capacity = Integer.MAX_VALUE;
+		}
+		return new HashMap<>(capacity);
 	}
 
 	public static Map<String, String> newConstStringMap(String... parameters) {

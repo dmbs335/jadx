@@ -41,7 +41,7 @@ class UsageData implements IUsageInfoData {
 				String clsRawName = cls.getRawName();
 				ClsUsageData clsUsageData = clsMap.get(clsRawName);
 				if (clsUsageData != null) {
-					applyForClass(clsUsageData, cls);
+					applyForClass(clsUsageData, cls, true);
 				}
 			}
 		} finally {
@@ -61,29 +61,41 @@ class UsageData implements IUsageInfoData {
 			LOG.debug("No usage data for class: {}", clsRawName);
 			return;
 		}
-		applyForClass(clsUsageData, cls);
+		applyForClass(clsUsageData, cls, false);
 	}
 
-	private void applyForClass(ClsUsageData clsUsageData, ClassNode cls) {
-		cls.setDependencies(resolveClsList(clsUsageData.getClsDeps()));
-		cls.setUseIn(resolveClsList(clsUsageData.getClsUsage()));
-		cls.setUseInMth(resolveMthList(clsUsageData.getClsUseInMth()));
+	private void applyForClass(ClsUsageData clsUsageData, ClassNode cls, boolean fullGraph) {
+		List<ClassNode> resolvedClsDeps = clsUsageData.getResolvedClsDeps();
+		cls.setDependencies(resolvedClsDeps != null ? resolvedClsDeps : resolveClsList(clsUsageData.getClsDeps()));
+		List<ClassNode> resolvedClsUsage = clsUsageData.getResolvedClsUsage();
+		cls.setUseIn(resolvedClsUsage != null ? resolvedClsUsage : resolveClsList(clsUsageData.getClsUsage()));
+		List<MethodNode> resolvedClsUseInMth = clsUsageData.getResolvedClsUseInMth();
+		cls.setUseInMth(resolvedClsUseInMth != null ? resolvedClsUseInMth : resolveMthList(clsUsageData.getClsUseInMth()));
 
-		Map<String, MthUsageData> mthUsage = clsUsageData.getMthUsage();
-		for (MethodNode mth : cls.getMethods()) {
-			MthUsageData mthUsageData = mthUsage.get(mth.getMethodInfo().getShortId());
-			if (mthUsageData != null) {
-				mth.setUseIn(resolveMthList(mthUsageData.getUsage()));
-				mth.setUsed(resolveMthList(mthUsageData.getUses()));
-				mth.setUnresolvedUsed(resolveMthInfoList(mthUsageData.getUnresolvedUsage()));
-				mth.setCallsSelf(mthUsageData.callsSelf());
+		for (MthUsageData mthUsageData : clsUsageData.getMthUsage().values()) {
+			MethodNode resolvedMethod = mthUsageData.getResolvedMethod();
+			MethodNode mth = resolvedMethod != null ? resolvedMethod : mthUsageData.getMthRef().resolve(root);
+			List<MethodNode> resolvedUsage = mthUsageData.getResolvedUsage();
+			List<MethodNode> callers = resolvedUsage != null ? resolvedUsage : resolveMthList(mthUsageData.getUsage());
+			if (fullGraph) {
+				mth.setUseInDirect(callers);
+			} else {
+				mth.setUseIn(callers);
 			}
+			List<MethodNode> resolvedUses = mthUsageData.getResolvedUses();
+			mth.setUsed(resolvedUses != null ? resolvedUses : resolveMthList(mthUsageData.getUses()));
+			List<MethodInfo> resolvedUnresolvedUsage = mthUsageData.getResolvedUnresolvedUsage();
+			mth.setUnresolvedUsed(resolvedUnresolvedUsage != null
+					? resolvedUnresolvedUsage
+					: resolveMthInfoList(mthUsageData.getUnresolvedUsage()));
+			mth.setCallsSelf(mthUsageData.callsSelf());
 		}
 		Map<String, FldUsageData> fldUsage = clsUsageData.getFldUsage();
 		for (FieldNode fld : cls.getFields()) {
 			FldUsageData fldUsageData = fldUsage.get(fld.getFieldInfo().getShortId());
 			if (fldUsageData != null) {
-				fld.setUseIn(resolveMthList(fldUsageData.getUsage()));
+				List<MethodNode> resolvedUsage = fldUsageData.getResolvedUsage();
+				fld.setUseIn(resolvedUsage != null ? resolvedUsage : resolveMthList(fldUsageData.getUsage()));
 			}
 		}
 	}
@@ -98,7 +110,7 @@ class UsageData implements IUsageInfoData {
 	}
 
 	private List<MethodNode> resolveMthList(List<MthRef> mthRefList) {
-		return Utils.collectionMap(mthRefList, m -> root.resolveDirectMethod(m.getCls(), m.getShortId()));
+		return Utils.collectionMap(mthRefList, m -> m.resolve(root));
 	}
 
 	private List<MethodInfo> resolveMthInfoList(List<IMethodRef> mthRefList) {
