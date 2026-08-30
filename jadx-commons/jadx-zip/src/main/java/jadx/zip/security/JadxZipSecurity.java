@@ -2,8 +2,6 @@ package jadx.zip.security;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -12,8 +10,6 @@ import jadx.zip.IZipEntry;
 
 public class JadxZipSecurity implements IJadxZipSecurity {
 	private static final Logger LOG = LoggerFactory.getLogger(JadxZipSecurity.class);
-
-	private static final Path CWD = Paths.get(".").toAbsolutePath().normalize();
 
 	/**
 	 * The size of uncompressed zip entry shouldn't be bigger of compressed in zipBombDetectionFactor
@@ -52,33 +48,33 @@ public class JadxZipSecurity implements IJadxZipSecurity {
 	 */
 	@Override
 	public boolean isValidEntryName(String entryName) {
-		if (entryName.contains("..")) { // quick pre-check
-			if (entryName.contains("../") || entryName.contains("..\\")) {
+		if (entryName.indexOf('\0') != -1) {
+			LOG.error("Invalid null character in zip entry name: {}", entryName);
+			return false;
+		}
+
+		// ZIP entry names use '/' regardless of the host OS. Treat '\\' as a separator too,
+		// because it becomes one when an archive is extracted on Windows. Using Paths.get here
+		// makes validation host-dependent and rejects valid ZIP names such as "assets/api:variant/get".
+		String zipPath = entryName.replace('\\', '/');
+		if (zipPath.startsWith("/") || hasWindowsDrivePrefix(zipPath)) {
+			LOG.error("Path traversal attack detected (absolute path) in entry: {}", entryName);
+			return false;
+		}
+		for (String segment : zipPath.split("/", -1)) {
+			if (segment.equals("..")) {
 				LOG.error("Path traversal attack detected in entry: '{}'", entryName);
 				return false;
 			}
 		}
-		// Path traversal check as presented on
-		// https://www.heise.de/en/background/Secure-Coding-Best-practices-for-using-Java-NIO-against-path-traversal-9996787.html
-		try {
-			Path entryPathPart = Paths.get(entryName).normalize();
-			if (entryPathPart.startsWith(CWD) || entryPathPart.isAbsolute()) {
-				// reject entry name if it is already a full path to CWD, otherwise next check will always pass
-				// reject absolute path as well
-				LOG.error("Path traversal attack detected (absolute path) in entry: {}", entryName);
-				return false;
-			}
-			Path entryPath = CWD.resolve(entryPathPart).normalize();
-			if (entryPath.startsWith(CWD)) {
-				return true;
-			}
-		} catch (Exception e) {
-			// check failed
-			LOG.error("Invalid file name or path traversal attack detected: {} - error: {}", entryName, e.getMessage());
-			return false;
-		}
-		LOG.error("Invalid file name or path traversal attack detected: {}", entryName);
-		return false;
+		return true;
+	}
+
+	private static boolean hasWindowsDrivePrefix(String path) {
+		return path.length() >= 2
+				&& path.charAt(1) == ':'
+				&& ((path.charAt(0) >= 'A' && path.charAt(0) <= 'Z')
+						|| (path.charAt(0) >= 'a' && path.charAt(0) <= 'z'));
 	}
 
 	@Override

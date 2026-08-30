@@ -4,6 +4,7 @@ import org.jetbrains.annotations.Nullable;
 
 import jadx.api.plugins.input.data.ICallSite;
 import jadx.api.plugins.input.data.IFieldRef;
+import jadx.api.plugins.input.data.IFieldRefVisitor;
 import jadx.api.plugins.input.data.IMethodHandle;
 import jadx.api.plugins.input.data.IMethodProto;
 import jadx.api.plugins.input.data.IMethodRef;
@@ -129,6 +130,11 @@ public class DexInsnData implements InsnData {
 	@Override
 	public IFieldRef getIndexAsField() {
 		return externalReader.getFieldRef(index);
+	}
+
+	@Override
+	public void visitIndexAsField(IFieldRefVisitor visitor) {
+		externalReader.visitFieldRef(index, visitor);
 	}
 
 	@Override

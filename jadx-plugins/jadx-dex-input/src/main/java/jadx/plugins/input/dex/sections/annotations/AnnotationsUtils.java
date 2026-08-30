@@ -13,10 +13,10 @@ public class AnnotationsUtils {
 
 	@SuppressWarnings("unchecked")
 	public static <T> T getValue(IAnnotation ann, String name, EncodedType type, T defValue) {
-		if (ann == null || ann.getValues() == null || ann.getValues().isEmpty()) {
+		if (ann == null || ann.isValuesEmpty()) {
 			return defValue;
 		}
-		EncodedValue encodedValue = ann.getValues().get(name);
+		EncodedValue encodedValue = ann.getValue(name);
 		if (encodedValue == null || encodedValue.getType() != type) {
 			return defValue;
 		}
@@ -25,10 +25,10 @@ public class AnnotationsUtils {
 
 	@Nullable
 	public static Object getValue(IAnnotation ann, String name, EncodedType type) {
-		if (ann == null || ann.getValues() == null || ann.getValues().isEmpty()) {
+		if (ann == null || ann.isValuesEmpty()) {
 			return null;
 		}
-		EncodedValue encodedValue = ann.getValues().get(name);
+		EncodedValue encodedValue = ann.getValue(name);
 		if (encodedValue == null || encodedValue.getType() != type) {
 			return null;
 		}
@@ -37,10 +37,10 @@ public class AnnotationsUtils {
 
 	@SuppressWarnings("unchecked")
 	public static List<EncodedValue> getArray(IAnnotation ann, String name) {
-		if (ann == null || ann.getValues() == null || ann.getValues().isEmpty()) {
+		if (ann == null || ann.isValuesEmpty()) {
 			return Collections.emptyList();
 		}
-		EncodedValue encodedValue = ann.getValues().get(name);
+		EncodedValue encodedValue = ann.getValue(name);
 		if (encodedValue == null || encodedValue.getType() != EncodedType.ENCODED_ARRAY) {
 			return Collections.emptyList();
 		}

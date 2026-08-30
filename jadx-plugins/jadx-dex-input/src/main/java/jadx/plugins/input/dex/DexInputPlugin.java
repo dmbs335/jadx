@@ -32,6 +32,8 @@ public class DexInputPlugin implements JadxPlugin {
 		context.registerOptions(options);
 		context.addCodeInput(this::loadFiles);
 		loader.setZipReader(context.getZipReader());
+		loader.setLoadErrorHandler(context::reportInputError);
+		loader.setLoadExclusionHandler(context::reportInputExclusion);
 	}
 
 	public ICodeLoader loadFiles(List<Path> input) {

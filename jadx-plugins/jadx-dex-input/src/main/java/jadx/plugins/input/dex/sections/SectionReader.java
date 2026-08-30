@@ -1,7 +1,5 @@
 package jadx.plugins.input.dex.sections;
 
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -11,6 +9,7 @@ import org.jetbrains.annotations.Nullable;
 
 import jadx.api.plugins.input.data.ICallSite;
 import jadx.api.plugins.input.data.IFieldRef;
+import jadx.api.plugins.input.data.IFieldRefVisitor;
 import jadx.api.plugins.input.data.IMethodHandle;
 import jadx.api.plugins.input.data.MethodHandleType;
 import jadx.api.plugins.input.data.impl.CallSite;
@@ -24,18 +23,22 @@ import jadx.plugins.input.dex.utils.MUtf8;
 import static jadx.plugins.input.dex.sections.DexConsts.NO_INDEX;
 
 public class SectionReader {
-	private final ByteBuffer buf;
 	private final DexReader dexReader;
 	private int offset;
+	private int position;
 
 	public SectionReader(DexReader dexReader, int off) {
 		this.dexReader = dexReader;
 		this.offset = off;
-		this.buf = duplicate(dexReader.getBuf(), off);
+		this.position = off;
 	}
 
 	private SectionReader(SectionReader sectionReader, int off) {
 		this(sectionReader.dexReader, off);
+	}
+
+	protected SectionReader(SectionReader sectionReader) {
+		this(sectionReader, sectionReader.offset);
 	}
 
 	public SectionReader copy() {
@@ -47,18 +50,11 @@ public class SectionReader {
 	}
 
 	public byte[] getByteCode(int start, int len) {
-		int pos = buf.position();
-		buf.position(start);
+		int pos = position;
+		position = start;
 		byte[] bytes = readByteArray(len);
-		buf.position(pos);
+		position = pos;
 		return bytes;
-	}
-
-	private static ByteBuffer duplicate(ByteBuffer baseBuffer, int off) {
-		ByteBuffer dupBuf = baseBuffer.duplicate();
-		dupBuf.order(ByteOrder.LITTLE_ENDIAN);
-		dupBuf.position(off);
-		return dupBuf;
 	}
 
 	public void setOffset(int offset) {
@@ -74,51 +70,57 @@ public class SectionReader {
 	}
 
 	public SectionReader pos(int pos) {
-		buf.position(offset + pos);
+		position = offset + pos;
 		return this;
 	}
 
 	public SectionReader absPos(int pos) {
-		buf.position(pos);
+		position = pos;
 		return this;
 	}
 
 	public int getAbsPos() {
-		return buf.position();
+		return position;
 	}
 
 	public void skip(int skip) {
-		int pos = buf.position();
-		buf.position(pos + skip);
+		position += skip;
 	}
 
 	public int readInt() {
-		return buf.getInt();
+		int value = dexReader.getBuf().getInt(position);
+		position += Integer.BYTES;
+		return value;
 	}
 
 	public long readLong() {
-		return buf.getLong();
+		long value = dexReader.getBuf().getLong(position);
+		position += Long.BYTES;
+		return value;
 	}
 
 	public byte readByte() {
-		return buf.get();
+		return dexReader.getBuf().get(position++);
 	}
 
 	public int readUByte() {
-		return buf.get() & 0xFF;
+		return readByte() & 0xFF;
 	}
 
 	public int readUShort() {
-		return buf.getShort() & 0xFFFF;
+		return readShort() & 0xFFFF;
 	}
 
 	public int readShort() {
-		return buf.getShort();
+		int value = dexReader.getBuf().getShort(position);
+		position += Short.BYTES;
+		return value;
 	}
 
 	public byte[] readByteArray(int len) {
 		byte[] arr = new byte[len];
-		buf.get(arr);
+		System.arraycopy(dexReader.getBuf().array(), position, arr, 0, len);
+		position += len;
 		return arr;
 	}
 
@@ -170,12 +172,18 @@ public class SectionReader {
 		if (idx == NO_INDEX) {
 			return null;
 		}
-		// TODO: make string pool cache?
+		String cached = dexReader.getCachedString(idx);
+		if (cached != null) {
+			return cached;
+		}
+		// The first read only marks this index; repeated values are decoded once more and then cached.
+		boolean cacheString = dexReader.shouldCacheString(idx);
 		int stringIdsOff = dexReader.getHeader().getStringIdsOff();
 		absPos(stringIdsOff + idx * 4);
 		int strOff = readInt();
 		absPos(strOff);
-		return MUtf8.decode(this);
+		String value = MUtf8.decode(this);
+		return cacheString ? dexReader.cacheString(idx, value) : value;
 	}
 
 	public IFieldRef getFieldRef(int idx) {
@@ -183,6 +191,15 @@ public class SectionReader {
 		int clsTypeIdx = fillFieldData(fieldData, idx);
 		fieldData.setParentClassType(getType(clsTypeIdx));
 		return fieldData;
+	}
+
+	public void visitFieldRef(int idx, IFieldRefVisitor visitor) {
+		int fieldIdsOff = dexReader.getHeader().getFieldIdsOff();
+		absPos(fieldIdsOff + idx * 8);
+		int classTypeIdx = readUShort();
+		int typeIdx = readUShort();
+		int nameIdx = readInt();
+		visitor.accept(getType(classTypeIdx), getString(nameIdx), getType(typeIdx));
 	}
 
 	public int fillFieldData(DexFieldData fieldData, int idx) {
@@ -315,11 +332,11 @@ public class SectionReader {
 	}
 
 	public int size() {
-		return buf.capacity();
+		return dexReader.getBuf().capacity();
 	}
 
 	@Override
 	public String toString() {
-		return "SectionReader{buf=" + buf + ", offset=" + offset + '}';
+		return "SectionReader{position=" + position + ", offset=" + offset + '}';
 	}
 }

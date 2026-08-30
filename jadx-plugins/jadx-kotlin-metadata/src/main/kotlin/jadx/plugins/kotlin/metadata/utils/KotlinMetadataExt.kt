@@ -12,8 +12,13 @@ import kotlin.metadata.jvm.Metadata
 
 fun ClassNode.getMetadata(): Metadata? {
 	val annotation: IAnnotation? = getAnnotation(KotlinMetadataConsts.KOTLIN_METADATA_ANNOTATION)
+	// Some protectors retain the annotation type but strip every optional element. There is no
+	// metadata payload to decode in that case, and ordinary DEX code remains fully available.
+	// Treating this marker-only annotation as a class analysis loss creates one false ERROR per
+	// Kotlin class and can make otherwise complete application scans fail their coverage gate.
+	if (annotation == null || annotation.values.isEmpty()) return null
 
-	return annotation?.run {
+	return annotation.run {
 		val k = getParamAsInt(KotlinMetadataConsts.KOTLIN_METADATA_K_PARAMETER)
 		val mvArray = getParamAsIntArray(KotlinMetadataConsts.KOTLIN_METADATA_MV_PARAMETER)
 		val d1Array = getParamAsStringArray(KotlinMetadataConsts.KOTLIN_METADATA_D1_PARAMETER)
@@ -65,4 +70,41 @@ private fun IAnnotation.getParamAsString(paramName: String): String? {
 	return encodedValue?.value?.let { it as String }
 }
 
-fun ClassNode.getKotlinClassMetadata(): KotlinClassMetadata? = getMetadata()?.let(KotlinClassMetadata::readLenient)
+/**
+ * Check the cheap annotation header before asking kotlinx-metadata to decode the payload.
+ * [KmClassWrapper] can only consume class metadata (kind 1); file facades, synthetic
+ * classes and multifile entries are guaranteed to be rejected by its type cast.
+ */
+fun ClassNode.hasKotlinClassMetadataKind(): Boolean {
+	val annotation = getAnnotation(KotlinMetadataConsts.KOTLIN_METADATA_ANNOTATION) ?: return false
+	if (annotation.values.isEmpty()) return false
+	// `k` defaults to 1 in kotlin.Metadata, so a missing encoded value still denotes a class.
+	return (annotation.getParamAsInt(KotlinMetadataConsts.KOTLIN_METADATA_K_PARAMETER) ?: 1) == 1
+}
+
+fun ClassNode.getKotlinClassMetadata(): KotlinClassMetadata? {
+	if (contains(MalformedKotlinMetadataAttr.TYPE)) return null
+	val metadata = getMetadata() ?: return null
+	if (metadata.metadataVersion.isEmpty()) {
+		root().errorsCounter.addAnalysisExclusion(
+			MALFORMED_METADATA_CATEGORY,
+			"$rawName: missing metadataVersion",
+			null,
+		)
+		addAttr(MalformedKotlinMetadataAttr)
+		return null
+	}
+	return try {
+		KotlinClassMetadata.readLenient(metadata)
+	} catch (e: Exception) {
+		// Kotlin metadata is an optional naming/type-hint layer. A protector can corrupt
+		// d1/d2 while leaving the executable DEX method bodies intact. Isolate that class,
+		// retain a visible audited exclusion and continue bytecode analysis without
+		// reporting every such annotation as lost executable coverage.
+		root().errorsCounter.addAnalysisExclusion(MALFORMED_METADATA_CATEGORY, rawName, e)
+		addAttr(MalformedKotlinMetadataAttr)
+		null
+	}
+}
+
+private const val MALFORMED_METADATA_CATEGORY = "kotlin-metadata-malformed"

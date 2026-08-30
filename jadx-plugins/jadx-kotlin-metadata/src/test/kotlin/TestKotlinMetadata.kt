@@ -1,5 +1,7 @@
 package jadx.plugins.kotlin.metadata.tests
 
+import java.io.File
+
 import jadx.plugins.kotlin.metadata.KotlinMetadataOptions.Companion.CLASS_ALIAS_OPT
 import jadx.plugins.kotlin.metadata.KotlinMetadataOptions.Companion.COMPANION_OPT
 import jadx.plugins.kotlin.metadata.KotlinMetadataOptions.Companion.DATA_CLASS_OPT
@@ -109,6 +111,16 @@ class TestKotlinMetadata : SmaliTest() {
 	}
 
 	@Test
+	fun testToStringComputedPropertyIsNotMappedToBackingField() {
+		setupArgs { this[TO_STRING_OPT] = true }
+		assertThatClass()
+			.containsOne("currentPage=")
+			.countString(2, "getCurrentPage()")
+			.doesNotContain("currentPage;")
+			.countString(3, "reason: from toString")
+	}
+
+	@Test
 	fun testIgnoreToString() {
 		setupArgs()
 		assertThatClass()
@@ -135,6 +147,76 @@ class TestKotlinMetadata : SmaliTest() {
 		assertThatClass()
 			.containsOne("public final String getName() {")
 			.countString(1, "reason: from getter")
+	}
+
+	@Test
+	fun testGetterAliasAvailableBeforeOwnerDecompile() {
+		disableCompilation()
+		setupArgs {
+			this[FIELDS_OPT] = true
+			this[GETTERS_OPT] = true
+		}
+		assertThat(getClassNodeFromSmaliFiles("deobf", "TestKotlinMetadata", "Caller"))
+			.code()
+			.containsOne("return aVar.getName();")
+	}
+
+	@Test
+	fun testMalformedMetadataIsIsolatedPerClass() {
+		setupArgs { this[FIELDS_OPT] = true }
+		val cls = getClassNodeFromFiles(
+			listOf(
+				File("src/test/smali/deobf/TestKotlinMetadataIsolation/MalformedMetadata.smali"),
+				File("src/test/smali/deobf/TestKotlinMetadata/a.smali"),
+				File("src/test/smali/deobf/TestKotlinMetadata/a\$b.smali"),
+			),
+			"deobf.a",
+		)
+
+		assertThat(cls)
+			.code()
+			.containsOne("private final String name;")
+		org.assertj.core.api.Assertions.assertThat(jadxDecompiler.errorsCount).isZero()
+		org.assertj.core.api.Assertions.assertThat(jadxDecompiler.globalErrors).isEmpty()
+		org.assertj.core.api.Assertions.assertThat(jadxDecompiler.analysisLossCounts).isEmpty()
+		org.assertj.core.api.Assertions.assertThat(jadxDecompiler.analysisExclusionCounts)
+			.containsEntry("kotlin-metadata-malformed", 1)
+		org.assertj.core.api.Assertions.assertThat(
+			jadxDecompiler.analysisExclusionSamples["kotlin-metadata-malformed"],
+		)
+			.singleElement()
+			.asString()
+			.contains("deobf.MalformedMetadata")
+	}
+
+	@Test
+	fun testMarkerOnlyMetadataDoesNotReportCodeAnalysisLoss() {
+		val cls = getClassNodeFromFiles(
+			listOf(File("src/test/smali/deobf/TestKotlinMetadataIsolation/EmptyMetadata.smali")),
+			"deobf.EmptyMetadata",
+		)
+
+		assertThat(cls)
+			.code()
+			.containsOne("public final class EmptyMetadata")
+		org.assertj.core.api.Assertions.assertThat(jadxDecompiler.errorsCount).isZero()
+		org.assertj.core.api.Assertions.assertThat(jadxDecompiler.analysisLossCounts).isEmpty()
+	}
+
+	@Test
+	fun testNonClassMetadataDoesNotEnterClassDecoder() {
+		setupArgs { this[FIELDS_OPT] = true }
+		val cls = getClassNodeFromFiles(
+			listOf(File("src/test/smali/deobf/TestKotlinMetadataIsolation/NonClassMetadata.smali")),
+			"deobf.NonClassMetadata",
+		)
+
+		assertThat(cls)
+			.code()
+			.containsOne("public final class NonClassMetadata")
+		org.assertj.core.api.Assertions.assertThat(jadxDecompiler.errorsCount).isZero()
+		org.assertj.core.api.Assertions.assertThat(jadxDecompiler.analysisLossCounts).isEmpty()
+		org.assertj.core.api.Assertions.assertThat(jadxDecompiler.analysisExclusionCounts).isEmpty()
 	}
 
 	@Test

@@ -12,24 +12,20 @@ import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.data.annotations.IAnnotation;
 import jadx.api.plugins.input.data.annotations.JadxAnnotation;
 import jadx.plugins.input.dex.DexException;
+import jadx.plugins.input.dex.sections.DexClassData;
 import jadx.plugins.input.dex.sections.SectionReader;
 
-public class AnnotationsParser {
-	private final SectionReader in;
-	private final SectionReader ext;
+public class AnnotationsParser extends SectionReader {
+	private final DexClassData ext;
 
 	private int offset;
 	private int fieldsCount;
 	private int methodsCount;
 	private int paramsRefCount;
 
-	public AnnotationsParser(SectionReader in, SectionReader ext) {
-		this.in = in;
+	public AnnotationsParser(SectionReader in, DexClassData ext) {
+		super(in);
 		this.ext = ext;
-	}
-
-	public AnnotationsParser copy() {
-		return new AnnotationsParser(in.copy(), ext.copy());
 	}
 
 	public void setOffset(int offset) {
@@ -39,11 +35,11 @@ public class AnnotationsParser {
 			this.methodsCount = 0;
 			this.paramsRefCount = 0;
 		} else {
-			in.setOffset(offset);
-			in.pos(4);
-			this.fieldsCount = in.readInt();
-			this.methodsCount = in.readInt();
-			this.paramsRefCount = in.readInt();
+			super.setOffset(offset);
+			pos(4);
+			this.fieldsCount = readInt();
+			this.methodsCount = readInt();
+			this.paramsRefCount = readInt();
 		}
 	}
 
@@ -51,7 +47,7 @@ public class AnnotationsParser {
 		if (offset == 0) {
 			return Collections.emptyList();
 		}
-		int classAnnotationsOffset = in.absPos(offset).readInt();
+		int classAnnotationsOffset = absPos(offset).readInt();
 		return readAnnotationList(classAnnotationsOffset);
 	}
 
@@ -59,11 +55,11 @@ public class AnnotationsParser {
 		if (fieldsCount == 0) {
 			return Collections.emptyMap();
 		}
-		in.pos(4 * 4);
+		pos(4 * 4);
 		Map<Integer, Integer> map = new HashMap<>(fieldsCount);
 		for (int i = 0; i < fieldsCount; i++) {
-			int fieldIdx = in.readInt();
-			int fieldAnnOffset = in.readInt();
+			int fieldIdx = readInt();
+			int fieldAnnOffset = readInt();
 			map.put(fieldIdx, fieldAnnOffset);
 		}
 		return map;
@@ -73,11 +69,11 @@ public class AnnotationsParser {
 		if (methodsCount == 0) {
 			return Collections.emptyMap();
 		}
-		in.pos(4 * 4 + fieldsCount * 2 * 4);
+		pos(4 * 4 + fieldsCount * 2 * 4);
 		Map<Integer, Integer> map = new HashMap<>(methodsCount);
 		for (int i = 0; i < methodsCount; i++) {
-			int methodIdx = in.readInt();
-			int methodAnnOffset = in.readInt();
+			int methodIdx = readInt();
+			int methodAnnOffset = readInt();
 			map.put(methodIdx, methodAnnOffset);
 		}
 		return map;
@@ -87,11 +83,11 @@ public class AnnotationsParser {
 		if (paramsRefCount == 0) {
 			return Collections.emptyMap();
 		}
-		in.pos(4 * 4 + fieldsCount * 2 * 4 + methodsCount * 2 * 4);
+		pos(4 * 4 + fieldsCount * 2 * 4 + methodsCount * 2 * 4);
 		Map<Integer, Integer> map = new HashMap<>(paramsRefCount);
 		for (int i = 0; i < paramsRefCount; i++) {
-			int methodIdx = in.readInt();
-			int methodAnnRefOffset = in.readInt();
+			int methodIdx = readInt();
+			int methodAnnRefOffset = readInt();
 			map.put(methodIdx, methodAnnRefOffset);
 		}
 		return map;
@@ -101,18 +97,18 @@ public class AnnotationsParser {
 		if (offset == 0) {
 			return Collections.emptyList();
 		}
-		in.absPos(offset);
-		int size = in.readInt();
+		absPos(offset);
+		int size = readInt();
 		if (size == 0) {
 			return Collections.emptyList();
 		}
 		List<IAnnotation> list = new ArrayList<>(size);
-		int pos = in.getAbsPos();
+		int pos = getAbsPos();
 		for (int i = 0; i < size; i++) {
-			in.absPos(pos + i * 4);
-			int annOffset = in.readInt();
-			in.absPos(annOffset);
-			list.add(readAnnotation(in, ext, true));
+			absPos(pos + i * 4);
+			int annOffset = readInt();
+			absPos(annOffset);
+			list.add(readAnnotation(this, ext, true));
 		}
 		return list;
 	}
@@ -121,17 +117,17 @@ public class AnnotationsParser {
 		if (offset == 0) {
 			return Collections.emptyList();
 		}
-		in.absPos(offset);
-		int size = in.readInt();
+		absPos(offset);
+		int size = readInt();
 		if (size == 0) {
 			return Collections.emptyList();
 		}
 		List<List<IAnnotation>> list = new ArrayList<>(size);
 		for (int i = 0; i < size; i++) {
-			int refOff = in.readInt();
-			int pos = in.getAbsPos();
+			int refOff = readInt();
+			int pos = getAbsPos();
 			list.add(readAnnotationList(refOff));
-			in.absPos(pos);
+			absPos(pos);
 		}
 		return list;
 	}
@@ -144,12 +140,15 @@ public class AnnotationsParser {
 		}
 		int typeIndex = in.readUleb128();
 		int size = in.readUleb128();
+		String type = ext.getType(typeIndex);
+		if (size == 0) {
+			return new JadxAnnotation(visibility, type);
+		}
 		Map<String, EncodedValue> values = new LinkedHashMap<>(size);
 		for (int i = 0; i < size; i++) {
 			String name = ext.getString(in.readUleb128());
 			values.put(name, EncodedValueParser.parseValue(in, ext));
 		}
-		String type = ext.getType(typeIndex);
 		return new JadxAnnotation(visibility, type, values);
 	}
 

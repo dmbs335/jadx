@@ -41,7 +41,7 @@ object KotlinUtils {
 			(it.sVars[1].assignInsn as? IndexInsnNode)?.index == field
 	}
 
-	private fun getGetterAlias(fieldAlias: String): String {
+	fun getGetterAlias(fieldAlias: String): String {
 		val capitalized = fieldAlias.replaceFirstChar {
 			if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString()
 		}

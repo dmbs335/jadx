@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiConsumer;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -20,14 +21,31 @@ public class AnnotationsAttr extends PinnedAttribute {
 		if (annotationList.isEmpty()) {
 			return null;
 		}
-		Map<String, IAnnotation> annMap = new HashMap<>(annotationList.size());
+		IAnnotation first = null;
+		Map<String, IAnnotation> annMap = null;
 		for (IAnnotation ann : annotationList) {
-			if (ann.getVisibility() != AnnotationVisibility.SYSTEM) {
-				annMap.put(ann.getAnnotationClass(), ann);
+			if (ann.getVisibility() == AnnotationVisibility.SYSTEM) {
+				continue;
 			}
+			if (first == null) {
+				first = ann;
+				continue;
+			}
+			if (annMap == null) {
+				annMap = new HashMap<>(annotationList.size());
+				annMap.put(first.getAnnotationClass(), first);
+			}
+			annMap.put(ann.getAnnotationClass(), ann);
 		}
-		if (annMap.isEmpty()) {
+		if (first == null) {
 			return null;
+		}
+		if (annMap == null) {
+			return new AnnotationsAttr(Collections.singletonMap(first.getAnnotationClass(), first));
+		}
+		if (annMap.size() == 1) {
+			IAnnotation annotation = annMap.values().iterator().next();
+			return new AnnotationsAttr(Collections.singletonMap(annotation.getAnnotationClass(), annotation));
 		}
 		return new AnnotationsAttr(annMap);
 	}
@@ -46,8 +64,17 @@ public class AnnotationsAttr extends PinnedAttribute {
 		return map.values();
 	}
 
+	public void forEach(BiConsumer<? super String, ? super IAnnotation> action) {
+		map.forEach(action);
+	}
+
 	public List<IAnnotation> getList() {
-		return map.isEmpty() ? Collections.emptyList() : new ArrayList<>(map.values());
+		if (map.isEmpty()) {
+			return Collections.emptyList();
+		}
+		List<IAnnotation> list = new ArrayList<>(map.size());
+		forEach((type, annotation) -> list.add(annotation));
+		return list;
 	}
 
 	public int size() {

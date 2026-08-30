@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -36,6 +38,13 @@ public class DexFileLoader {
 	private final DexInputOptions options;
 
 	private ZipReader zipReader = new ZipReader();
+	private @Nullable LoadErrorHandler loadErrorHandler;
+	private @Nullable LoadErrorHandler loadExclusionHandler;
+
+	@FunctionalInterface
+	public interface LoadErrorHandler {
+		void accept(String category, String message, Throwable error);
+	}
 
 	public DexFileLoader(DexInputOptions options) {
 		this.options = options;
@@ -43,6 +52,14 @@ public class DexFileLoader {
 
 	public void setZipReader(ZipReader zipReader) {
 		this.zipReader = zipReader;
+	}
+
+	public void setLoadErrorHandler(LoadErrorHandler loadErrorHandler) {
+		this.loadErrorHandler = loadErrorHandler;
+	}
+
+	public void setLoadExclusionHandler(LoadErrorHandler loadExclusionHandler) {
+		this.loadExclusionHandler = loadExclusionHandler;
 	}
 
 	public List<DexReader> collectDexFiles(List<Path> pathsList) {
@@ -59,7 +76,11 @@ public class DexFileLoader {
 		try (InputStream inputStream = new FileInputStream(file)) {
 			return load(file, inputStream, file.getAbsolutePath());
 		} catch (Exception e) {
-			LOG.error("File open error: {}", file.getAbsolutePath(), e);
+			String category = file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".dex")
+					? "input-load.top-level-dex"
+					: "input-load.archive";
+			reportLoadError(category, "Input load failed: provenance=TOP_LEVEL, file="
+					+ file.getAbsolutePath() + fingerprintFile(file), e);
 			return Collections.emptyList();
 		}
 	}
@@ -134,10 +155,12 @@ public class DexFileLoader {
 				if (entry.isDirectory()) {
 					continue;
 				}
+				byte[] dexContent = null;
 				try {
 					List<DexReader> readers;
 					if (entry.preferBytes()) {
-						readers = loadFromZipEntry(entry.getBytes(), entry.getName());
+						dexContent = entry.getBytes();
+						readers = loadFromZipEntry(dexContent, entry.getName());
 					} else {
 						readers = load(null, entry.getInputStream(), entry.getName());
 					}
@@ -145,13 +168,96 @@ public class DexFileLoader {
 						result.addAll(readers);
 					}
 				} catch (Exception e) {
-					LOG.error("Failed to read zip entry: {}", entry, e);
+					if (isDexEntry(entry.getName())) {
+						if (dexContent == null) {
+							try {
+								dexContent = entry.getBytes();
+							} catch (Exception readError) {
+								e.addSuppressed(readError);
+							}
+						}
+						if (dexContent != null) {
+							reportZipDexFailure(file, entry, dexContent, e);
+						} else {
+							reportZipDexFailureWithoutFingerprint(file, entry, e);
+						}
+					} else {
+						reportLoadError("input-load.archive",
+								"Input load failed: provenance=ARCHIVE_ENTRY, entry=" + entry, e);
+					}
 				}
 			}
 		} catch (Exception e) {
-			LOG.error("Failed to process zip file: {}", file.getAbsolutePath(), e);
+			reportLoadError("input-load.archive", "Input load failed: provenance=ARCHIVE, file="
+					+ file.getAbsolutePath(), e);
 		}
 		return result;
+	}
+
+	private void reportZipDexFailure(File file, IZipEntry entry, byte[] content, Exception error) {
+		String entryName = entry.getName().replace('\\', '/');
+		boolean rootDex = entryName.matches("classes(?:[0-9]+)?\\.dex");
+		String provenance = rootDex ? "APK_ROOT_DEX" : "EMBEDDED_DEX";
+		String category = rootDex ? "input-load.apk-root-dex" : "input-load.embedded-dex";
+		String sha256 = sha256(content);
+		String message = "Input load failed: provenance=" + provenance
+				+ ", sha256=" + sha256 + ", apk=" + file.getAbsolutePath() + ", entry=" + entryName;
+		if (!rootDex && options.isAuditExcluded(sha256)) {
+			LoadErrorHandler handler = loadExclusionHandler;
+			if (handler == null) {
+				LOG.warn("Audited analysis exclusion [{}]: {}", category, message, error);
+			} else {
+				handler.accept(category, message, error);
+			}
+			return;
+		}
+		reportLoadError(category, message, error);
+	}
+
+	private void reportZipDexFailureWithoutFingerprint(File file, IZipEntry entry, Exception error) {
+		String entryName = entry.getName().replace('\\', '/');
+		boolean rootDex = entryName.matches("classes(?:[0-9]+)?\\.dex");
+		String provenance = rootDex ? "APK_ROOT_DEX" : "EMBEDDED_DEX";
+		String category = rootDex ? "input-load.apk-root-dex" : "input-load.embedded-dex";
+		reportLoadError(category, "Input load failed: provenance=" + provenance
+				+ ", sha256=unavailable, apk=" + file.getAbsolutePath() + ", entry=" + entryName, error);
+	}
+
+	private void reportLoadError(String category, String message, Throwable error) {
+		LoadErrorHandler handler = loadErrorHandler;
+		if (handler == null) {
+			LOG.error(message, error);
+		} else {
+			handler.accept(category, message, error);
+		}
+	}
+
+	private static boolean isDexEntry(String name) {
+		return name.toLowerCase(java.util.Locale.ROOT).endsWith(".dex");
+	}
+
+	private static String fingerprintFile(File file) {
+		if (!file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".dex")) {
+			return "";
+		}
+		try (InputStream input = new FileInputStream(file)) {
+			return ", sha256=" + sha256(readAllBytes(input));
+		} catch (Exception ignored) {
+			return ", sha256=unavailable";
+		}
+	}
+
+	private static String sha256(byte[] content) {
+		try {
+			byte[] digest = MessageDigest.getInstance("SHA-256").digest(content);
+			StringBuilder hex = new StringBuilder(digest.length * 2);
+			for (byte value : digest) {
+				hex.append(String.format("%02x", value & 0xff));
+			}
+			return hex.toString();
+		} catch (NoSuchAlgorithmException e) {
+			throw new IllegalStateException("SHA-256 is unavailable", e);
+		}
 	}
 
 	private static boolean isStartWithBytes(byte[] fileMagic, byte[] expectedBytes) {

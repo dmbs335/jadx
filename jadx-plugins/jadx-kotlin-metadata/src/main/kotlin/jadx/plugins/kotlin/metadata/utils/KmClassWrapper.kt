@@ -13,6 +13,8 @@ class KmClassWrapper private constructor(
 
 	fun getMethodArgs() = KotlinMetadataUtils.mapMethodArgs(cls, kmCls)
 
+	fun getPackedMethodArgs() = KotlinMetadataUtils.packMethodArgs(cls, kmCls)
+
 	fun getFields() = KotlinMetadataUtils.mapFields(cls, kmCls)
 
 	fun getCompanion() = KotlinMetadataUtils.mapCompanion(cls, kmCls)
@@ -22,12 +24,12 @@ class KmClassWrapper private constructor(
 	// does not require metadata, may be useful for plain java ?
 	fun parseToString() = KotlinUtils.parseToString(cls)
 
-	// does not require metadata, may be useful for plain java ?
-	fun getGetters() = KotlinUtils.findGetters(cls)
+	fun getGetters() = KotlinMetadataUtils.mapGetters(cls, kmCls)
 
 	companion object {
 
 		fun ClassNode.getWrapper(): KmClassWrapper? {
+			if (!hasKotlinClassMetadataKind()) return null
 			val metadata = getKotlinClassMetadata()
 			val kmCls = (metadata as? KotlinClassMetadata.Class)?.kmClass ?: return null
 			return KmClassWrapper(this, kmCls)

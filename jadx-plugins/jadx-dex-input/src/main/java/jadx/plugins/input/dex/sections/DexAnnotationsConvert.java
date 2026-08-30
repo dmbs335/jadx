@@ -86,7 +86,7 @@ public class DexAnnotationsConvert {
 						List<String> excs = ((List<EncodedValue>) defaultValue.getValue())
 								.stream()
 								.map(ev -> ((String) ev.getValue()))
-								.collect(Collectors.toList());
+								.collect(Collectors.toUnmodifiableList());
 						attributes.add(new ExceptionsAttr(excs));
 					}
 				} catch (Exception e) {

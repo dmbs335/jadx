@@ -22,6 +22,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 
 class CustomLoadTest {
+	@Test
+	void nestedZipDetectionRequiresContentSignature() {
+		assertThat(JavaInputLoader.isZipContent(new byte[] { 'N', 'O', 'P', 'E' })).isFalse();
+		assertThat(JavaInputLoader.isZipContent(new byte[] { 0x50, 0x4B, 0x03, 0x04 })).isTrue();
+		assertThat(JavaInputLoader.isZipContent(new byte[] { 0x50, 0x4B, 0x05, 0x06 })).isTrue();
+	}
 
 	private JadxDecompiler jadx;
 

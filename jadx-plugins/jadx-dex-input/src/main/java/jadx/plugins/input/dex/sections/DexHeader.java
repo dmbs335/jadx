@@ -6,6 +6,7 @@ public class DexHeader {
 	private final String version;
 	private final int classDefsSize;
 	private final int classDefsOff;
+	private final int stringIdsSize;
 	private final int stringIdsOff;
 	private final int typeIdsOff;
 	private final int typeIdsSize;
@@ -34,7 +35,7 @@ public class DexHeader {
 		int linkSize = buf.readInt();
 		int linkOff = buf.readInt();
 		int mapListOff = buf.readInt();
-		int stringIdsSize = buf.readInt();
+		stringIdsSize = buf.readInt();
 		stringIdsOff = buf.readInt();
 		typeIdsSize = buf.readInt();
 		typeIdsOff = buf.readInt();
@@ -86,6 +87,10 @@ public class DexHeader {
 
 	public int getStringIdsOff() {
 		return stringIdsOff;
+	}
+
+	public int getStringIdsSize() {
+		return stringIdsSize;
 	}
 
 	public int getTypeIdsOff() {

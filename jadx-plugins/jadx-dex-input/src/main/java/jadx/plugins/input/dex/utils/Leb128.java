@@ -28,16 +28,29 @@ public final class Leb128 {
 	}
 
 	public static int readUnsignedLeb128(SectionReader in) {
-		int result = 0;
-		int cur;
-		int count = 0;
-		do {
-			cur = in.readUByte();
-			result |= (cur & 0x7f) << (count * 7);
-			count++;
-		} while (((cur & 0x80) == 0x80) && count < 5);
-
-		if ((cur & 0x80) == 0x80) {
+		int cur = in.readUByte();
+		int result = cur & 0x7f;
+		if (cur < 0x80) {
+			return result;
+		}
+		cur = in.readUByte();
+		result |= (cur & 0x7f) << 7;
+		if (cur < 0x80) {
+			return result;
+		}
+		cur = in.readUByte();
+		result |= (cur & 0x7f) << 14;
+		if (cur < 0x80) {
+			return result;
+		}
+		cur = in.readUByte();
+		result |= (cur & 0x7f) << 21;
+		if (cur < 0x80) {
+			return result;
+		}
+		cur = in.readUByte();
+		result |= (cur & 0x7f) << 28;
+		if (cur >= 0x80) {
 			throw new DexException("Invalid LEB128 sequence");
 		}
 		return result;

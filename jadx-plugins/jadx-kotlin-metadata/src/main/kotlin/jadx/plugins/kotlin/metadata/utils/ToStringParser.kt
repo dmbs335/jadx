@@ -82,7 +82,9 @@ class ToStringParser private constructor(mthToString: MethodNode) {
 
 	private fun handleString(string: String) {
 		if (pendingAlias != null) {
-			LOG.warn("Skipping pending alias: '$pendingAlias'")
+			// A computed property can append a getter result instead of a direct backing field.
+			// It is unsafe to infer a field rename in that case, so discard the unmatched alias.
+			LOG.debug("Skipping unsupported toString alias: '$pendingAlias'")
 		}
 		if (!isFirstProcessed) {
 			clsAlias = string.substringBefore('(')

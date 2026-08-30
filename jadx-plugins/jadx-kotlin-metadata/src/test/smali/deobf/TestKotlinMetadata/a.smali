@@ -198,6 +198,16 @@
 
     invoke-virtual {v2, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
 
+    const-string v0, ", currentPage="
+
+    invoke-virtual {v2, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+
+    invoke-virtual {p0}, Ldeobf/a;->getCurrentPage()I
+
+    move-result v0
+
+    invoke-virtual {v2, v0}, Ljava/lang/StringBuilder;->append(I)Ljava/lang/StringBuilder;
+
     const-string v0, ", id="
 
     invoke-virtual {v2, v0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
@@ -213,4 +223,12 @@
     move-result-object v0
 
     return-object v0
+.end method
+
+.method public getCurrentPage()I
+    .registers 2
+
+    const/4 v0, 0x1
+
+    return v0
 .end method

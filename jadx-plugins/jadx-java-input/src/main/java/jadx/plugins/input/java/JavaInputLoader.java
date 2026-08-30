@@ -30,6 +30,8 @@ public class JavaInputLoader {
 	private static final int MAX_MAGIC_SIZE = 4;
 	private static final byte[] JAVA_CLASS_FILE_MAGIC = { (byte) 0xCA, (byte) 0xFE, (byte) 0xBA, (byte) 0xBE };
 	private static final byte[] ZIP_FILE_MAGIC = { 0x50, 0x4B, 0x03, 0x04 };
+	private static final byte[] EMPTY_ZIP_FILE_MAGIC = { 0x50, 0x4B, 0x05, 0x06 };
+	private static final byte[] SPANNED_ZIP_FILE_MAGIC = { 0x50, 0x4B, 0x07, 0x08 };
 
 	private final ZipReader zipReader;
 	private final Path tempPath;
@@ -87,7 +89,7 @@ public class JavaInputLoader {
 			JavaClassReader reader = new JavaClassReader(getNextUniqId(), source, data);
 			return Collections.singletonList(reader);
 		}
-		if (isStartWithBytes(magic, ZIP_FILE_MAGIC) || CommonFileUtils.isZipFileExt(name)) {
+		if (isZipContent(magic) || CommonFileUtils.isZipFileExt(name)) {
 			if (file != null) {
 				return collectFromZip(file, name);
 			}
@@ -105,7 +107,10 @@ public class JavaInputLoader {
 			JavaClassReader reader = new JavaClassReader(getNextUniqId(), source, content);
 			return Collections.singletonList(reader);
 		}
-		if (isStartWithBytes(content, ZIP_FILE_MAGIC) || CommonFileUtils.isZipFileExt(name)) {
+		// An archive can contain arbitrary assets named *.zip. Unlike a top-level input,
+		// nested content is already available as bytes, so require a ZIP signature before
+		// recursively opening it as Java input.
+		if (isZipContent(content)) {
 			Path tempZip = Files.createTempFile(tempPath, "temp", ".zip");
 			FileUtils.writeFile(tempZip, content);
 			File zipFile = tempZip.toFile();
@@ -164,6 +169,12 @@ public class JavaInputLoader {
 			}
 		}
 		return true;
+	}
+
+	static boolean isZipContent(byte[] content) {
+		return isStartWithBytes(content, ZIP_FILE_MAGIC)
+				|| isStartWithBytes(content, EMPTY_ZIP_FILE_MAGIC)
+				|| isStartWithBytes(content, SPANNED_ZIP_FILE_MAGIC);
 	}
 
 	private int getNextUniqId() {

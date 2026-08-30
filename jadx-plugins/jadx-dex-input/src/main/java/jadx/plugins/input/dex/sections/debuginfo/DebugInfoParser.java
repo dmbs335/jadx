@@ -2,14 +2,12 @@ package jadx.plugins.input.dex.sections.debuginfo;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import org.jetbrains.annotations.Nullable;
 
+import jadx.api.plugins.input.data.IDebugInfo;
 import jadx.api.plugins.input.data.ILocalVar;
-import jadx.api.plugins.input.data.impl.DebugInfo;
 import jadx.plugins.input.dex.sections.DexConsts;
 import jadx.plugins.input.dex.sections.SectionReader;
 
@@ -39,7 +37,7 @@ public class DebugInfoParser {
 	private final int codeSize;
 
 	private List<ILocalVar> resultList;
-	private Map<Integer, Integer> linesMap;
+	private DexDebugInfo.Builder linesBuilder;
 	@Nullable
 	private String sourceFile;
 
@@ -80,12 +78,12 @@ public class DebugInfoParser {
 		}
 	}
 
-	public DebugInfo process(int debugOff) {
+	public IDebugInfo process(int debugOff) {
 		in.absPos(debugOff);
 
 		boolean varsInfoFound = false;
 		resultList = new ArrayList<>();
-		linesMap = new HashMap<>();
+		linesBuilder = new DexDebugInfo.Builder();
 
 		int addr = 0;
 		int line = in.readUleb128();
@@ -178,7 +176,7 @@ public class DebugInfoParser {
 				}
 			}
 		}
-		return new DebugInfo(linesMap, resultList);
+		return linesBuilder.build(resultList);
 	}
 
 	private int addrChange(int addr, int addrInc) {
@@ -186,7 +184,7 @@ public class DebugInfoParser {
 	}
 
 	private void setLine(int offset, int line) {
-		linesMap.put(offset, line);
+		linesBuilder.put(offset, line);
 	}
 
 	private void restartVar(int regNum, int addr) {

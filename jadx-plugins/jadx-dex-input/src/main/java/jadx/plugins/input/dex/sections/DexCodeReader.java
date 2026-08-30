@@ -23,29 +23,24 @@ import jadx.plugins.input.dex.insns.DexInsnFormat;
 import jadx.plugins.input.dex.insns.DexInsnInfo;
 import jadx.plugins.input.dex.sections.debuginfo.DebugInfoParser;
 
-public class DexCodeReader implements ICodeReader {
+public class DexCodeReader extends SectionReader implements ICodeReader {
 
-	private final SectionReader in;
 	private int mthId;
 
 	public DexCodeReader(SectionReader in) {
-		this.in = in;
+		super(in.getDexReader(), in.getOffset());
 	}
 
 	@Override
 	public DexCodeReader copy() {
-		DexCodeReader copy = new DexCodeReader(in.copy());
+		DexCodeReader copy = new DexCodeReader(super.copy());
 		copy.setMthId(this.getMthId());
 		return copy;
 	}
 
-	public void setOffset(int offset) {
-		this.in.setOffset(offset);
-	}
-
 	@Override
 	public int getRegistersCount() {
-		return in.pos(0).readUShort();
+		return pos(0).readUShort();
 	}
 
 	@Override
@@ -55,18 +50,18 @@ public class DexCodeReader implements ICodeReader {
 
 	@Override
 	public int getUnitsCount() {
-		return in.pos(12).readInt();
+		return pos(12).readInt();
 	}
 
 	@Override
 	public void visitInstructions(Consumer<InsnData> insnConsumer) {
-		DexInsnData insnData = new DexInsnData(this, in.copy());
-		in.pos(12);
-		int size = in.readInt();
+		DexInsnData insnData = new DexInsnData(this, super.copy());
+		pos(12);
+		int size = readInt();
 		int offset = 0; // in code units (2 byte)
 		while (offset < size) {
-			int insnStart = in.getAbsPos();
-			int opcodeUnit = in.readUShort();
+			int insnStart = getAbsPos();
+			int opcodeUnit = readUShort();
 			DexInsnInfo insnInfo = DexInsnInfo.get(opcodeUnit);
 			insnData.setInsnStart(insnStart);
 			insnData.setOffset(offset);
@@ -94,7 +89,7 @@ public class DexCodeReader implements ICodeReader {
 
 	public void decode(DexInsnData insn) {
 		DexInsnFormat format = insn.getInsnInfo().getFormat();
-		format.decode(insn, insn.getOpcodeUnit(), insn.getCodeData().in);
+		format.decode(insn, insn.getOpcodeUnit(), insn.getCodeData());
 		insn.setDecoded(true);
 	}
 
@@ -102,28 +97,28 @@ public class DexCodeReader implements ICodeReader {
 		DexInsnInfo insnInfo = insn.getInsnInfo();
 		if (insnInfo != null) {
 			DexCodeReader codeReader = insn.getCodeData();
-			insnInfo.getFormat().skip(insn, codeReader.in);
+			insnInfo.getFormat().skip(insn, codeReader);
 		}
 	}
 
 	@Nullable
 	@Override
 	public IDebugInfo getDebugInfo() {
-		int debugOff = in.pos(8).readInt();
+		int debugOff = pos(8).readInt();
 		if (debugOff == 0) {
 			return null;
 		}
-		if (debugOff < 0 || debugOff > in.size()) {
+		if (debugOff < 0 || debugOff > size()) {
 			throw new InvalidDataException("Invalid debug info offset");
 		}
 		int regsCount = getRegistersCount();
-		DebugInfoParser debugInfoParser = new DebugInfoParser(in, regsCount, getUnitsCount());
-		debugInfoParser.initMthArgs(regsCount, in.getMethodParamTypes(mthId));
+		DebugInfoParser debugInfoParser = new DebugInfoParser(this, regsCount, getUnitsCount());
+		debugInfoParser.initMthArgs(regsCount, getMethodParamTypes(mthId));
 		return debugInfoParser.process(debugOff);
 	}
 
 	private int getTriesCount() {
-		return in.pos(6).readUShort();
+		return pos(6).readUShort();
 	}
 
 	private int getTriesOffset() {
@@ -143,13 +138,13 @@ public class DexCodeReader implements ICodeReader {
 			return Collections.emptyList();
 		}
 		int triesCount = getTriesCount();
-		Map<Integer, ICatch> catchHandlers = getCatchHandlers(triesOffset + 8 * triesCount, in.copy());
-		in.pos(triesOffset);
+		Map<Integer, ICatch> catchHandlers = getCatchHandlers(triesOffset + 8 * triesCount, super.copy());
+		pos(triesOffset);
 		List<ITry> triesList = new ArrayList<>(triesCount);
 		for (int i = 0; i < triesCount; i++) {
-			int startAddr = in.readInt();
-			int insnsCount = in.readUShort();
-			int handlerOff = in.readUShort();
+			int startAddr = readInt();
+			int insnsCount = readUShort();
+			int handlerOff = readUShort();
 			ICatch catchHandler = catchHandlers.get(handlerOff);
 			if (catchHandler == null) {
 				throw new DexException("Catch handler not found by byte offset: " + handlerOff);
@@ -160,23 +155,23 @@ public class DexCodeReader implements ICodeReader {
 	}
 
 	private Map<Integer, ICatch> getCatchHandlers(int offset, SectionReader ext) {
-		in.pos(offset);
-		int byteOffsetStart = in.getAbsPos();
-		int size = in.readUleb128();
+		pos(offset);
+		int byteOffsetStart = getAbsPos();
+		int size = readUleb128();
 		Map<Integer, ICatch> map = new HashMap<>(size);
 		for (int i = 0; i < size; i++) {
-			int byteIndex = in.getAbsPos() - byteOffsetStart;
-			int sizeAndType = in.readSleb128();
+			int byteIndex = getAbsPos() - byteOffsetStart;
+			int sizeAndType = readSleb128();
 			int handlersLen = Math.abs(sizeAndType);
 			int[] addr = new int[handlersLen];
 			String[] types = new String[handlersLen];
 			for (int h = 0; h < handlersLen; h++) {
-				types[h] = ext.getType(in.readUleb128());
-				addr[h] = in.readUleb128();
+				types[h] = ext.getType(readUleb128());
+				addr[h] = readUleb128();
 			}
 			int catchAllAddr;
 			if (sizeAndType <= 0) {
-				catchAllAddr = in.readUleb128();
+				catchAllAddr = readUleb128();
 			} else {
 				catchAllAddr = -1;
 			}
@@ -187,7 +182,7 @@ public class DexCodeReader implements ICodeReader {
 
 	@Override
 	public int getCodeOffset() {
-		return in.getOffset();
+		return getOffset();
 	}
 
 	public void setMthId(int mthId) {

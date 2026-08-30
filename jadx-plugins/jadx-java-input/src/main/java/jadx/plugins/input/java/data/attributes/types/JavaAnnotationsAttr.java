@@ -48,6 +48,9 @@ public class JavaAnnotationsAttr implements IJavaAttribute {
 		ConstPoolReader constPool = clsData.getConstPoolReader();
 		String type = constPool.getUtf8(reader.readU2());
 		int pairsCount = reader.readU2();
+		if (pairsCount == 0) {
+			return new JadxAnnotation(visibility, type);
+		}
 		Map<String, EncodedValue> pairs = new LinkedHashMap<>(pairsCount);
 		for (int j = 0; j < pairsCount; j++) {
 			String name = constPool.getUtf8(reader.readU2());

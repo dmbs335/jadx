@@ -2,6 +2,7 @@ package jadx.api.plugins.input.insns;
 
 import jadx.api.plugins.input.data.ICallSite;
 import jadx.api.plugins.input.data.IFieldRef;
+import jadx.api.plugins.input.data.IFieldRefVisitor;
 import jadx.api.plugins.input.data.IMethodHandle;
 import jadx.api.plugins.input.data.IMethodProto;
 import jadx.api.plugins.input.data.IMethodRef;
@@ -47,6 +48,17 @@ public interface InsnData {
 	String getIndexAsType();
 
 	IFieldRef getIndexAsField();
+
+	/**
+	 * Visits the indexed field descriptor without requiring a persistent field-reference object.
+	 * Input plugins that do not provide a direct view retain the existing materialized behavior.
+	 */
+	default void visitIndexAsField(IFieldRefVisitor visitor) {
+		IFieldRef field = getIndexAsField();
+		if (field != null) {
+			visitor.accept(field.getParentClassType(), field.getName(), field.getType());
+		}
+	}
 
 	IMethodRef getIndexAsMethod();
 

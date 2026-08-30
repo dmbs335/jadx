@@ -38,7 +38,7 @@ public class RenameMappingsPlugin implements JadxPlugin {
 		context.addPass(new ApplyMappingsPass());
 		context.addPass(new CodeMappingsPass());
 
-		// use mapping file time modification to check for changes
+		// Content identity is required here: preserved timestamps must not allow stale code caches.
 		context.registerInputsHashSupplier(() -> FileUtils.md5Sum(getInputsHashString(mappingsPath)));
 	}
 
@@ -48,8 +48,8 @@ public class RenameMappingsPlugin implements JadxPlugin {
 
 	private static String getFileHashString(Path mappingsPath) {
 		try {
-			return mappingsPath.toAbsolutePath().normalize()
-					+ ":" + Files.getLastModifiedTime(mappingsPath).toMillis();
+			Path normalized = mappingsPath.toAbsolutePath().normalize();
+			return normalized + ":" + FileUtils.sha256Sum(normalized);
 		} catch (Exception e) {
 			return "";
 		}

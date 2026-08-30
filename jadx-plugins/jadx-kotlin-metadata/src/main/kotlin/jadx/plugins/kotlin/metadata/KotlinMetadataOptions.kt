@@ -56,9 +56,10 @@ class KotlinMetadataOptions : BasePluginOptionsBuilder() {
 			.setter { isGetters = it }
 	}
 
-	fun isPreparePassNeeded(): Boolean = isClassAlias
+	fun isPreparePassNeeded(): Boolean =
+		isClassAlias || isFields || isGetters || isMethodArgs || isCompanion || isDataClass
 
-	fun isDecompilePassNeeded(): Boolean = isMethodArgs || isFields || isCompanion || isDataClass || isToString || isGetters
+	fun isDecompilePassNeeded(): Boolean = isMethodArgs || isCompanion || isDataClass || isToString
 
 	companion object {
 		const val CLASS_ALIAS_OPT = "$PLUGIN_ID.class-alias"

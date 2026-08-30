@@ -4,6 +4,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
@@ -36,6 +38,7 @@ import jadx.zip.security.IJadxZipSecurity;
  */
 public final class JadxZipParser implements IZipParser {
 	private static final Logger LOG = LoggerFactory.getLogger(JadxZipParser.class);
+	private static final int DIRECT_LOAD_LIMIT = 100 * 1024 * 1024;
 
 	private static final byte LOCAL_FILE_HEADER_START = 0x50;
 	private static final int LOCAL_FILE_HEADER_SIGN = 0x04034b50;
@@ -48,6 +51,7 @@ public final class JadxZipParser implements IZipParser {
 	private final Set<ZipReaderFlags> flags;
 	private final boolean verify;
 	private final boolean useLimitedDataStream;
+	private final int directLoadLimit;
 
 	private @Nullable RandomAccessFile file;
 	private @Nullable FileChannel fileChannel;
@@ -58,12 +62,17 @@ public final class JadxZipParser implements IZipParser {
 	private @Nullable ZipContent fallbackZipContent;
 
 	public JadxZipParser(File zipFile, ZipReaderOptions options) {
+		this(zipFile, options, DIRECT_LOAD_LIMIT);
+	}
+
+	JadxZipParser(File zipFile, ZipReaderOptions options, int directLoadLimit) {
 		this.zipFile = zipFile;
 		this.options = options;
 		this.zipSecurity = options.getZipSecurity();
 		this.flags = options.getFlags();
 		this.verify = options.getFlags().contains(ZipReaderFlags.REPORT_TAMPERING);
 		this.useLimitedDataStream = zipSecurity.useLimitedDataStream();
+		this.directLoadLimit = directLoadLimit;
 	}
 
 	@Override
@@ -138,7 +147,7 @@ public final class JadxZipParser implements IZipParser {
 			throw new IOException("Zip file is too big");
 		}
 		int fileLen = (int) size;
-		if (fileLen < 100 * 1024 * 1024) {
+		if (fileLen < directLoadLimit) {
 			// load files smaller than 100MB directly into memory
 			byte[] bytes = new byte[fileLen];
 			raFile.readFully(bytes);
@@ -420,6 +429,7 @@ public final class JadxZipParser implements IZipParser {
 	@SuppressWarnings("DataFlowIssue")
 	@Override
 	public void close() throws IOException {
+		ByteBuffer buffer = byteBuffer;
 		try {
 			if (fileChannel != null) {
 				fileChannel.close();
@@ -436,6 +446,48 @@ public final class JadxZipParser implements IZipParser {
 			byteBuffer = null;
 			endOfCDStart = -2;
 			fallbackZipContent = null;
+			unmapBuffer(buffer);
+		}
+	}
+
+	static boolean unmapBuffer(@Nullable ByteBuffer buffer) {
+		if (buffer == null || !buffer.isDirect()) {
+			return true;
+		}
+		return MappedBufferCleaner.clean(buffer);
+	}
+
+	private static final class MappedBufferCleaner {
+		private static final @Nullable Object UNSAFE;
+		private static final @Nullable Method INVOKE_CLEANER;
+
+		static {
+			Object unsafe = null;
+			Method invokeCleaner = null;
+			try {
+				Class<?> unsafeCls = Class.forName("sun.misc.Unsafe");
+				Field unsafeField = unsafeCls.getDeclaredField("theUnsafe");
+				unsafeField.setAccessible(true);
+				unsafe = unsafeField.get(null);
+				invokeCleaner = unsafeCls.getMethod("invokeCleaner", ByteBuffer.class);
+			} catch (Exception e) {
+				LOG.debug("Mapped buffer cleaner is unavailable", e);
+			}
+			UNSAFE = unsafe;
+			INVOKE_CLEANER = invokeCleaner;
+		}
+
+		private static boolean clean(ByteBuffer buffer) {
+			if (UNSAFE == null || INVOKE_CLEANER == null) {
+				return false;
+			}
+			try {
+				INVOKE_CLEANER.invoke(UNSAFE, buffer);
+				return true;
+			} catch (Exception e) {
+				LOG.debug("Failed to release mapped zip buffer", e);
+				return false;
+			}
 		}
 	}
 

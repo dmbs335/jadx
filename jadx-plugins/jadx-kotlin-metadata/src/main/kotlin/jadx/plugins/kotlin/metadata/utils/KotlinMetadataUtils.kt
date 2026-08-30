@@ -9,7 +9,9 @@ import jadx.plugins.kotlin.metadata.model.ClassAliasRename
 import jadx.plugins.kotlin.metadata.model.CompanionRename
 import jadx.plugins.kotlin.metadata.model.FieldRename
 import jadx.plugins.kotlin.metadata.model.MethodArgRename
+import jadx.plugins.kotlin.metadata.model.MethodRename
 import kotlin.metadata.KmClass
+import kotlin.metadata.KmFunction
 
 object KotlinMetadataUtils {
 
@@ -108,10 +110,48 @@ object KotlinMetadataUtils {
 		}
 	}
 
+	@Suppress("UNCHECKED_CAST")
+	fun packMethodArgs(cls: ClassNode, kmCls: KmClass): PackedMethodArgs {
+		// Preserve mapMethodArgs' last-value-wins behavior for duplicate metadata signatures.
+		// Some libraries contain bridge/synthetic entries resolving to the same MethodNode.
+		val matches = LinkedHashMap<MethodNode, KmFunction>()
+		kmCls.functions.forEach { function ->
+			val node = cls.searchMethodByShortId(function.shortId) ?: return@forEach
+			if (node.argTypes.size == function.valueParameters.size) {
+				matches[node] = function
+			}
+		}
+		val methods = arrayOfNulls<MethodNode>(matches.size)
+		val names = arrayOfNulls<String>(matches.values.sumOf { it.valueParameters.size })
+		val offsets = IntArray(matches.size + 1)
+		var entryIndex = 0
+		var nameIndex = 0
+		matches.forEach { (method, function) ->
+			methods[entryIndex] = method
+			offsets[entryIndex++] = nameIndex
+			function.valueParameters.forEach { parameter ->
+				names[nameIndex++] = parameter.name
+			}
+		}
+		offsets[entryIndex] = nameIndex
+		return PackedMethodArgs(methods as Array<MethodNode>, names as Array<String>, offsets)
+	}
+
 	fun mapFields(cls: ClassNode, kmCls: KmClass): List<FieldRename> {
 		return kmCls.properties.mapNotNull { kmProperty ->
 			val node = cls.searchFieldByShortId(kmProperty.shortId) ?: return@mapNotNull null
 			FieldRename(field = node, alias = kmProperty.name)
+		}
+	}
+
+	fun mapGetters(cls: ClassNode, kmCls: KmClass): List<MethodRename> {
+		return kmCls.properties.mapNotNull { kmProperty ->
+			val field = cls.searchFieldByShortId(kmProperty.shortId) ?: return@mapNotNull null
+			val getter = cls.searchMethodByShortId(kmProperty.getterShortId) ?: return@mapNotNull null
+			MethodRename(
+				mth = getter,
+				alias = KotlinUtils.getGetterAlias(field.alias),
+			)
 		}
 	}
 

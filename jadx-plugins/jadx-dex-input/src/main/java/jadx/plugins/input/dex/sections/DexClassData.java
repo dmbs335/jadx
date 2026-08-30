@@ -21,18 +21,17 @@ import jadx.api.plugins.input.data.attributes.types.SourceFileAttr;
 import jadx.plugins.input.dex.sections.annotations.AnnotationsParser;
 import jadx.plugins.input.dex.utils.SmaliUtils;
 
-public class DexClassData implements IClassData {
+public class DexClassData extends SectionReader implements IClassData {
 	private static final Logger LOG = LoggerFactory.getLogger(DexClassData.class);
 	public static final int SIZE = 8 * 4;
 
-	private final SectionReader in;
 	private final AnnotationsParser annotationsParser;
 	private final int inputFileOffset;
 
-	public DexClassData(SectionReader sectionReader, AnnotationsParser annotationsParser) {
-		this.in = sectionReader;
-		this.annotationsParser = annotationsParser;
-		this.inputFileOffset = this.in.getOffset();
+	public DexClassData(SectionReader sectionReader) {
+		super(sectionReader);
+		this.annotationsParser = new AnnotationsParser(sectionReader, this);
+		this.inputFileOffset = getOffset();
 	}
 
 	@Override
@@ -41,14 +40,14 @@ public class DexClassData implements IClassData {
 	}
 
 	@Override
-	public IClassData copy() {
-		return new DexClassData(in.copy(), annotationsParser.copy());
+	public DexClassData copy() {
+		return new DexClassData(this);
 	}
 
 	@Override
 	public String getType() {
-		int typeIdx = in.pos(0).readInt();
-		String clsType = in.getType(typeIdx);
+		int typeIdx = pos(0).readInt();
+		String clsType = getType(typeIdx);
 		if (clsType == null) {
 			throw new NullPointerException("Unknown class type");
 		}
@@ -57,46 +56,46 @@ public class DexClassData implements IClassData {
 
 	@Override
 	public int getAccessFlags() {
-		return in.pos(4).readInt();
+		return pos(4).readInt();
 	}
 
 	@Nullable
 	@Override
 	public String getSuperType() {
-		int typeIdx = in.pos(2 * 4).readInt();
-		return in.getType(typeIdx);
+		int typeIdx = pos(2 * 4).readInt();
+		return getType(typeIdx);
 	}
 
 	@Override
 	public List<String> getInterfacesTypes() {
-		int offset = in.pos(3 * 4).readInt();
+		int offset = pos(3 * 4).readInt();
 		if (offset == 0) {
 			return Collections.emptyList();
 		}
-		return in.absPos(offset).readTypeList();
+		return absPos(offset).readTypeList();
 	}
 
 	@Nullable
 	private String getSourceFile() {
-		int strIdx = in.pos(4 * 4).readInt();
-		return in.getString(strIdx);
+		int strIdx = pos(4 * 4).readInt();
+		return getString(strIdx);
 	}
 
 	@Override
 	public String getInputFileName() {
-		return in.getDexReader().getInputFileName();
+		return getDexReader().getInputFileName();
 	}
 
 	public int getAnnotationsOff() {
-		return in.pos(5 * 4).readInt();
+		return pos(5 * 4).readInt();
 	}
 
 	public int getClassDataOff() {
-		return in.pos(6 * 4).readInt();
+		return pos(6 * 4).readInt();
 	}
 
 	public int getStaticValuesOff() {
-		return in.pos(7 * 4).readInt();
+		return pos(7 * 4).readInt();
 	}
 
 	@Override
@@ -105,7 +104,7 @@ public class DexClassData implements IClassData {
 		if (classDataOff == 0) {
 			return;
 		}
-		SectionReader data = in.copy(classDataOff);
+		SectionReader data = copy(classDataOff);
 		int staticFieldsCount = data.readUleb128();
 		int instanceFieldsCount = data.readUleb128();
 		int directMthCount = data.readUleb128();
@@ -134,7 +133,7 @@ public class DexClassData implements IClassData {
 		for (int i = 0; i < count; i++) {
 			fieldId += data.readUleb128();
 			int accFlags = data.readUleb128();
-			in.fillFieldData(fieldData, fieldId);
+			fillFieldData(fieldData, fieldId);
 			fieldData.setAccessFlags(accFlags);
 			fieldData.setAnnotationsOffset(getOffsetFromMap(fieldId, annOffsetMap));
 			fieldData.setConstValue(staticFields && i < constValues.size() ? constValues.get(i) : null);
@@ -154,7 +153,7 @@ public class DexClassData implements IClassData {
 
 	private void readMethods(Consumer<IMethodData> mthConsumer, SectionReader data, DexMethodData methodData, int count,
 			Map<Integer, Integer> annotationOffsetMap, Map<Integer, Integer> paramsAnnOffsetMap) {
-		DexCodeReader dexCodeReader = new DexCodeReader(in.copy());
+		DexCodeReader dexCodeReader = new DexCodeReader(super.copy());
 		int mthIdx = 0;
 		for (int i = 0; i < count; i++) {
 			mthIdx += data.readUleb128();
@@ -163,7 +162,7 @@ public class DexClassData implements IClassData {
 
 			DexMethodRef methodRef = methodData.getMethodRef();
 			methodRef.reset();
-			in.initMethodRef(mthIdx, methodRef);
+			initMethodRef(mthIdx, methodRef);
 			methodData.setAccessFlags(accFlags);
 			if (codeOff == 0) {
 				methodData.setCodeReader(null);
@@ -209,12 +208,12 @@ public class DexClassData implements IClassData {
 	}
 
 	public int getClassDefOffset() {
-		return in.pos(0).getAbsPos();
+		return pos(0).getAbsPos();
 	}
 
 	@Override
 	public String getDisassembledCode() {
-		byte[] dexBuf = in.getDexReader().getBuf().array();
+		byte[] dexBuf = getDexReader().getBuf().array();
 		return SmaliUtils.getSmaliCode(dexBuf, getClassDefOffset());
 	}
 
