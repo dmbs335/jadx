@@ -148,7 +148,7 @@ dependencies {
 }
 
 val copyArtifacts =
-	tasks.register<Copy>("copyArtifacts") {
+	tasks.register<Sync>("copyArtifacts") {
 		val jarCliPattern = "jadx-cli-(.*)-all.jar".toPattern()
 		from(tasks.getByPath(":jadx-cli:installShadowDist")) {
 			exclude("**/*.jar")
