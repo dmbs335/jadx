@@ -1,0 +1,8 @@
+.class public Lconstructors/TestConstructorCheckedFieldPrefixOrderBlockedParent;
+.super Ljava/lang/Object;
+
+.method public constructor <init>(Ljava/lang/Object;Ljava/lang/Object;)V
+    .locals 0
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method

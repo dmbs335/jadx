@@ -20,6 +20,9 @@ import jadx.tests.api.IntegrationTest;
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 public class TestCodeMetadata extends IntegrationTest {
+	public interface TestNoCode {
+		String call(String value);
+	}
 
 	public static class TestCls {
 		public static class A {
@@ -75,5 +78,14 @@ public class TestCodeMetadata extends IntegrationTest {
 
 		ICodeNodeRef nodeBelow = metadata.getNodeBelow(testEndPos);
 		assertThat(nodeBelow).isSameAs(callMth);
+	}
+
+	@Test
+	public void testNoCodeMethodExtraction() {
+		ClassNode cls = getClassNode(TestNoCode.class);
+		MethodNode callMth = getMethod(cls, "call");
+
+		assertThat(callMth.isNoCode()).isTrue();
+		assertThat(callMth.getCodeStr()).isEmpty();
 	}
 }

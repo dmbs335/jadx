@@ -1,0 +1,9 @@
+.class public Lconstructors/TestConstructorMultiUsePrimitiveCastInlineParent;
+.super Ljava/lang/Object;
+
+.method public constructor <init>(FF)V
+    .locals 0
+
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method

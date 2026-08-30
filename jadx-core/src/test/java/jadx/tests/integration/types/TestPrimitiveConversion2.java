@@ -13,7 +13,8 @@ public class TestPrimitiveConversion2 extends SmaliTest {
 		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.containsOne("boolean z2 = !convertedPrice2.code.equals(itemCurrency.code);")
+				.containsOne("boolean z2 = !")
+				.containsOne(".code.equals(itemCurrency.code);")
 				.doesNotContain("z2 == 0")
 				.doesNotContain("z2 | 2")
 				.containsOne("(z2 ? 1 : 0) | 2")

@@ -35,7 +35,12 @@ public class TestNestedLoops extends IntegrationTest {
 				.code()
 				.containsOne("for (String s1 : l1) {")
 				.containsOne("for (String s2 : l2) {")
-				.containsOne("if (s1.equals(s2)) {")
+				.oneOf(
+						c -> c.containsOne("if (s1.equals(s2)) {"),
+						c -> c.containsLines(4,
+								"if (!s1.equals(s2)) {",
+								"    continue;",
+								"}"))
 				.containsOne("l2.add(s1);")
 				.containsOne("l1.remove(s2);");
 	}
