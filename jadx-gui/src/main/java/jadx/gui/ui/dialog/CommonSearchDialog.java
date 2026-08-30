@@ -51,6 +51,7 @@ import ch.qos.logback.classic.Level;
 
 import jadx.api.JavaNode;
 import jadx.gui.logs.LogOptions;
+import jadx.gui.search.RegexSearchSafety;
 import jadx.gui.treemodel.JNode;
 import jadx.gui.treemodel.JResSearchNode;
 import jadx.gui.ui.MainWindow;
@@ -118,6 +119,12 @@ public abstract class CommonSearchDialog extends JFrame {
 
 	public void updateHighlightContext(String text, boolean caseSensitive, boolean regexp, boolean wholeWord) {
 		updateTitle(text);
+		if (regexp && RegexSearchSafety.requiresGuard(text)) {
+			// Table cells are rendered on the EDT. Avoid running a potentially
+			// exponential regex again only to decorate an already found result.
+			highlightContext = null;
+			return;
+		}
 		highlightContext = new SearchContext(text);
 		highlightContext.setMatchCase(caseSensitive);
 		highlightContext.setWholeWord(wholeWord);

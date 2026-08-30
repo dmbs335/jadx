@@ -36,15 +36,25 @@ class RawUsageData {
 	public MthUsageData getMethodData(MethodNode mth) {
 		ClassNode parentClass = mth.getParentClass();
 		String shortId = mth.getMethodInfo().getShortId();
-		return getClassData(parentClass).getMthUsage().computeIfAbsent(shortId,
-				m -> new MthUsageData(new MthRef(parentClass.getRawName(), shortId)));
+		Map<String, MthUsageData> usageMap = getClassData(parentClass).getMthUsage();
+		MthUsageData usageData = usageMap.get(shortId);
+		if (usageData == null) {
+			usageData = new MthUsageData(new MthRef(parentClass.getRawName(), shortId));
+			usageMap.put(shortId, usageData);
+		}
+		return usageData;
 	}
 
 	public FldUsageData getFieldData(FieldNode fld) {
 		ClassNode parentClass = fld.getParentClass();
 		String shortId = fld.getFieldInfo().getShortId();
-		return getClassData(parentClass).getFldUsage().computeIfAbsent(shortId,
-				m -> new FldUsageData(new FldRef(parentClass.getRawName(), shortId)));
+		Map<String, FldUsageData> usageMap = getClassData(parentClass).getFldUsage();
+		FldUsageData usageData = usageMap.get(shortId);
+		if (usageData == null) {
+			usageData = new FldUsageData(new FldRef(parentClass.getRawName(), shortId));
+			usageMap.put(shortId, usageData);
+		}
+		return usageData;
 	}
 
 	public void collectClassesWithoutData() {

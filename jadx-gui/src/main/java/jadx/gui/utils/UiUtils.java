@@ -83,7 +83,17 @@ public class UiUtils {
 		}
 	};
 
-	private static final ExecutorService BACKGROUND_THREAD = Executors.newSingleThreadExecutor(Utils.simpleThreadFactory("utils-bg"));
+	/*
+	 * Application-wide fire-and-forget work must not keep the JVM alive after all windows are closed.
+	 * Window-owned executors are shut down by their owners, but this static executor has no matching
+	 * lifecycle owner. Making only this worker a daemon preserves task ordering while allowing a clean
+	 * process exit after the GUI has been disposed.
+	 */
+	private static final ExecutorService BACKGROUND_THREAD = Executors.newSingleThreadExecutor(runnable -> {
+		Thread thread = Utils.simpleThreadFactory("utils-bg").newThread(runnable);
+		thread.setDaemon(true);
+		return thread;
+	});
 
 	private UiUtils() {
 	}

@@ -27,6 +27,10 @@ public class SearchJob implements Runnable {
 				if (searchTask.addResult(result)) {
 					return;
 				}
+			} catch (RegexSearchTimeoutException e) {
+				searchTask.reportRegexTimeout(e);
+				LOG.warn("Regex search stopped, provider: {}", provider.getClass().getSimpleName(), e);
+				return;
 			} catch (Exception e) {
 				LOG.warn("Search error, provider: {}", provider.getClass().getSimpleName(), e);
 				return;

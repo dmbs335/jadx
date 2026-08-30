@@ -37,4 +37,8 @@ public class EditorSyncManager implements ITabStatesListener {
 		ITabStatesListener.super.onTabClose(blueprint);
 		mainWindow.updateHexViewMenuEnabled();
 	}
+
+	public void dispose() {
+		mainWindow.getTabsController().removeListener(this);
+	}
 }

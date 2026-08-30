@@ -1,7 +1,13 @@
 package jadx.gui.utils.cache.code;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -11,6 +17,8 @@ import org.slf4j.LoggerFactory;
 import jadx.api.ICodeInfo;
 import jadx.api.impl.NoOpCodeCache;
 import jadx.core.dex.nodes.ClassNode;
+import jadx.gui.cache.code.CodeStringCache;
+import jadx.gui.cache.code.disk.BufferCodeCache;
 import jadx.gui.cache.code.disk.DiskCodeCache;
 import jadx.tests.api.IntegrationTest;
 
@@ -30,6 +38,8 @@ class DiskCodeCacheTest extends IntegrationTest {
 		ICodeInfo codeInfo = clsNode.getCode();
 
 		DiskCodeCache cache = new DiskCodeCache(clsNode.root(), tempDir);
+		String codeVersion = Files.readString(tempDir.resolve("code").resolve("code-version"));
+		assertThat(codeVersion).startsWith("16:af2:");
 
 		String clsKey = clsNode.getFullName();
 		cache.add(clsKey, codeInfo);
@@ -43,5 +53,120 @@ class DiskCodeCacheTest extends IntegrationTest {
 		assertThat(readCodeInfo.getCodeMetadata().getAsMap()).hasSameSizeAs(codeInfo.getCodeMetadata().getAsMap());
 
 		cache.close();
+	}
+
+	@Test
+	public void testCorruptedEntryIsRegenerated() throws IOException {
+		disableCompilation();
+		getArgs().setCodeCache(NoOpCodeCache.INSTANCE);
+		ClassNode clsNode = getClassNode(DiskCodeCacheTest.class);
+		ICodeInfo expected = clsNode.getCode();
+		String clsKey = clsNode.getFullName();
+
+		DiskCodeCache initialCache = new DiskCodeCache(clsNode.root(), tempDir);
+		initialCache.add(clsKey, expected);
+		initialCache.close();
+
+		Path sourceFile = findCacheFile(tempDir.resolve("code/sources"), ".java");
+		Files.delete(sourceFile);
+		DiskCodeCache missingSourceCache = new DiskCodeCache(clsNode.root(), tempDir);
+		getArgs().setCodeCache(missingSourceCache);
+		assertThat(clsNode.getCode().getCodeStr()).isEqualTo(expected.getCodeStr());
+		missingSourceCache.close();
+		assertThat(Files.readString(sourceFile)).isEqualTo(expected.getCodeStr());
+
+		Path metadataFile = findCacheFile(tempDir.resolve("code/metadata"), ".jadxmd");
+		// Valid header followed by an impossible line-mapping count.
+		Files.write(metadataFile, new byte[] { 'j', 'a', 'd', 'x', 'm', 'd', 0x7f, -1, -1, -1 });
+		DiskCodeCache corruptMetadataCache = new DiskCodeCache(clsNode.root(), tempDir);
+		getArgs().setCodeCache(corruptMetadataCache);
+		assertThat(clsNode.getCode().getCodeStr()).isEqualTo(expected.getCodeStr());
+		corruptMetadataCache.close();
+
+		DiskCodeCache verifiedCache = new DiskCodeCache(clsNode.root(), tempDir);
+		assertThat(verifiedCache.get(clsKey).getCodeStr()).isEqualTo(expected.getCodeStr());
+		verifiedCache.close();
+	}
+
+	@Test
+	public void testMetadataLoadReusesKnownCodeString() throws IOException {
+		disableCompilation();
+		getArgs().setCodeCache(NoOpCodeCache.INSTANCE);
+		ClassNode clsNode = getClassNode(DiskCodeCacheTest.class);
+		ICodeInfo expected = clsNode.getCode();
+		String clsKey = clsNode.getFullName();
+
+		DiskCodeCache initialCache = new DiskCodeCache(clsNode.root(), tempDir);
+		initialCache.add(clsKey, expected);
+		initialCache.close();
+
+		CodeStringCache cache = new CodeStringCache(
+				new BufferCodeCache(new DiskCodeCache(clsNode.root(), tempDir)));
+		String knownCode = cache.getCode(clsKey);
+		assertThat(knownCode).isEqualTo(expected.getCodeStr());
+		Files.delete(findCacheFile(tempDir.resolve("code/sources"), ".java"));
+
+		ICodeInfo readCodeInfo = cache.get(clsKey);
+		assertThat(readCodeInfo.getCodeStr()).isSameAs(knownCode);
+		assertThat(readCodeInfo.getCodeMetadata().getLineMapping())
+				.isEqualTo(expected.getCodeMetadata().getLineMapping());
+		assertThat(readCodeInfo.getCodeMetadata().getAsMap())
+				.hasSameSizeAs(expected.getCodeMetadata().getAsMap());
+		cache.close();
+	}
+
+	@Test
+	public void interruptedCloseStillWaitsForWriters() throws Exception {
+		disableCompilation();
+		getArgs().setCodeCache(NoOpCodeCache.INSTANCE);
+		ClassNode clsNode = getClassNode(DiskCodeCacheTest.class);
+		DiskCodeCache cache = new DiskCodeCache(clsNode.root(), tempDir);
+		ExecutorService writePool = getWritePool(cache);
+		CountDownLatch writerStarted = new CountDownLatch(1);
+		CountDownLatch releaseWriter = new CountDownLatch(1);
+		writePool.execute(() -> {
+			writerStarted.countDown();
+			try {
+				releaseWriter.await(2, TimeUnit.SECONDS);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+		assertThat(writerStarted.await(1, TimeUnit.SECONDS)).isTrue();
+		Thread releaser = new Thread(() -> {
+			try {
+				Thread.sleep(100);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+			releaseWriter.countDown();
+		});
+		releaser.start();
+
+		try {
+			Thread.currentThread().interrupt();
+			cache.close();
+			assertThat(Thread.currentThread().isInterrupted()).isTrue();
+			assertThat(writePool.isTerminated()).isTrue();
+		} finally {
+			Thread.interrupted();
+			releaseWriter.countDown();
+			releaser.join(1_000);
+		}
+	}
+
+	private static ExecutorService getWritePool(DiskCodeCache cache) throws Exception {
+		Field field = DiskCodeCache.class.getDeclaredField("writePool");
+		field.setAccessible(true);
+		return (ExecutorService) field.get(cache);
+	}
+
+	private static Path findCacheFile(Path dir, String suffix) throws IOException {
+		try (Stream<Path> files = Files.walk(dir)) {
+			return files.filter(Files::isRegularFile)
+					.filter(path -> path.getFileName().toString().endsWith(suffix))
+					.findFirst()
+					.orElseThrow();
+		}
 	}
 }

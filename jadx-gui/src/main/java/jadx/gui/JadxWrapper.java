@@ -5,6 +5,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import org.jetbrains.annotations.NotNull;
@@ -12,6 +13,7 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import jadx.api.ICodeCache;
 import jadx.api.ICodeInfo;
 import jadx.api.JadxArgs;
 import jadx.api.JadxDecompiler;
@@ -28,8 +30,8 @@ import jadx.api.usage.impl.EmptyUsageInfoCache;
 import jadx.api.usage.impl.InMemoryUsageInfoCache;
 import jadx.cli.JadxAppCommon;
 import jadx.cli.plugins.JadxFilesGetter;
+import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.nodes.ClassNode;
-import jadx.core.dex.nodes.ProcessState;
 import jadx.core.dex.nodes.RootNode;
 import jadx.core.plugins.AppContext;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -46,7 +48,6 @@ import jadx.gui.utils.CacheObject;
 import jadx.plugins.tools.JadxExternalPluginsLoader;
 
 import static jadx.core.dex.nodes.ProcessState.GENERATED_AND_UNLOADED;
-import static jadx.core.dex.nodes.ProcessState.NOT_LOADED;
 import static jadx.core.dex.nodes.ProcessState.PROCESS_COMPLETE;
 
 @SuppressWarnings("ConstantConditions")
@@ -56,6 +57,7 @@ public class JadxWrapper {
 	private static final Object DECOMPILER_UPDATE_SYNC = new Object();
 
 	private final MainWindow mainWindow;
+	private final AtomicLong projectGeneration = new AtomicLong();
 	private volatile @Nullable JadxDecompiler decompiler;
 	private CommonGuiPluginsContext guiPluginsContext;
 
@@ -87,18 +89,46 @@ public class JadxWrapper {
 		}
 	}
 
-	// TODO: check and move into core package
 	public void unloadClasses() {
-		getCurrentDecompiler().ifPresent(decompiler -> {
-			for (ClassNode cls : decompiler.getRoot().getClasses()) {
-				ProcessState clsState = cls.getState();
-				cls.unload();
-				cls.setState(clsState == PROCESS_COMPLETE ? GENERATED_AND_UNLOADED : NOT_LOADED);
+		getCurrentDecompiler().ifPresent(JadxDecompiler::unloadClasses);
+	}
+
+	/**
+	 * Release processed IR only when generated code is already available in the code cache.
+	 * Intended for a completed background-task boundary where no decompiler worker is running.
+	 *
+	 * @return number of top-level classes unloaded
+	 */
+	public int unloadCachedClasses() {
+		synchronized (DECOMPILER_UPDATE_SYNC) {
+			JadxDecompiler currentDecompiler = decompiler;
+			if (currentDecompiler == null) {
+				return 0;
 			}
-		});
+			ICodeCache codeCache = currentDecompiler.getArgs().getCodeCache();
+			int unloaded = 0;
+			for (ClassNode cls : currentDecompiler.getRoot().getClasses()) {
+				if (cls.isInner()
+						|| cls.getState() != PROCESS_COMPLETE
+						|| cls.contains(AFlag.DONT_GENERATE)
+						|| cls.contains(AFlag.DONT_UNLOAD_CLASS)
+						|| !codeCache.contains(cls.getRawName())) {
+					continue;
+				}
+				cls.unload();
+				cls.setState(GENERATED_AND_UNLOADED);
+				// Rebuild raw/pre-decompile metadata if this cached code is later evicted.
+				cls.add(AFlag.CLASS_DEEP_RELOAD);
+				unloaded++;
+			}
+			return unloaded;
+		}
 	}
 
 	public void close() {
+		// Invalidate asynchronous consumers before waiting for the decompiler lock.
+		// A result produced by the old project must never enter a reloaded GUI model.
+		projectGeneration.incrementAndGet();
 		try {
 			synchronized (DECOMPILER_UPDATE_SYNC) {
 				if (decompiler != null) {
@@ -115,6 +145,10 @@ public class JadxWrapper {
 		} finally {
 			mainWindow.getCacheObject().reset();
 		}
+	}
+
+	public long getProjectGeneration() {
+		return projectGeneration.get();
 	}
 
 	/**

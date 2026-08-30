@@ -85,6 +85,7 @@ public class JDebuggerPanel extends JPanel {
 
 	private final transient VarTreePopupMenu varTreeMenu;
 	private transient KeyEventDispatcher controllerShortCutDispatcher;
+	private boolean disposed;
 
 	public JDebuggerPanel(MainWindow mainWindow) {
 		UiUtils.uiThreadGuard();
@@ -169,14 +170,12 @@ public class JDebuggerPanel extends JPanel {
 							JOptionPane.OK_CANCEL_OPTION);
 					if (what == JOptionPane.OK_OPTION) {
 						controller.exit();
-						logcatPanel.exit();
 					} else {
 						return;
 					}
 				} else {
 					mainWindow.destroyDebuggerPanel();
 				}
-				unregShortcuts();
 			}
 		});
 		headerPanel.add(closeBtn, BorderLayout.EAST);
@@ -407,6 +406,16 @@ public class JDebuggerPanel extends JPanel {
 
 	public IDebugController getDbgController() {
 		return controller;
+	}
+
+	public void dispose() {
+		if (disposed) {
+			return;
+		}
+		disposed = true;
+		controller.dispose();
+		logcatPanel.exit();
+		unregShortcuts();
 	}
 
 	public int getLeftSplitterLocation() {

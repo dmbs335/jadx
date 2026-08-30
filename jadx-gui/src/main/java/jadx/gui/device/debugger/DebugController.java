@@ -10,6 +10,9 @@ import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import javax.swing.JOptionPane;
 import javax.swing.tree.DefaultMutableTreeNode;
@@ -23,6 +26,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
 import jadx.core.utils.StringUtils;
+import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 import jadx.gui.device.debugger.BreakpointManager.FileBreakpoint;
 import jadx.gui.device.debugger.SmaliDebugger.Frame;
@@ -50,8 +54,8 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 	private static final RuntimeType[] POSSIBLE_TYPES = { RuntimeType.OBJECT, RuntimeType.INT, RuntimeType.LONG };
 	private static final int DEFAULT_CACHE_SIZE = 512;
 
-	private JDebuggerPanel debuggerPanel;
-	private SmaliDebugger debugger;
+	private volatile JDebuggerPanel debuggerPanel;
+	private volatile SmaliDebugger debugger;
 	private ArtAdapter.IArtAdapter art;
 	private final CurrentInfo cur = new CurrentInfo();
 
@@ -68,18 +72,57 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 
 	private final Map<String, RegisterObserver> regAdaMap = new ConcurrentHashMap<>();
 
-	private final ExecutorService updateQueue = Executors.newSingleThreadExecutor();
-	private final ExecutorService lazyQueue = Executors.newSingleThreadExecutor();
+	private final ExecutorService updateQueue = newQueue("debugger-update");
+	private final ExecutorService lazyQueue = newQueue("debugger-lazy");
+	private final AtomicBoolean disposed = new AtomicBoolean();
+	private final AtomicLong sessionId = new AtomicLong();
+
+	private static ExecutorService newQueue(String name) {
+		return Executors.newSingleThreadExecutor(runnable -> {
+			Thread thread = Utils.simpleThreadFactory(name).newThread(runnable);
+			thread.setDaemon(true);
+			return thread;
+		});
+	}
+
+	private void executeUpdate(Runnable task) {
+		executeForCurrentSession(updateQueue, task);
+	}
+
+	void executeLazy(Runnable task) {
+		executeForCurrentSession(lazyQueue, task);
+	}
+
+	private void executeForCurrentSession(ExecutorService queue, Runnable task) {
+		long currentSession = sessionId.get();
+		if (disposed.get()) {
+			return;
+		}
+		try {
+			queue.execute(() -> {
+				if (!disposed.get() && currentSession == sessionId.get()) {
+					task.run();
+				}
+			});
+		} catch (RejectedExecutionException e) {
+			LOG.debug("Ignore debugger update after controller disposal");
+		}
+	}
 
 	@Override
 	public boolean startDebugger(JDebuggerPanel debuggerPanel, String adbHost, int adbPort, int androidVer) {
+		if (disposed.get()) {
+			return false;
+		}
 		if (TYPE_MAP.isEmpty()) {
 			initTypeMap();
 		}
 		this.debuggerPanel = debuggerPanel;
 		UiUtils.uiRunAndWait(debuggerPanel::resetUI);
 		try {
-			debugger = SmaliDebugger.attach(adbHost, adbPort, this);
+			SmaliDebugger newDebugger = SmaliDebugger.attach(adbHost, adbPort, this);
+			debugger = newDebugger;
+			sessionId.incrementAndGet();
 		} catch (SmaliDebuggerException e) {
 			JOptionPane.showMessageDialog(debuggerPanel.getMainWindow(), e.getMessage(),
 					NLS.str("error_dialog.title"), JOptionPane.ERROR_MESSAGE);
@@ -119,7 +162,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 			return;
 		}
 		JClass mainActivity = DbgUtils.getJClass(appData.getMainActivityCls(), debuggerPanel.getMainWindow());
-		lazyQueue.execute(() -> openMainActivityTab(mainActivity));
+		executeLazy(() -> openMainActivityTab(mainActivity));
 		String clsSig = DbgUtils.getRawFullName(mainActivity);
 		try {
 			long id = debugger.getClassID(clsSig, true);
@@ -180,9 +223,13 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 
 	@Override
 	public boolean stop() {
-		if (isDebugging()) {
+		SmaliDebugger current = debugger;
+		if (current != null) {
+			debugger = null;
+			sessionId.incrementAndGet();
+			setDebuggerState(true, true);
 			try {
-				debugger.exit();
+				current.exit();
 			} catch (SmaliDebuggerException e) {
 				logErr(e);
 				return false;
@@ -193,15 +240,36 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 
 	@Override
 	public boolean exit() {
-		if (isDebugging()) {
+		JDebuggerPanel panel = debuggerPanel;
+		boolean success = stop();
+		dispose();
+		if (panel != null) {
+			panel.getMainWindow().destroyDebuggerPanel();
+		}
+		return success;
+	}
+
+	@Override
+	public void dispose() {
+		if (!disposed.compareAndSet(false, true)) {
+			return;
+		}
+		SmaliDebugger current = debugger;
+		debugger = null;
+		sessionId.incrementAndGet();
+		if (current != null) {
+			current.close();
 			setDebuggerState(true, true);
-			stop();
-			debugger = null;
 		}
 		BreakpointManager.setDebugController(null);
-		debuggerPanel.getMainWindow().destroyDebuggerPanel();
+		updateQueue.shutdownNow();
+		lazyQueue.shutdownNow();
+		stateListener = null;
 		debuggerPanel = null;
-		return true;
+	}
+
+	boolean isDisposed() {
+		return disposed.get() && updateQueue.isShutdown() && lazyQueue.isShutdown();
 	}
 
 	/**
@@ -279,7 +347,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 						value,
 						cur.frame.getThreadID(),
 						cur.frame.getFrame().getID());
-				lazyQueue.execute(() -> {
+				executeLazy(() -> {
 					setRegsNotUpdated();
 					updateRegister((RegTreeNode) valNode, type, true);
 				});
@@ -296,7 +364,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 						((RuntimeField) fldNode.getRuntimeValue()).getFieldID(),
 						fldNode.getRuntimeField().getType(),
 						value);
-				lazyQueue.execute(() -> {
+				executeLazy(() -> {
 					updateField((FieldTreeNode) valNode);
 				});
 			} catch (SmaliDebuggerException e) {
@@ -353,14 +421,15 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 	}
 
 	@Override
-	public void onSuspendEvent(SuspendInfo info) {
-		if (!isDebugging()) {
+	public void onSuspendEvent(SmaliDebugger source, SuspendInfo info) {
+		if (disposed.get() || source != debugger) {
 			return;
 		}
 		if (info.isTerminated()) {
+			debugger = null;
+			sessionId.incrementAndGet();
 			debuggerPanel.log("Debugger exited.");
 			setDebuggerState(true, true);
-			debugger = null;
 			return;
 		}
 		setDebuggerState(true, false);
@@ -387,7 +456,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 					debuggerPanel.resetRegTreeNodes();
 					updateAllRegisters(cur.frame);
 				} else if (toBeUpdatedTreeNode != null) {
-					lazyQueue.execute(() -> updateRegOrField(toBeUpdatedTreeNode));
+					executeLazy(() -> updateRegOrField(toBeUpdatedTreeNode));
 				}
 				markCodeOffset(info.getOffset());
 			} else {
@@ -530,7 +599,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 			threadEleList.add(ele);
 		}
 		debuggerPanel.refreshThreadBox(threadEleList);
-		lazyQueue.execute(() -> {
+		executeLazy(() -> {
 			for (ThreadBoxElement ele : threadEleList) { // get thread names
 				try {
 					ele.setName(debugger.getThreadNameSync(ele.getThreadID()));
@@ -561,7 +630,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		fetchStackFrameNames(curEle);
 
 		debuggerPanel.refreshStackFrameList(frameEleList);
-		lazyQueue.execute(() -> { // get class & method names for frames
+		executeLazy(() -> { // get class & method names for frames
 			for (int i = 1; i < frameEleList.size(); i++) {
 				fetchStackFrameNames(frameEleList.get(i));
 			}
@@ -628,7 +697,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 			debuggerPanel.updateThisFieldNodes(nodes);
 			frame.setFieldNodes(nodes);
 			if (thisID > 0 && nodes.size() > 0) {
-				lazyQueue.execute(() -> updateAllFieldValues(thisID, frame));
+				executeLazy(() -> updateAllFieldValues(thisID, frame));
 			}
 		} catch (SmaliDebuggerException e) {
 			logErr(e);
@@ -865,11 +934,11 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 	}
 
 	private void updateAllInfo(long threadID, long codeOffset) {
-		updateQueue.execute(() -> {
+		executeUpdate(() -> {
 			resetAllInfo();
 			cur.frame = updateAllStackFrames(threadID);
 			if (cur.frame != null) {
-				lazyQueue.execute(() -> updateAllFields(cur.frame));
+				executeLazy(() -> updateAllFields(cur.frame));
 				if (cur.frame.getClsSig() == null || cur.frame.getMthSig() == null) {
 					fetchStackFrameNames(cur.frame);
 				}
@@ -1003,7 +1072,7 @@ public final class DebugController implements SmaliDebugger.SuspendListener, IDe
 		boolean hasSet = bpStore.hasSetDelaied(bp.cls);
 		bpStore.add(bp, null);
 		if (!hasSet) {
-			updateQueue.execute(() -> {
+			executeUpdate(() -> {
 				try {
 					debugger.regClassPrepareEventForBreakpoint(bp.cls, id -> {
 						List<FileBreakpoint> list = bpStore.get(bp.cls);

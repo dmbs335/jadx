@@ -31,6 +31,10 @@ public class SearchParameters {
 	public SearchParameters() {
 	}
 
+	public SearchParameters(SearchParameters source) {
+		setFromParameters(source);
+	}
+
 	public SearchCondition getCondition() {
 		return condition;
 	}
@@ -80,7 +84,7 @@ public class SearchParameters {
 	}
 
 	public void setFromParameters(SearchParameters searchParameters) {
-		condition = searchParameters.getCondition();
+		condition = new SearchCondition(searchParameters.getCondition());
 		startPosition = searchParameters.getStartPosition();
 		searchFromCursor = searchParameters.isSearchFromCursor();
 		matchCase = searchParameters.isMatchCase();

@@ -11,10 +11,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.jetbrains.annotations.NotNull;
@@ -74,6 +78,7 @@ import io.github.skylot.jdwp.JDWP.VirtualMachine.AllThreads.AllThreadsReplyDataT
 import io.github.skylot.jdwp.JDWP.VirtualMachine.CreateString.CreateStringReplyData;
 
 import jadx.api.plugins.input.data.AccessFlags;
+import jadx.core.utils.Utils;
 import jadx.gui.device.debugger.smali.RegisterInfo;
 import jadx.gui.utils.IOUtils;
 import jadx.gui.utils.ObjectPool;
@@ -83,16 +88,20 @@ import jadx.gui.utils.ObjectPool;
 public class SmaliDebugger {
 
 	private static final Logger LOG = LoggerFactory.getLogger(SmaliDebugger.class);
+	private static final long COMMAND_TIMEOUT_MS = 30_000;
+
 	private final JDWP jdwp;
 	private final int localTcpPort;
+	private final Socket socket;
 	private final InputStream inputStream;
 	private final OutputStream outputStream;
 
 	// All event callbacks will be called in this queue, e.g. class prepare/unload
-	private static final Executor EVENT_LISTENER_QUEUE = Executors.newSingleThreadExecutor();
+	private final ExecutorService eventListenerQueue = newListenerExecutor("debugger-event");
 
 	// Handle callbacks of single step, breakpoint and watchpoint
-	private static final Executor SUSPEND_LISTENER_QUEUE = Executors.newSingleThreadExecutor();
+	private final ExecutorService suspendListenerQueue = newListenerExecutor("debugger-suspend");
+	private final AtomicBoolean transportClosed = new AtomicBoolean();
 
 	private final Map<Integer, ICommandResult> callbackMap = new ConcurrentHashMap<>();
 	private final Map<Integer, EventListenerAdapter> eventListenerMap = new ConcurrentHashMap<>();
@@ -111,18 +120,35 @@ public class SmaliDebugger {
 
 	private ObjectPool<List<GetValuesSlots>> slotsPool;
 	private ObjectPool<List<JDWP.EventRequestEncoder>> stepReqPool;
-	private ObjectPool<SynchronousQueue<Packet>> syncQueuePool;
 	private ObjectPool<List<Long>> fieldIdPool;
 	private final Map<Integer, Thread> syncQueueMap = new ConcurrentHashMap<>();
-	private final AtomicInteger syncQueueID = new AtomicInteger(0);
 
 	private static final ICommandResult SKIP_RESULT = res -> {
 	};
 
-	private SmaliDebugger(SuspendListener suspendListener, int localTcpPort, JDWP jdwp, InputStream inputStream,
+	private static ExecutorService newListenerExecutor(String name) {
+		return Executors.newSingleThreadExecutor(runnable -> {
+			Thread thread = Utils.simpleThreadFactory(name).newThread(runnable);
+			thread.setDaemon(true);
+			return thread;
+		});
+	}
+
+	private static void closeSocket(@Nullable Socket socket) {
+		if (socket != null) {
+			try {
+				socket.close();
+			} catch (IOException e) {
+				LOG.debug("Failed to close debugger socket", e);
+			}
+		}
+	}
+
+	private SmaliDebugger(SuspendListener suspendListener, int localTcpPort, Socket socket, JDWP jdwp, InputStream inputStream,
 			OutputStream outputStream) {
 		this.jdwp = jdwp;
 		this.localTcpPort = localTcpPort;
+		this.socket = socket;
 		this.suspendListener = suspendListener;
 		this.inputStream = inputStream;
 		this.outputStream = outputStream;
@@ -136,11 +162,12 @@ public class SmaliDebugger {
 	 * set breakpoints or do any other things, after that call resume() to activate the app.
 	 */
 	public static SmaliDebugger attach(String host, int port, SuspendListener suspendListener) throws SmaliDebuggerException {
+		Socket socket = null;
 		try {
 			byte[] bytes = JDWP.IDSizes.encode().getBytes();
 			JDWP.setPacketID(bytes, 1);
 			LOG.debug("Connecting to ADB {}:{}", host, port);
-			Socket socket = new Socket(host, port);
+			socket = new Socket(host, port);
 			InputStream inputStream = socket.getInputStream();
 			OutputStream outputStream = socket.getOutputStream();
 
@@ -148,14 +175,18 @@ public class SmaliDebugger {
 			JDWP jdwp = initJDWP(outputStream, inputStream);
 			socket.setSoTimeout(0); // set back to 0 so the decodingLoop won't break for timeout.
 
-			SmaliDebugger debugger = new SmaliDebugger(suspendListener, port, jdwp, inputStream, outputStream);
+			SmaliDebugger debugger = new SmaliDebugger(suspendListener, port, socket, jdwp, inputStream, outputStream);
 
 			debugger.decodingLoop();
 			debugger.listenClassUnloadEvent();
 			debugger.initPools();
 			return debugger;
 		} catch (IOException e) {
+			closeSocket(socket);
 			throw new SmaliDebuggerException("Attach failed", e);
+		} catch (SmaliDebuggerException e) {
+			closeSocket(socket);
+			throw e;
 		}
 	}
 
@@ -166,7 +197,27 @@ public class SmaliDebugger {
 				.updateMethod(mth)
 				.updateOffset(offset);
 		if (suspendInfo.isAnythingChanged()) {
-			SUSPEND_LISTENER_QUEUE.execute(() -> suspendListener.onSuspendEvent(suspendInfo));
+			notifySuspendListener();
+		}
+	}
+
+	private void notifySuspendListener() {
+		SuspendInfo snapshot = suspendInfo.snapshot();
+		try {
+			suspendListenerQueue.execute(() -> suspendListener.onSuspendEvent(this, snapshot));
+		} catch (RejectedExecutionException e) {
+			LOG.debug("Ignore debugger event after listener shutdown");
+		}
+	}
+
+	private void executeEventCallback(Runnable callback) {
+		if (transportClosed.get()) {
+			return;
+		}
+		try {
+			eventListenerQueue.execute(callback);
+		} catch (RejectedExecutionException e) {
+			LOG.debug("Ignore debugger callback after listener shutdown");
 		}
 	}
 
@@ -183,13 +234,28 @@ public class SmaliDebugger {
 	}
 
 	public void exit() throws SmaliDebuggerException {
-		Packet res = sendCommandSync(jdwp.virtualMachine().cmdExit().encode(-1));
-		tryThrowError(res);
+		try {
+			Packet res = sendCommandSync(jdwp.virtualMachine().cmdExit().encode(-1));
+			tryThrowError(res);
+		} finally {
+			close();
+		}
 	}
 
 	public void detach() throws SmaliDebuggerException {
-		Packet res = sendCommandSync(jdwp.virtualMachine().cmdDispose().encode());
-		tryThrowError(res);
+		try {
+			Packet res = sendCommandSync(jdwp.virtualMachine().cmdDispose().encode());
+			tryThrowError(res);
+		} finally {
+			close();
+		}
+	}
+
+	public void close() {
+		if (transportClosed.compareAndSet(false, true)) {
+			closeSocket(socket);
+			clearWaitingSyncQueue();
+		}
 	}
 
 	private void initPools() {
@@ -207,7 +273,6 @@ public class SmaliDebugger {
 			eventEncoders.add(oneOffEventReq);
 			return eventEncoders;
 		});
-		syncQueuePool = new ObjectPool<>(SynchronousQueue::new);
 		fieldIdPool = new ObjectPool<>(() -> {
 			List<Long> ids = new ArrayList<>(1);
 			ids.add((long) -1);
@@ -374,7 +439,7 @@ public class SmaliDebugger {
 		eventListenerMap.put(reqID, new EventListenerAdapter() {
 			@Override
 			void onClassPrepare(ClassPrepareEvent event) {
-				EVENT_LISTENER_QUEUE.execute(() -> {
+				executeEventCallback(() -> {
 					try {
 						l.onPrepared(event.typeID);
 					} finally {
@@ -406,7 +471,7 @@ public class SmaliDebugger {
 		eventListenerMap.put(reqID, new EventListenerAdapter() {
 			@Override
 			void onMethodEntry(MethodEntryEvent event) {
-				EVENT_LISTENER_QUEUE.execute(() -> {
+				executeEventCallback(() -> {
 					boolean removeListener = false;
 					try {
 						String sig = getMethodSignatureInternal(event.location.classID, event.location.methodID);
@@ -668,51 +733,71 @@ public class SmaliDebugger {
 	 * Read & decode packets from Socket connection
 	 */
 	private void decodingLoop() {
-		Executors.newSingleThreadExecutor().execute(() -> {
-			boolean errFromCallback;
-			while (true) {
-				errFromCallback = false;
-				try {
-					Packet res = readPacket(inputStream);
-					if (res == null) {
-						break;
-					}
-					suspendInfo.nextRound();
-					ICommandResult callback = callbackMap.remove(res.getID());
-					if (callback != null) {
-						if (callback != SKIP_RESULT) {
-							errFromCallback = true;
-							callback.onCommandReply(res);
+		Thread decodingThread = Utils.simpleThreadFactory("debugger-decode").newThread(() -> {
+			try {
+				boolean errFromCallback;
+				while (!transportClosed.get()) {
+					errFromCallback = false;
+					try {
+						Packet res = readPacket(inputStream);
+						if (res == null) {
+							break;
 						}
-						continue;
-					}
-					if (res.getCommandSetID() == 64 && res.getCommandID() == 100) { // command from JVM
-						errFromCallback = true;
-						decodeCompositeEvents(res);
-					} else {
-						printUnexpectedID(res.getID());
-					}
-				} catch (SmaliDebuggerException e) {
-					LOG.error("Error in debugger decoding loop", e);
-					if (!errFromCallback) { // fatal error
-						break;
+						suspendInfo.nextRound();
+						ICommandResult callback = callbackMap.remove(res.getID());
+						if (callback != null) {
+							if (callback != SKIP_RESULT) {
+								errFromCallback = true;
+								callback.onCommandReply(res);
+							}
+							continue;
+						}
+						if (res.getCommandSetID() == 64 && res.getCommandID() == 100) { // command from JVM
+							errFromCallback = true;
+							decodeCompositeEvents(res);
+						} else {
+							printUnexpectedID(res.getID());
+						}
+					} catch (SmaliDebuggerException e) {
+						if (!transportClosed.get()) {
+							LOG.error("Error in debugger decoding loop", e);
+						}
+						if (!errFromCallback) { // fatal error
+							break;
+						}
 					}
 				}
+			} finally {
+				suspendInfo.setTerminated();
+				clearWaitingSyncQueue();
+				callbackMap.clear();
+				eventListenerMap.clear();
+				notifySuspendListener();
+				close();
+				eventListenerQueue.shutdownNow();
+				suspendListenerQueue.shutdown();
 			}
-			suspendInfo.setTerminated();
-			clearWaitingSyncQueue();
-			suspendListener.onSuspendEvent(suspendInfo);
 		});
+		decodingThread.setDaemon(true);
+		decodingThread.start();
 	}
 
-	private void sendCommand(ByteBuffer buf, ICommandResult callback) throws SmaliDebuggerException {
+	private int sendCommand(ByteBuffer buf, ICommandResult callback) throws SmaliDebuggerException {
+		if (transportClosed.get()) {
+			throw new SmaliDebuggerException("Debugger connection is closed");
+		}
 		int id = genID();
 		callbackMap.put(id, callback);
 		try {
-			outputStream.write(buf.setPacketID(id).getBytes());
+			synchronized (outputStream) {
+				outputStream.write(buf.setPacketID(id).getBytes());
+			}
 		} catch (IOException e) {
+			callbackMap.remove(id);
+			close();
 			throw new SmaliDebuggerException(e);
 		}
+		return id;
 	}
 
 	/**
@@ -720,23 +805,35 @@ public class SmaliDebugger {
 	 * It should be used in a thread.
 	 */
 	private Packet sendCommandSync(ByteBuffer buf) throws SmaliDebuggerException {
-		SynchronousQueue<Packet> store = syncQueuePool.get();
-		sendCommand(buf, res -> {
-			try {
-				store.put(res);
-			} catch (Exception e) {
-				LOG.error("Command send failed", e);
-			}
-		});
-		Integer id = syncQueueID.getAndAdd(1);
+		BlockingQueue<Packet> store = new ArrayBlockingQueue<>(1);
+		int commandId = sendCommand(buf, store::offer);
 		try {
-			syncQueueMap.put(id, Thread.currentThread());
-			return store.take();
-		} catch (InterruptedException e) {
-			throw new SmaliDebuggerException(e);
+			syncQueueMap.put(commandId, Thread.currentThread());
+			try {
+				return waitForCommandResult(store, COMMAND_TIMEOUT_MS);
+			} catch (SmaliDebuggerException e) {
+				// A failed wait can still receive a reply later. Close this session so
+				// the late packet cannot become an unhandled protocol message.
+				syncQueueMap.remove(commandId);
+				close();
+				throw e;
+			}
 		} finally {
-			syncQueueMap.remove(id);
-			syncQueuePool.put(store);
+			syncQueueMap.remove(commandId);
+			callbackMap.remove(commandId);
+		}
+	}
+
+	static <T> T waitForCommandResult(BlockingQueue<T> store, long timeoutMs) throws SmaliDebuggerException {
+		try {
+			T result = store.poll(timeoutMs, TimeUnit.MILLISECONDS);
+			if (result == null) {
+				throw new SmaliDebuggerException("Debugger command timed out after " + timeoutMs + " ms");
+			}
+			return result;
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new SmaliDebuggerException(e);
 		}
 	}
 
@@ -1110,7 +1207,7 @@ public class SmaliDebugger {
 					eventListenerMap.put(reqID, new EventListenerAdapter() {
 						@Override
 						void onClassUnload(ClassUnloadEvent event) {
-							EVENT_LISTENER_QUEUE.execute(() -> {
+							executeEventCallback(() -> {
 								System.out.printf("ClassUnloaded: %s%n", event.signature);
 								AllClassesWithGenericData clsData = classMap.remove(event.signature);
 								if (clsData != null) {
@@ -1377,7 +1474,7 @@ public class SmaliDebugger {
 		 * For step, breakpoint, watchpoint, and any other events that suspend the JVM.
 		 * This method will be called in stateListenQueue.
 		 */
-		void onSuspendEvent(SuspendInfo current);
+		void onSuspendEvent(SmaliDebugger source, SuspendInfo current);
 	}
 
 }

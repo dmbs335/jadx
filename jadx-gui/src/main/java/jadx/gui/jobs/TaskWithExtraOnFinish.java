@@ -15,7 +15,11 @@ public class TaskWithExtraOnFinish implements IBackgroundTask {
 	private final Consumer<TaskStatus> extraOnFinish;
 
 	public TaskWithExtraOnFinish(IBackgroundTask task, Runnable extraOnFinish) {
-		this(task, s -> extraOnFinish.run());
+		this(task, status -> {
+			if (status == TaskStatus.COMPLETE) {
+				extraOnFinish.run();
+			}
+		});
 	}
 
 	public TaskWithExtraOnFinish(IBackgroundTask task, Consumer<TaskStatus> extraOnFinish) {

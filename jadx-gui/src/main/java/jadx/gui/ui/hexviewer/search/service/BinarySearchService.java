@@ -19,6 +19,10 @@ public interface BinarySearchService {
 		void setStatus(FoundMatches foundMatches, SearchParameters.MatchMode matchMode);
 
 		void clearStatus();
+
+		default boolean isCanceled() {
+			return false;
+		}
 	}
 
 	public static class FoundMatches {

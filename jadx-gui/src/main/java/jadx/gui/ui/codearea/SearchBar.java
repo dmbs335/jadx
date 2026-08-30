@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import com.formdev.flatlaf.FlatClientProperties;
 
 import jadx.core.utils.StringUtils;
+import jadx.gui.search.RegexSearchSafety;
 import jadx.gui.utils.Icons;
 import jadx.gui.utils.NLS;
 import jadx.gui.utils.TextStandardActions;
@@ -32,6 +33,7 @@ public class SearchBar extends JToolBar {
 
 	private static final Logger LOG = LoggerFactory.getLogger(SearchBar.class);
 	private static final int MAX_RESULT_COUNT = 999;
+	private static final int TYPING_SEARCH_DELAY_MS = 150;
 
 	private final RSyntaxTextArea rTextArea;
 
@@ -41,10 +43,12 @@ public class SearchBar extends JToolBar {
 	private final JToggleButton regexCB;
 	private final JToggleButton wholeWordCB;
 	private final JToggleButton matchCaseCB;
+	private final TypingSearchDebouncer typingSearch;
 	private boolean notFound;
 
 	public SearchBar(RSyntaxTextArea textArea) {
 		rTextArea = textArea;
+		typingSearch = new TypingSearchDebouncer(TYPING_SEARCH_DELAY_MS, () -> search(0));
 
 		JLabel findLabel = new JLabel(NLS.str("search.find") + ':');
 		add(findLabel);
@@ -62,16 +66,16 @@ public class SearchBar extends JToolBar {
 						toggle();
 						break;
 					default:
-						search(0);
+						typingSearch.restart();
 						break;
 				}
 			}
 		});
-		searchField.addActionListener(e -> search(1));
+		searchField.addActionListener(e -> searchNow(1));
 		TextStandardActions.attach(searchField);
 		add(searchField);
 
-		ActionListener forwardListener = e -> search(1);
+		ActionListener forwardListener = e -> searchNow(1);
 
 		resultCountLabel = new JLabel();
 		resultCountLabel.setBorder(new EmptyBorder(0, 10, 0, 10));
@@ -103,14 +107,14 @@ public class SearchBar extends JToolBar {
 		JButton prevButton = new JButton();
 		prevButton.setIcon(Icons.ICON_UP);
 		prevButton.setToolTipText(NLS.str("search.previous"));
-		prevButton.addActionListener(e -> search(-1));
+		prevButton.addActionListener(e -> searchNow(-1));
 		prevButton.setBorderPainted(false);
 		add(prevButton);
 
 		JButton nextButton = new JButton();
 		nextButton.setIcon(Icons.ICON_DOWN);
 		nextButton.setToolTipText(NLS.str("search.next"));
-		nextButton.addActionListener(e -> search(1));
+		nextButton.addActionListener(e -> searchNow(1));
 		nextButton.setBorderPainted(false);
 		add(nextButton);
 
@@ -152,6 +156,9 @@ public class SearchBar extends JToolBar {
 	public void toggle() {
 		boolean visible = !isVisible();
 		setVisible(visible);
+		if (!visible) {
+			typingSearch.cancel();
+		}
 
 		if (visible) {
 			String preferText = rTextArea.getSelectedText();
@@ -165,7 +172,13 @@ public class SearchBar extends JToolBar {
 		}
 	}
 
+	private void searchNow(int direction) {
+		typingSearch.cancel();
+		search(direction);
+	}
+
 	private void search(int direction) {
+		searchField.setToolTipText(null);
 		String searchText = searchField.getText();
 		if (searchText == null
 				|| searchText.isEmpty()
@@ -178,7 +191,17 @@ public class SearchBar extends JToolBar {
 		boolean matchCase = matchCaseCB.isSelected();
 		boolean regex = regexCB.isSelected();
 		boolean wholeWord = wholeWordCB.isSelected();
-
+		if (regex && RegexSearchSafety.requiresGuard(searchText)) {
+			// RSyntaxTextArea SearchEngine runs synchronously on the EDT and offers no
+			// cancellation hook. Complex regex remains available in the main text search,
+			// where it is guarded and cancelable.
+			setResultCount(0);
+			notFound = true;
+			searchField.putClientProperty("JComponent.outline", "error");
+			searchField.setToolTipText("Complex regex is available in the main text search");
+			searchField.repaint();
+			return;
+		}
 		SearchContext context = new SearchContext();
 		context.setSearchFor(searchText);
 		context.setMatchCase(matchCase);

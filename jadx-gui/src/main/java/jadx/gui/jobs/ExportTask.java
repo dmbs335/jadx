@@ -5,11 +5,14 @@ import java.io.File;
 import javax.swing.JOptionPane;
 
 import jadx.api.ICodeCache;
+import jadx.api.JadxArgs;
 import jadx.api.utils.tasks.ITaskExecutor;
+import jadx.core.export.ExportGradleType;
 import jadx.gui.JadxWrapper;
 import jadx.gui.cache.code.CodeCacheMode;
 import jadx.gui.cache.code.FixedCodeCache;
 import jadx.gui.ui.MainWindow;
+import jadx.gui.ui.export.ExportProjectProperties;
 import jadx.gui.utils.NLS;
 
 public class ExportTask extends CancelableBackgroundTask {
@@ -17,14 +20,22 @@ public class ExportTask extends CancelableBackgroundTask {
 	private final MainWindow mainWindow;
 	private final JadxWrapper wrapper;
 	private final File saveDir;
+	private final boolean skipSources;
+	private final boolean skipResources;
+	private final ExportGradleType exportGradleType;
 
 	private int timeLimit;
 	private ICodeCache uiCodeCache;
+	private ExportArgsState initialArgs;
+	private boolean argsRestored;
 
-	public ExportTask(MainWindow mainWindow, JadxWrapper wrapper, File saveDir) {
+	public ExportTask(MainWindow mainWindow, JadxWrapper wrapper, ExportProjectProperties properties) {
 		this.mainWindow = mainWindow;
 		this.wrapper = wrapper;
-		this.saveDir = saveDir;
+		this.saveDir = new File(properties.getExportPath());
+		this.exportGradleType = properties.isAsGradleMode() ? properties.getExportGradleType() : null;
+		this.skipSources = !properties.isAsGradleMode() && properties.isSkipSources();
+		this.skipResources = !properties.isAsGradleMode() && properties.isSkipResources();
 	}
 
 	@Override
@@ -34,11 +45,21 @@ public class ExportTask extends CancelableBackgroundTask {
 
 	@Override
 	public ITaskExecutor scheduleTasks() {
-		wrapCodeCache();
-		wrapper.getArgs().setRootDir(saveDir);
-		ITaskExecutor saveTasks = wrapper.getDecompiler().getSaveTaskExecutor();
-		this.timeLimit = DecompileTask.calcDecompileTimeLimit(saveTasks.getTasksCount());
-		return saveTasks;
+		JadxArgs args = wrapper.getArgs();
+		initialArgs = ExportArgsState.capture(args);
+		try {
+			wrapCodeCache();
+			args.setRootDir(saveDir);
+			args.setExportGradleType(exportGradleType);
+			args.setSkipSources(skipSources);
+			args.setSkipResources(skipResources);
+			ITaskExecutor saveTasks = wrapper.getDecompiler().getSaveTaskExecutor();
+			this.timeLimit = DecompileTask.calcDecompileTimeLimit(saveTasks.getTasksCount());
+			return saveTasks;
+		} catch (RuntimeException | Error e) {
+			restoreArgs();
+			throw e;
+		}
 	}
 
 	private void wrapCodeCache() {
@@ -51,9 +72,24 @@ public class ExportTask extends CancelableBackgroundTask {
 	}
 
 	@Override
+	public void onDone(ITaskInfo taskInfo) {
+		restoreArgs();
+	}
+
+	private synchronized void restoreArgs() {
+		if (argsRestored || initialArgs == null) {
+			return;
+		}
+		JadxArgs args = wrapper.getArgs();
+		initialArgs.restore(args);
+		if (uiCodeCache != null) {
+			args.setCodeCache(uiCodeCache);
+		}
+		argsRestored = true;
+	}
+
+	@Override
 	public void onFinish(ITaskInfo taskInfo) {
-		// restore initial code cache
-		wrapper.getArgs().setCodeCache(uiCodeCache);
 		if (taskInfo.getJobsSkipped() == 0) {
 			return;
 		}
@@ -96,5 +132,36 @@ public class ExportTask extends CancelableBackgroundTask {
 	@Override
 	public boolean checkMemoryUsage() {
 		return true;
+	}
+
+	static final class ExportArgsState {
+		private final File outDir;
+		private final File outDirSrc;
+		private final File outDirRes;
+		private final boolean skipSources;
+		private final boolean skipResources;
+		private final ExportGradleType exportGradleType;
+
+		private ExportArgsState(JadxArgs args) {
+			this.outDir = args.getOutDir();
+			this.outDirSrc = args.getOutDirSrc();
+			this.outDirRes = args.getOutDirRes();
+			this.skipSources = args.isSkipSources();
+			this.skipResources = args.isSkipResources();
+			this.exportGradleType = args.getExportGradleType();
+		}
+
+		static ExportArgsState capture(JadxArgs args) {
+			return new ExportArgsState(args);
+		}
+
+		void restore(JadxArgs args) {
+			args.setOutDir(outDir);
+			args.setOutDirSrc(outDirSrc);
+			args.setOutDirRes(outDirRes);
+			args.setSkipSources(skipSources);
+			args.setSkipResources(skipResources);
+			args.setExportGradleType(exportGradleType);
+		}
 	}
 }

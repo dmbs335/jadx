@@ -90,11 +90,11 @@ public class HeapUsageBar extends JProgressBar {
 		}
 		update();
 		timer = Flowable.interval(2, TimeUnit.SECONDS, Schedulers.newThread())
+				.observeOn(SwingSchedulers.edt())
 				.map(i -> prepareUpdate())
 				.filter(update -> update != SKIP_UPDATE)
 				.distinctUntilChanged((a, b) -> Objects.equals(a.label, b.label)) // pass only if label changed
-				.subscribeOn(SwingSchedulers.edt())
-				.subscribe(this::applyUpdate);
+				.subscribe(this::applyUpdate, error -> LOG.error("Heap usage update failed", error));
 	}
 
 	public UpdateData prepareUpdate() {

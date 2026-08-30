@@ -5,6 +5,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.jetbrains.annotations.Nullable;
+
 import jadx.api.JavaClass;
 import jadx.api.JavaField;
 import jadx.api.JavaMethod;
@@ -29,7 +31,7 @@ public class JNodeCache {
 		this.wrapper = wrapper;
 	}
 
-	public JNode makeFrom(ICodeNodeRef nodeRef) {
+	public @Nullable JNode makeFrom(ICodeNodeRef nodeRef) {
 		if (nodeRef == null) {
 			return null;
 		}
@@ -37,6 +39,11 @@ public class JNodeCache {
 		JNode jNode = cache.get(nodeRef);
 		if (jNode == null || jNode.getJavaNode().getCodeNodeRef() != nodeRef) {
 			jNode = convert(nodeRef);
+			if (jNode == null) {
+				// References captured by a search can outlive a reload. A missing node is
+				// a stale result, not a cacheable value (ConcurrentHashMap rejects null).
+				return null;
+			}
 			cache.put(nodeRef, jNode);
 		}
 		return jNode;
@@ -50,7 +57,7 @@ public class JNodeCache {
 		cache.put(javaNode.getCodeNodeRef(), jNode);
 	}
 
-	public JNode makeFrom(JavaNode javaNode) {
+	public @Nullable JNode makeFrom(JavaNode javaNode) {
 		if (javaNode == null) {
 			return null;
 		}
@@ -110,12 +117,12 @@ public class JNodeCache {
 		return new JClass(cls, makeFrom(parentCls), this);
 	}
 
-	private JNode convert(ICodeNodeRef nodeRef) {
+	private @Nullable JNode convert(ICodeNodeRef nodeRef) {
 		JavaNode javaNode = wrapper.getDecompiler().getJavaNodeByRef(nodeRef);
 		return convert(javaNode);
 	}
 
-	private JNode convert(JavaNode node) {
+	private @Nullable JNode convert(JavaNode node) {
 		if (node == null) {
 			return null;
 		}
@@ -131,6 +138,9 @@ public class JNodeCache {
 		if (node instanceof JavaVariable) {
 			JavaVariable javaVar = (JavaVariable) node;
 			JMethod jMth = (JMethod) makeFrom(javaVar.getMth());
+			if (jMth == null) {
+				return null;
+			}
 			return new JVariable(jMth, javaVar);
 		}
 		if (node instanceof JavaPackage) {

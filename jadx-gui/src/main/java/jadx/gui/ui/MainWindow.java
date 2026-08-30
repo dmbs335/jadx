@@ -21,7 +21,6 @@ import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.awt.geom.AffineTransform;
-import java.io.File;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,8 +29,6 @@ import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Timer;
-import java.util.TimerTask;
 import java.util.function.Consumer;
 
 import javax.swing.AbstractAction;
@@ -52,6 +49,7 @@ import javax.swing.JToggleButton;
 import javax.swing.JToolBar;
 import javax.swing.JTree;
 import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 import javax.swing.ToolTipManager;
 import javax.swing.UIManager;
 import javax.swing.WindowConstants;
@@ -77,7 +75,6 @@ import com.formdev.flatlaf.util.UIScale;
 
 import ch.qos.logback.classic.Level;
 
-import jadx.api.JadxArgs;
 import jadx.api.JavaClass;
 import jadx.api.JavaNode;
 import jadx.api.ResourceFile;
@@ -138,6 +135,7 @@ import jadx.gui.ui.codearea.theme.EditorThemeManager;
 import jadx.gui.ui.dialog.ADBDialog;
 import jadx.gui.ui.dialog.AboutDialog;
 import jadx.gui.ui.dialog.CharsetDialog;
+import jadx.gui.ui.dialog.ContentStoreSearchDialog;
 import jadx.gui.ui.dialog.GotoAddressDialog;
 import jadx.gui.ui.dialog.LogViewerDialog;
 import jadx.gui.ui.dialog.SearchDialog;
@@ -237,6 +235,8 @@ public class MainWindow extends JFrame {
 	private transient @Nullable LogPanel logPanel;
 	private transient @Nullable JDebuggerPanel debuggerPanel;
 	private transient @Nullable QuickTabsTree quickTabsTree;
+	private transient @Nullable Timer initialJobsTimer;
+	private boolean disposed;
 
 	private final List<ILoadListener> loadListeners = new ArrayList<>();
 	private final List<Consumer<JRoot>> treeUpdateListener = new ArrayList<>();
@@ -574,6 +574,10 @@ public class MainWindow extends JFrame {
 
 	private void closeAll() {
 		UiUtils.notUiThreadGuard();
+		cancelInitialBackgroundJobs();
+		// A live-reload worker is bound to the current project's paths. Always
+		// recreate it after loading a project so it can't keep watching old files.
+		liveReloadWorker.updateState(false);
 		cancelBackgroundJobs();
 		UiUtils.uiRunAndWait(() -> {
 			tabsController.forceCloseAllTabs();
@@ -753,13 +757,27 @@ public class MainWindow extends JFrame {
 	}
 
 	synchronized void runInitialBackgroundJobs() {
+		cancelInitialBackgroundJobs();
 		if (settings.isAutoStartJobs()) {
-			new Timer().schedule(new TimerTask() {
-				@Override
-				public void run() {
-					requestFullDecompilation();
+			Timer timer = new Timer(1000, event -> {
+				synchronized (MainWindow.this) {
+					if (initialJobsTimer != event.getSource()) {
+						return;
+					}
+					initialJobsTimer = null;
 				}
-			}, 1000);
+				requestFullDecompilation();
+			});
+			timer.setRepeats(false);
+			initialJobsTimer = timer;
+			timer.start();
+		}
+	}
+
+	private synchronized void cancelInitialBackgroundJobs() {
+		if (initialJobsTimer != null) {
+			initialJobsTimer.stop();
+			initialJobsTimer = null;
 		}
 	}
 
@@ -798,17 +816,7 @@ public class MainWindow extends JFrame {
 
 	public void exportProject() {
 		ExportProjectDialog dialog = new ExportProjectDialog(this, props -> {
-			JadxArgs args = wrapper.getArgs();
-			if (props.isAsGradleMode()) {
-				args.setExportGradleType(props.getExportGradleType());
-				args.setSkipSources(false);
-				args.setSkipResources(false);
-			} else {
-				args.setExportGradleType(null);
-				args.setSkipSources(props.isSkipSources());
-				args.setSkipResources(props.isSkipResources());
-			}
-			backgroundExecutor.execute(new ExportTask(this, wrapper, new File(props.getExportPath())));
+			backgroundExecutor.execute(new ExportTask(this, wrapper, props));
 		});
 		dialog.setVisible(true);
 	}
@@ -1252,6 +1260,12 @@ public class MainWindow extends JFrame {
 		tools.add(deobfMenuItem);
 		tools.add(quarkAction);
 		tools.add(debuggerAction);
+		tools.add(new AbstractAction("Content Store Search") {
+			@Override
+			public void actionPerformed(ActionEvent e) {
+				new ContentStoreSearchDialog(MainWindow.this).setVisible(true);
+			}
+		});
 
 		JMenu help = new JadxMenu(NLS.str("menu.help"), shortcutsController);
 		help.setMnemonic(KeyEvent.VK_H);
@@ -1619,6 +1633,31 @@ public class MainWindow extends JFrame {
 		});
 	}
 
+	@Override
+	public void dispose() {
+		if (disposed) {
+			super.dispose();
+			return;
+		}
+		disposed = true;
+		cancelInitialBackgroundJobs();
+		backgroundExecutor.shutdown();
+		liveReloadWorker.dispose();
+		heapUsageBar.reset();
+		destroyDebuggerPanel();
+		hideDockedLog();
+		setQuickTabsVisibility(false);
+		editorSyncManager.dispose();
+		navController.dispose();
+		tabbedPane.dispose();
+		shortcutsController.dispose();
+		menuBar.dispose();
+		setJMenuBar(null);
+		issuesPanel.dispose();
+		JadxExceptionHandler.unregister(this);
+		super.dispose();
+	}
+
 	private void saveOpenTabs() {
 		project.saveOpenTabs(tabsController.getEditorViewStates());
 	}
@@ -1664,6 +1703,10 @@ public class MainWindow extends JFrame {
 	}
 
 	public void notifyLoadListeners(boolean loaded) {
+		if (!javax.swing.SwingUtilities.isEventDispatchThread()) {
+			UiUtils.uiRunAndWait(() -> notifyLoadListeners(loaded));
+			return;
+		}
 		this.loaded = loaded;
 		loadListeners.removeIf(listener -> listener.update(loaded));
 	}
@@ -1723,9 +1766,11 @@ public class MainWindow extends JFrame {
 
 	public void destroyDebuggerPanel() {
 		saveSplittersInfo();
-		if (debuggerPanel != null) {
-			debuggerPanel.setVisible(false);
+		JDebuggerPanel panel = debuggerPanel;
+		if (panel != null) {
 			debuggerPanel = null;
+			bottomSplitPane.setBottomComponent(null);
+			panel.dispose();
 		}
 	}
 

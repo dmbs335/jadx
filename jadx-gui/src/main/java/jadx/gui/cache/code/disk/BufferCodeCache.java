@@ -49,11 +49,16 @@ public class BufferCodeCache implements ICodeCache {
 
 	@Override
 	public @NotNull ICodeInfo get(String clsFullName) {
+		return getWithKnownCode(clsFullName, null);
+	}
+
+	@Override
+	public @NotNull ICodeInfo getWithKnownCode(String clsFullName, @Nullable String knownCode) {
 		ICodeInfo codeInfo = cache.get(clsFullName);
 		if (codeInfo != null) {
 			return codeInfo;
 		}
-		ICodeInfo backCodeInfo = backCache.get(clsFullName);
+		ICodeInfo backCodeInfo = backCache.getWithKnownCode(clsFullName, knownCode);
 		if (backCodeInfo != ICodeInfo.EMPTY) {
 			addInternal(clsFullName, backCodeInfo);
 		}

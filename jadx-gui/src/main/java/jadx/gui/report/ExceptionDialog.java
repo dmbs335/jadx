@@ -5,10 +5,13 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Toolkit;
 import java.awt.event.KeyEvent;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -43,11 +46,31 @@ import jadx.gui.utils.UiUtils;
 
 public class ExceptionDialog extends JDialog {
 	private static final Logger LOG = LoggerFactory.getLogger(ExceptionDialog.class);
+	private static final AtomicBoolean DIALOG_OPEN = new AtomicBoolean();
 
 	private static final String FMT_DETAIL_LENGTH = "-13";
 
 	static void show(@Nullable MainWindow mainWindow, ExceptionData data) {
-		UiUtils.uiRun(() -> new ExceptionDialog(mainWindow, data));
+		if (!tryOpen()) {
+			LOG.error("Suppress recursive exception dialog", data.getException());
+			return;
+		}
+		UiUtils.uiRun(() -> {
+			try {
+				new ExceptionDialog(mainWindow, data);
+			} catch (Throwable e) {
+				markClosed();
+				LOG.error("Failed to show exception dialog", e);
+			}
+		});
+	}
+
+	static boolean tryOpen() {
+		return DIALOG_OPEN.compareAndSet(false, true);
+	}
+
+	static void markClosed() {
+		DIALOG_OPEN.set(false);
 	}
 
 	private ExceptionDialog(@Nullable MainWindow mainWindow, ExceptionData data) {
@@ -126,11 +149,17 @@ public class ExceptionDialog extends JDialog {
 		int y = (screenSize.height - getHeight()) / 2;
 		setLocation(x, y);
 
-		getRootPane().registerKeyboardAction(event -> setVisible(false),
+		getRootPane().registerKeyboardAction(event -> dispose(),
 				KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0),
 				JComponent.WHEN_IN_FOCUSED_WINDOW);
 
 		this.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+		this.addWindowListener(new WindowAdapter() {
+			@Override
+			public void windowClosed(WindowEvent e) {
+				markClosed();
+			}
+		});
 		this.setVisible(true);
 	}
 

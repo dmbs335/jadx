@@ -1,10 +1,13 @@
 package jadx.gui.settings;
 
+import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -322,13 +325,31 @@ public class JadxProject {
 	public void save() {
 		Path savePath = getProjectPath();
 		if (savePath != null) {
-			Path basePath = savePath.toAbsolutePath().getParent();
-			try (Writer writer = Files.newBufferedWriter(savePath, StandardCharsets.UTF_8)) {
-				buildGson(basePath).toJson(data, writer);
+			try {
+				saveProjectData(data, savePath);
 				saved = true;
 			} catch (Exception e) {
 				throw new RuntimeException("Error saving project", e);
 			}
+		}
+	}
+
+	static void saveProjectData(ProjectData data, Path savePath) throws IOException {
+		Path absoluteSavePath = savePath.toAbsolutePath();
+		Path basePath = absoluteSavePath.getParent();
+		Files.createDirectories(basePath);
+		Path tempFile = Files.createTempFile(basePath, '.' + absoluteSavePath.getFileName().toString(), ".tmp");
+		try {
+			try (Writer writer = Files.newBufferedWriter(tempFile, StandardCharsets.UTF_8)) {
+				buildGson(basePath).toJson(data, writer);
+			}
+			try {
+				Files.move(tempFile, absoluteSavePath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+			} catch (AtomicMoveNotSupportedException e) {
+				Files.move(tempFile, absoluteSavePath, StandardCopyOption.REPLACE_EXISTING);
+			}
+		} finally {
+			Files.deleteIfExists(tempFile);
 		}
 	}
 

@@ -20,6 +20,8 @@ public interface IDebugController {
 
 	boolean exit();
 
+	void dispose();
+
 	boolean isSuspended();
 
 	boolean isDebugging();

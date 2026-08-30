@@ -26,18 +26,18 @@ public final class ClassSearchProvider extends BaseSearchProvider {
 				return null;
 			}
 			JavaClass curCls = classes.get(clsNum++);
-			if (checkCls(curCls)) {
+			if (checkCls(curCls, cancelable)) {
 				return convert(curCls);
 			}
 		}
 	}
 
-	private boolean checkCls(JavaClass cls) {
+	private boolean checkCls(JavaClass cls, Cancelable cancelable) {
 		ClassInfo clsInfo = cls.getClassNode().getClassInfo();
-		return isMatch(clsInfo.getShortName())
-				|| isMatch(clsInfo.getFullName())
-				|| isMatch(clsInfo.getAliasFullName())
-				|| isMatch(clsInfo.getRawName());
+		return isMatch(clsInfo.getShortName(), cancelable)
+				|| isMatch(clsInfo.getFullName(), cancelable)
+				|| isMatch(clsInfo.getAliasFullName(), cancelable)
+				|| isMatch(clsInfo.getRawName(), cancelable);
 	}
 
 	@Override

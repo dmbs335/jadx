@@ -9,7 +9,6 @@ import javax.swing.KeyStroke;
 
 import org.jetbrains.annotations.Nullable;
 
-import jadx.gui.ui.menu.JadxMenu;
 import jadx.gui.utils.UiUtils;
 import jadx.gui.utils.shortcut.Shortcut;
 import jadx.gui.utils.ui.ActionHandler;
@@ -20,6 +19,7 @@ public class JadxGuiAction extends ActionHandler implements IShortcutAction {
 	private final ActionModel actionModel;
 	private final String id;
 	private JComponent shortcutComponent = null;
+	private boolean menuShortcut;
 	private KeyStroke addedKeyStroke = null;
 	private Shortcut shortcut;
 
@@ -89,6 +89,12 @@ public class JadxGuiAction extends ActionHandler implements IShortcutAction {
 
 	public void setShortcutComponent(JComponent component) {
 		this.shortcutComponent = component;
+		this.menuShortcut = false;
+	}
+
+	public void setMenuShortcutComponent(JComponent component) {
+		this.shortcutComponent = component;
+		this.menuShortcut = true;
 	}
 
 	@Override
@@ -103,12 +109,8 @@ public class JadxGuiAction extends ActionHandler implements IShortcutAction {
 
 	@Override
 	public void performAction() {
-		if (shortcutComponent != null) {
-			if (shortcutComponent == JadxMenu.JADX_MENU_COMPONENT) {
-				// always enabled
-			} else if (!shortcutComponent.isShowing()) {
-				return;
-			}
+		if (shortcutComponent != null && !menuShortcut && !shortcutComponent.isShowing()) {
+			return;
 		}
 		String shortcutType = shortcut != null ? shortcut.getTypeString() : "null";
 		actionPerformed(new ActionEvent(this, ActionEvent.ACTION_PERFORMED, COMMAND_PREFIX + shortcutType));
@@ -121,7 +123,7 @@ public class JadxGuiAction extends ActionHandler implements IShortcutAction {
 
 	@Override
 	public void setKeyBinding(KeyStroke keyStroke) {
-		if (shortcutComponent == null) {
+		if (shortcutComponent == null || menuShortcut) {
 			super.setKeyBinding(keyStroke);
 		} else {
 			// We just set the keyStroke for it to appear in the menu item

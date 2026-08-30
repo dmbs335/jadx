@@ -24,6 +24,7 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import jadx.api.JadxDecompiler;
 import jadx.api.plugins.input.data.IMethodRef;
 import jadx.api.usage.IUsageInfoData;
 import jadx.core.dex.nodes.RootNode;
@@ -39,7 +40,7 @@ import static java.nio.file.StandardOpenOption.WRITE;
 public class UsageFileAdapter extends DataAdapterHelper {
 	private static final Logger LOG = LoggerFactory.getLogger(UsageFileAdapter.class);
 
-	private static final int USAGE_DATA_VERSION = 3;
+	private static final int USAGE_DATA_VERSION = 4;
 	private static final byte[] JADX_USAGE_HEADER = "jadx.usage".getBytes(StandardCharsets.US_ASCII);
 
 	public static synchronized @Nullable RawUsageData load(RootNode root, Path usageFile, List<File> inputs) {
@@ -55,7 +56,7 @@ public class UsageFileAdapter extends DataAdapterHelper {
 				FileUtils.deleteFileIfExists(usageFile);
 				return null;
 			}
-			String inputsHash = buildInputsHash(inputs);
+			String inputsHash = buildInputsHash(root, inputs);
 			String fileInputsHash = in.readUTF();
 			if (!inputsHash.equals(fileInputsHash)) {
 				LOG.debug("Found usage data with different inputs hash");
@@ -79,10 +80,10 @@ public class UsageFileAdapter extends DataAdapterHelper {
 		}
 	}
 
-	public static synchronized void save(IUsageInfoData data, Path usageFile, List<File> inputs) {
+	public static synchronized void save(RootNode root, IUsageInfoData data, Path usageFile, List<File> inputs) {
 		long start = System.currentTimeMillis();
 		FileUtils.makeDirsForFile(usageFile);
-		String inputsHash = buildInputsHash(inputs);
+		String inputsHash = buildInputsHash(root, inputs);
 		RawUsageData usageData = new RawUsageData();
 		data.visitUsageData(new CollectUsageData(usageData));
 		try (OutputStream fileOutput = Files.newOutputStream(usageFile, WRITE, CREATE, TRUNCATE_EXISTING);
@@ -355,11 +356,15 @@ public class UsageFileAdapter extends DataAdapterHelper {
 		}
 	}
 
-	private static String buildInputsHash(List<File> inputs) {
+	private static String buildInputsHash(RootNode root, List<File> inputs) {
+		JadxDecompiler decompiler = root.getDecompiler();
+		if (decompiler != null) {
+			return decompiler.getAnalysisFingerprint();
+		}
 		List<Path> paths = inputs.stream()
 				.filter(f -> !f.getName().endsWith(".jadx.kts"))
 				.map(File::toPath)
 				.collect(Collectors.toList());
-		return FileUtils.buildInputsHash(paths);
+		return FileUtils.buildInputsContentHash(paths);
 	}
 }

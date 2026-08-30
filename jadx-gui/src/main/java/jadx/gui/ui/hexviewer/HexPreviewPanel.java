@@ -142,8 +142,13 @@ public class HexPreviewPanel extends JPanel {
 	}
 
 	public void scrollToOffset(int pos) {
-		hexCodeArea.setSelection(pos, pos + 1);
-		hexCodeArea.setActiveCaretPosition(pos);
+		long dataSize = hexCodeArea.getDataSize();
+		if (dataSize == 0) {
+			return;
+		}
+		long safePos = Math.max(0, Math.min(pos, dataSize - 1));
+		hexCodeArea.setSelection(safePos, safePos + 1);
+		hexCodeArea.setActiveCaretPosition(safePos);
 		hexCodeArea.centerOnPosition(hexCodeArea.getActiveCaretPosition());
 	}
 
@@ -322,6 +327,7 @@ public class HexPreviewPanel extends JPanel {
 	}
 
 	public void dispose() {
+		searchBar.dispose();
 		hexCodeArea.getContentData().dispose();
 	}
 }

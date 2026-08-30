@@ -42,6 +42,8 @@ public class LoadTask<T> extends CancelableBackgroundTask {
 
 	@Override
 	public void onFinish(ITaskInfo taskInfo) {
-		uiTask.run();
+		if (taskInfo.getStatus() == TaskStatus.COMPLETE) {
+			uiTask.run();
+		}
 	}
 }

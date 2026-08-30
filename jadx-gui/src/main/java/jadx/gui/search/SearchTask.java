@@ -2,11 +2,17 @@ package jadx.gui.search;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -15,8 +21,8 @@ import org.slf4j.LoggerFactory;
 
 import jadx.api.utils.tasks.ITaskExecutor;
 import jadx.core.utils.tasks.TaskExecutor;
-import jadx.gui.jobs.BackgroundExecutor;
 import jadx.gui.jobs.CancelableBackgroundTask;
+import jadx.gui.jobs.IBackgroundTask;
 import jadx.gui.jobs.ITaskInfo;
 import jadx.gui.jobs.ITaskProgress;
 import jadx.gui.jobs.TaskProgress;
@@ -28,22 +34,42 @@ import jadx.gui.utils.NLS;
 public class SearchTask extends CancelableBackgroundTask {
 	private static final Logger LOG = LoggerFactory.getLogger(SearchTask.class);
 
-	private final BackgroundExecutor backgroundExecutor;
+	private final Function<IBackgroundTask, Future<TaskStatus>> taskSubmitter;
 	private final Consumer<JNode> resultsListener;
-	private final BiConsumer<ITaskInfo, Boolean> onFinish;
+	private final BiConsumer<SearchTask, Boolean> onFinish;
+	private final BooleanSupplier resultOwnerValid;
 	private final List<SearchJob> jobs = new ArrayList<>();
 	private final TaskProgress taskProgress = new TaskProgress();
 
 	private final AtomicInteger resultsCount = new AtomicInteger(0);
+	private final AtomicReference<String> failure = new AtomicReference<>();
 	private int resultsLimit;
 	private Future<TaskStatus> future;
+	private volatile @Nullable TaskExecutor taskExecutor;
 
 	private Consumer<ITaskProgress> progressListener;
 
-	public SearchTask(MainWindow mainWindow, Consumer<JNode> results, BiConsumer<ITaskInfo, Boolean> onFinish) {
-		this.backgroundExecutor = mainWindow.getBackgroundExecutor();
+	public SearchTask(MainWindow mainWindow, Consumer<JNode> results, BiConsumer<SearchTask, Boolean> onFinish) {
+		this(mainWindow.getBackgroundExecutor()::executeWithFuture, results, onFinish, () -> true);
+	}
+
+	public SearchTask(MainWindow mainWindow, Consumer<JNode> results,
+			BiConsumer<SearchTask, Boolean> onFinish, BooleanSupplier resultOwnerValid) {
+		this(mainWindow.getBackgroundExecutor()::executeWithFuture, results, onFinish, resultOwnerValid);
+	}
+
+	SearchTask(Function<IBackgroundTask, Future<TaskStatus>> taskSubmitter,
+			Consumer<JNode> results, BiConsumer<SearchTask, Boolean> onFinish) {
+		this(taskSubmitter, results, onFinish, () -> true);
+	}
+
+	SearchTask(Function<IBackgroundTask, Future<TaskStatus>> taskSubmitter,
+			Consumer<JNode> results, BiConsumer<SearchTask, Boolean> onFinish,
+			BooleanSupplier resultOwnerValid) {
+		this.taskSubmitter = taskSubmitter;
 		this.resultsListener = results;
 		this.onFinish = onFinish;
+		this.resultOwnerValid = resultOwnerValid;
 	}
 
 	public void addProviderJob(ISearchProvider provider) {
@@ -59,14 +85,24 @@ public class SearchTask extends CancelableBackgroundTask {
 			throw new IllegalStateException("Previous task not yet finished");
 		}
 		resetCancel();
+		failure.set(null);
 		resultsCount.set(0);
 		taskProgress.updateTotal(jobs.stream().mapToInt(s -> s.getProvider().total()).sum());
-		future = backgroundExecutor.executeWithFuture(this);
+		future = taskSubmitter.apply(this);
+	}
+
+	void reportRegexTimeout(RegexSearchTimeoutException error) {
+		failure.compareAndSet(null, error.getMessage());
+		cancel();
+	}
+
+	public @Nullable String getFailure() {
+		return failure.get();
 	}
 
 	public synchronized boolean addResult(JNode resultNode) {
-		if (isCanceled()) {
-			// ignore new results after cancel
+		if (isCanceled() || !resultOwnerValid.getAsBoolean()) {
+			// Ignore results after cancel or after their owning project was closed.
 			return true;
 		}
 		this.resultsListener.accept(resultNode);
@@ -77,16 +113,51 @@ public class SearchTask extends CancelableBackgroundTask {
 		return false;
 	}
 
-	public synchronized void waitTask() {
-		if (future == null) {
+	@Override
+	public synchronized void cancel() {
+		// Serialize cancellation with result delivery. Once this method returns,
+		// an old search can no longer append a result after the next search reset.
+		if (isCanceled()) {
 			return;
 		}
+		super.cancel();
+		TaskExecutor executor = taskExecutor;
+		if (executor != null) {
+			executor.cancelPendingTasks();
+		}
+	}
+
+	public boolean waitTask() {
+		Future<TaskStatus> taskFuture;
+		synchronized (this) {
+			taskFuture = future;
+		}
+		if (taskFuture == null) {
+			return true;
+		}
 		try {
-			future.get(200, TimeUnit.MILLISECONDS);
-		} catch (Exception e) {
-			LOG.warn("Search task wait error", e);
-			future.cancel(true);
-		} finally {
+			taskFuture.get(200, TimeUnit.MILLISECONDS);
+			clearFuture(taskFuture);
+			return true;
+		} catch (TimeoutException e) {
+			LOG.debug("Canceled search task is still finishing");
+			return false;
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			LOG.debug("Interrupted while waiting for search task completion");
+			return false;
+		} catch (CancellationException e) {
+			clearFuture(taskFuture);
+			return true;
+		} catch (ExecutionException e) {
+			LOG.warn("Search task failed while waiting for completion", e.getCause());
+			clearFuture(taskFuture);
+			return true;
+		}
+	}
+
+	private synchronized void clearFuture(Future<TaskStatus> taskFuture) {
+		if (future == taskFuture) {
 			future = null;
 		}
 	}
@@ -100,6 +171,7 @@ public class SearchTask extends CancelableBackgroundTask {
 	public ITaskExecutor scheduleTasks() {
 		TaskExecutor executor = new TaskExecutor();
 		executor.addParallelTasks(jobs);
+		taskExecutor = executor;
 		return executor;
 	}
 
@@ -108,7 +180,7 @@ public class SearchTask extends CancelableBackgroundTask {
 		boolean complete = !isCanceled()
 				&& task.getStatus() == TaskStatus.COMPLETE
 				&& task.getJobsComplete() == task.getJobsCount();
-		this.onFinish.accept(task, complete);
+		this.onFinish.accept(this, complete);
 	}
 
 	@Override

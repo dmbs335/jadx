@@ -50,14 +50,16 @@ public class DataAdapterHelper {
 	 */
 	public static int readUVInt(DataInput in) throws IOException {
 		int result = 0;
-		int shift = 0;
-		while (true) {
-			byte v = in.readByte();
-			result |= (v & (byte) 0x7f) << shift;
-			shift += 7;
-			if ((v & 0x80) != 0x80) {
+		for (int shift = 0; shift <= 28; shift += 7) {
+			int value = in.readUnsignedByte();
+			if (shift == 28 && (value & 0x78) != 0) {
+				throw new IOException("Unsigned variable integer overflow");
+			}
+			result |= (value & 0x7f) << shift;
+			if ((value & 0x80) == 0) {
 				return result;
 			}
 		}
+		throw new IOException("Unsigned variable integer is too long");
 	}
 }

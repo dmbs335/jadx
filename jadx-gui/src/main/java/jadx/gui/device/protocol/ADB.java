@@ -14,8 +14,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.StringJoiner;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -24,6 +22,7 @@ import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import jadx.core.utils.Utils;
 import jadx.core.utils.log.LogUtils;
 import jadx.gui.utils.IOUtils;
 
@@ -203,29 +202,33 @@ public class ADB {
 			socket.close();
 			return null;
 		}
-		ExecutorService listenThread = Executors.newFixedThreadPool(1);
-		listenThread.execute(() -> {
-			while (true) {
-				byte[] res = readServiceProtocol(inputStream);
-				if (res == null) {
-					break; // socket disconnected
-				}
-				if (listener != null) {
-					String payload = new String(res, ADB_CHARSET);
-					String[] deviceLines = payload.split("\n");
-					List<ADBDeviceInfo> deviceInfoList = new ArrayList<>(deviceLines.length);
-					for (String deviceLine : deviceLines) {
-						if (!deviceLine.trim().isEmpty()) {
-							deviceInfoList.add(new ADBDeviceInfo(deviceLine, host, port));
-						}
+		Thread listenThread = Utils.simpleThreadFactory("adb-listen").newThread(() -> {
+			try {
+				while (true) {
+					byte[] res = readServiceProtocol(inputStream);
+					if (res == null) {
+						break; // socket disconnected
 					}
-					listener.onDeviceStatusChange(deviceInfoList);
+					if (listener != null) {
+						String payload = new String(res, ADB_CHARSET);
+						String[] deviceLines = payload.split("\n");
+						List<ADBDeviceInfo> deviceInfoList = new ArrayList<>(deviceLines.length);
+						for (String deviceLine : deviceLines) {
+							if (!deviceLine.trim().isEmpty()) {
+								deviceInfoList.add(new ADBDeviceInfo(deviceLine, host, port));
+							}
+						}
+						listener.onDeviceStatusChange(deviceInfoList);
+					}
 				}
-			}
-			if (listener != null) {
-				listener.adbDisconnected();
+			} finally {
+				if (listener != null) {
+					listener.adbDisconnected();
+				}
 			}
 		});
+		listenThread.setDaemon(true);
+		listenThread.start();
 		return socket;
 	}
 

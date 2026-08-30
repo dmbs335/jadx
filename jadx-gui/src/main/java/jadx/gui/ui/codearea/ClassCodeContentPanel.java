@@ -283,10 +283,8 @@ public final class ClassCodeContentPanel extends AbstractCodeContentPanel implem
 		int caretPos = viewState.getCaretPos();
 		try {
 			AbstractCodeArea codeArea = activePanel.getCodeArea();
-			int codeLen = codeArea.getDocument().getLength();
-			if (caretPos >= 0 && caretPos < codeLen) {
-				codeArea.setCaretPosition(caretPos);
-			}
+			int safePos = AbstractCodeArea.boundScrollPosition(caretPos, codeArea.getDocument().getLength());
+			codeArea.setCaretPosition(safePos);
 		} catch (Exception e) {
 			LOG.debug("Failed to restore caret position: {}", caretPos, e);
 		}

@@ -1,7 +1,10 @@
 package jadx.gui.utils.shortcut;
 
 import java.awt.AWTEvent;
+import java.awt.Component;
 import java.awt.Toolkit;
+import java.awt.Window;
+import java.awt.event.AWTEventListener;
 import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -13,6 +16,7 @@ import java.util.Set;
 
 import javax.swing.JComponent;
 import javax.swing.KeyStroke;
+import javax.swing.SwingUtilities;
 
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -35,6 +39,7 @@ public class ShortcutsController {
 	private final Map<Integer, List<IShortcutAction>> mouseActions = new HashMap<>();
 
 	private ShortcutsWrapper shortcuts;
+	private AWTEventListener mouseEventListener;
 
 	public ShortcutsController(JadxSettings settings) {
 		this.settings = settings;
@@ -94,9 +99,10 @@ public class ShortcutsController {
 		return shortcuts;
 	}
 
-	public void registerMouseEventListener(MainWindow mw) {
-		Toolkit.getDefaultToolkit().addAWTEventListener(event -> {
-			if (mw.isSettingsOpen()) {
+	public synchronized void registerMouseEventListener(MainWindow mw) {
+		dispose();
+		mouseEventListener = event -> {
+			if (mw == null || mw.isSettingsOpen()) {
 				return;
 			}
 			if (!(event instanceof MouseEvent)) {
@@ -104,6 +110,11 @@ public class ShortcutsController {
 			}
 			MouseEvent mouseEvent = (MouseEvent) event;
 			if (mouseEvent.getID() != MouseEvent.MOUSE_PRESSED) {
+				return;
+			}
+			Component source = mouseEvent.getComponent();
+			Window sourceWindow = source == null ? null : SwingUtilities.getWindowAncestor(source);
+			if (sourceWindow != mw) {
 				return;
 			}
 			List<IShortcutAction> actions = mouseActions.get(mouseEvent.getButton());
@@ -115,7 +126,15 @@ public class ShortcutsController {
 					}
 				}
 			}
-		}, AWTEvent.MOUSE_EVENT_MASK);
+		};
+		Toolkit.getDefaultToolkit().addAWTEventListener(mouseEventListener, AWTEvent.MOUSE_EVENT_MASK);
+	}
+
+	public synchronized void dispose() {
+		if (mouseEventListener != null) {
+			Toolkit.getDefaultToolkit().removeAWTEventListener(mouseEventListener);
+			mouseEventListener = null;
+		}
 	}
 
 	private void indexMouseActions() {

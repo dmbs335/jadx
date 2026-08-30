@@ -7,11 +7,11 @@ import java.util.concurrent.TimeUnit;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
-import org.reactivestreams.Subscriber;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.reactivex.rxjava3.disposables.Disposable;
+import io.reactivex.rxjava3.processors.FlowableProcessor;
 import io.reactivex.rxjava3.processors.PublishProcessor;
 
 import jadx.api.ICodeCache;
@@ -26,29 +26,28 @@ public class CodeStringCache extends DelegateCodeCache {
 	private static final Logger LOG = LoggerFactory.getLogger(CodeStringCache.class);
 
 	private final Map<String, String> codeCache = new ConcurrentHashMap<>();
-	private final Subscriber<Boolean> subscriber;
+	private final FlowableProcessor<Boolean> memoryCheckEvents;
 	private final Disposable disposable;
 
 	public CodeStringCache(ICodeCache backCache) {
 		super(backCache);
 		// reset cache if free memory is low
 		// check only on changes (with debounce) to reduce background checks if app not used
-		PublishProcessor<Boolean> processor = PublishProcessor.create();
-		subscriber = processor;
-		disposable = processor.debounce(3, TimeUnit.SECONDS)
+		memoryCheckEvents = PublishProcessor.<Boolean>create().toSerialized();
+		disposable = memoryCheckEvents.debounce(3, TimeUnit.SECONDS)
 				.map(v -> UiUtils.isFreeMemoryAvailable())
 				.filter(v -> !v)
 				.subscribe(v -> {
 					LOG.warn("Free memory is low! Reset code strings cache. Cache size {}", codeCache.size());
 					codeCache.clear();
 					System.gc();
-				});
+				}, error -> LOG.error("Code string cache memory check failed", error));
 	}
 
 	@Override
 	@Nullable
 	public String getCode(String clsFullName) {
-		subscriber.onNext(Boolean.TRUE);
+		memoryCheckEvents.onNext(Boolean.TRUE);
 		String code = codeCache.get(clsFullName);
 		if (code != null) {
 			return code;
@@ -62,13 +61,13 @@ public class CodeStringCache extends DelegateCodeCache {
 
 	@Override
 	public @NotNull ICodeInfo get(String clsFullName) {
-		subscriber.onNext(Boolean.TRUE);
-		return super.get(clsFullName);
+		memoryCheckEvents.onNext(Boolean.TRUE);
+		return backCache.getWithKnownCode(clsFullName, codeCache.get(clsFullName));
 	}
 
 	@Override
 	public void add(String clsFullName, ICodeInfo codeInfo) {
-		subscriber.onNext(Boolean.TRUE);
+		memoryCheckEvents.onNext(Boolean.TRUE);
 		codeCache.put(clsFullName, codeInfo.getCodeStr());
 		backCache.add(clsFullName, codeInfo);
 	}
@@ -85,7 +84,7 @@ public class CodeStringCache extends DelegateCodeCache {
 			backCache.close();
 		} finally {
 			codeCache.clear();
-			subscriber.onComplete();
+			memoryCheckEvents.onComplete();
 			disposable.dispose();
 		}
 	}

@@ -550,7 +550,7 @@ public class Smali {
 			smali.add(vby.toString().toLowerCase()).add(" ");
 		}
 		smali.add(anno.getAnnotationClass());
-		anno.getValues().forEach((k, v) -> {
+		anno.forEachValue((k, v) -> {
 			smali.incIndent();
 			smali.startLine(k).add(" = ");
 			writeEncodedValue(smali, v, true);
@@ -560,7 +560,7 @@ public class Smali {
 	}
 
 	private void formatDbgInfo(IDebugInfo dbgInfo, List<ILocalVar> localVars, LineInfo line) {
-		dbgInfo.getSourceLineMapping().forEach((codeOffset, srcLine) -> {
+		dbgInfo.forEachSourceLine((codeOffset, srcLine) -> {
 			if (codeOffset > -1) {
 				line.addDebugLineTip(codeOffset, String.format(".line %d", srcLine), "");
 			}

@@ -96,6 +96,7 @@ public class JadxSettingsWindow extends JDialog {
 	private transient SettingsTree tree;
 	private List<ISettingsGroup> groups;
 	private JPanel wrapGroupPanel;
+	private boolean groupsClosed;
 
 	public JadxSettingsWindow(MainWindow mainWindow, JadxSettings settings) {
 		this.mainWindow = mainWindow;
@@ -132,6 +133,7 @@ public class JadxSettingsWindow extends JDialog {
 	}
 
 	private void initUI() {
+		groupsClosed = false;
 		wrapGroupPanel = new JPanel(new BorderLayout(10, 10));
 
 		groups = new ArrayList<>();
@@ -757,6 +759,10 @@ public class JadxSettingsWindow extends JDialog {
 	}
 
 	private void closeGroups(boolean save) {
+		if (groupsClosed) {
+			return;
+		}
+		groupsClosed = true;
 		for (ISettingsGroup group : groups) {
 			group.close(save);
 		}
@@ -803,6 +809,7 @@ public class JadxSettingsWindow extends JDialog {
 			settings.loadSettingsData(new JadxSettingsData());
 			mainWindow.loadSettings();
 			needReload();
+			closeGroups(false);
 			getContentPane().removeAll();
 			initUI();
 			pack();
@@ -840,6 +847,7 @@ public class JadxSettingsWindow extends JDialog {
 
 	@Override
 	public void dispose() {
+		closeGroups(false);
 		mainWindow.events().global().removeListener(JadxEvents.RELOAD_SETTINGS_WINDOW, reloadListener);
 		settings.saveWindowPos(this);
 		super.dispose();

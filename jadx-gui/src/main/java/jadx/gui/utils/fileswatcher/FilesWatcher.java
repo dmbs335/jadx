@@ -1,6 +1,7 @@
 package jadx.gui.utils.fileswatcher;
 
 import java.io.IOException;
+import java.nio.file.ClosedWatchServiceException;
 import java.nio.file.FileSystems;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
@@ -40,31 +41,50 @@ public class FilesWatcher {
 
 	public FilesWatcher(List<Path> paths, BiConsumer<Path, WatchEvent.Kind<Path>> listener) throws IOException {
 		this.listener = listener;
-		for (Path path : paths) {
-			if (Files.isDirectory(path, NOFOLLOW_LINKS)) {
-				registerDirs(path);
-			} else {
-				Path parentDir = path.toAbsolutePath().getParent();
-				register(parentDir);
-				files.merge(parentDir, Collections.singleton(path), Utils::mergeSets);
+		try {
+			for (Path path : paths) {
+				if (Files.isDirectory(path, NOFOLLOW_LINKS)) {
+					registerDirs(path);
+				} else {
+					Path absolutePath = path.toAbsolutePath();
+					Path parentDir = absolutePath.getParent();
+					register(parentDir);
+					files.merge(parentDir, Collections.singleton(absolutePath), Utils::mergeSets);
+				}
 			}
+		} catch (IOException | RuntimeException e) {
+			try {
+				watcher.close();
+			} catch (IOException closeError) {
+				e.addSuppressed(closeError);
+			}
+			throw e;
 		}
 	}
 
 	public void cancel() {
-		cancel.set(true);
+		if (cancel.compareAndSet(false, true)) {
+			try {
+				watcher.close();
+			} catch (IOException e) {
+				LOG.debug("Failed to close file watcher", e);
+			}
+		}
 	}
 
 	@SuppressWarnings("unchecked")
 	public void watch() {
-		cancel.set(false);
 		LOG.debug("File watcher started for {} dirs", keys.size());
 		while (!cancel.get()) {
 			WatchKey key;
 			try {
 				key = watcher.take();
 			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
 				LOG.debug("File watcher interrupted");
+				return;
+			} catch (ClosedWatchServiceException e) {
+				LOG.debug("File watcher closed");
 				return;
 			}
 			Path dir = keys.get(key);
@@ -73,7 +93,7 @@ public class FilesWatcher {
 				continue;
 			}
 			for (WatchEvent<?> event : key.pollEvents()) {
-				if (cancel.get() || Thread.interrupted()) {
+				if (cancel.get() || Thread.currentThread().isInterrupted()) {
 					return;
 				}
 				WatchEvent.Kind<?> kind = event.kind();

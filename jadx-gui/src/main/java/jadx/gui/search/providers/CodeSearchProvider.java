@@ -57,7 +57,7 @@ public final class CodeSearchProvider extends BaseSearchProvider {
 					clsCode = getClassCode(cls, codeCache);
 				}
 				if (clsCode != null) {
-					JNode newResult = searchNext(cls, clsCode);
+					JNode newResult = searchNext(cls, clsCode, cancelable);
 					if (newResult != null) {
 						code = clsCode;
 						return newResult;
@@ -73,8 +73,11 @@ public final class CodeSearchProvider extends BaseSearchProvider {
 		}
 	}
 
-	private @Nullable JNode searchNext(JavaClass javaClass, String clsCode) {
-		int newPos = searchMth.find(clsCode, searchStr, pos);
+	private @Nullable JNode searchNext(JavaClass javaClass, String clsCode, Cancelable cancelable) {
+		if (SearchPosition.exhausted(clsCode.length(), pos)) {
+			return null;
+		}
+		int newPos = searchMth.find(clsCode, searchStr, pos, cancelable);
 		if (newPos == -1) {
 			return null;
 		}
@@ -82,7 +85,7 @@ public final class CodeSearchProvider extends BaseSearchProvider {
 		int lineEnd = CodeUtils.getNewLinePosAfter(clsCode, newPos);
 		int end = lineEnd == -1 ? clsCode.length() : lineEnd;
 		String line = clsCode.substring(lineStart, end);
-		this.pos = end;
+		this.pos = SearchPosition.afterMatch(clsCode.length(), newPos, end);
 		JClass rootCls = convert(javaClass);
 		JNode enclosingNode = getOrElse(getEnclosingNode(javaClass, end), rootCls);
 		return new CodeNode(rootCls, enclosingNode, line.trim(), newPos);

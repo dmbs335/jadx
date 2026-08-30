@@ -47,11 +47,17 @@ public class CodePanel extends JPanel {
 	private final SearchBar searchBar;
 	private final AbstractCodeArea codeArea;
 	private final RTextScrollPane codeScrollPane;
+	private final LineNumbersMode lineNumbersModeOverride;
 
 	private boolean useSourceLines;
 
 	public CodePanel(AbstractCodeArea codeArea) {
+		this(codeArea, null);
+	}
+
+	public CodePanel(AbstractCodeArea codeArea, LineNumbersMode lineNumbersModeOverride) {
 		this.codeArea = codeArea;
+		this.lineNumbersModeOverride = lineNumbersModeOverride;
 		this.searchBar = new SearchBar(codeArea);
 		this.codeScrollPane = new RTextScrollPane(codeArea);
 
@@ -154,7 +160,9 @@ public class CodePanel extends JPanel {
 	}
 
 	private LineNumbersMode getLineNumbersMode() {
-		LineNumbersMode mode = getSettings().getLineNumbersMode();
+		LineNumbersMode mode = lineNumbersModeOverride != null
+				? lineNumbersModeOverride
+				: getSettings().getLineNumbersMode();
 		boolean canShowDebugLines = canShowDebugLines();
 		if (mode == LineNumbersMode.AUTO) {
 			mode = canShowDebugLines ? LineNumbersMode.DEBUG : LineNumbersMode.NORMAL;

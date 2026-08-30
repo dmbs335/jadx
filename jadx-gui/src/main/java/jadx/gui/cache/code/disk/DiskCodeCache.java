@@ -1,17 +1,17 @@
 package jadx.gui.cache.code.disk;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
@@ -24,9 +24,9 @@ import jadx.api.ICodeCache;
 import jadx.api.ICodeInfo;
 import jadx.api.JadxArgs;
 import jadx.api.JadxDecompiler;
-import jadx.core.Jadx;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.RootNode;
+import jadx.core.utils.AnalysisFingerprint;
 import jadx.core.utils.StringUtils;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -35,7 +35,7 @@ import jadx.core.utils.files.FileUtils;
 public class DiskCodeCache implements ICodeCache {
 	private static final Logger LOG = LoggerFactory.getLogger(DiskCodeCache.class);
 
-	private static final int DATA_FORMAT_VERSION = 15;
+	private static final int DATA_FORMAT_VERSION = 16;
 
 	private final Path baseDir;
 	private final Path srcDir;
@@ -53,7 +53,7 @@ public class DiskCodeCache implements ICodeCache {
 		codeVersionFile = baseDir.resolve("code-version");
 		JadxArgs args = root.getArgs();
 		codeVersion = buildCodeVersion(args, root.getDecompiler());
-		writePool = Executors.newFixedThreadPool(args.getThreadsCount());
+		writePool = buildWritePool(args.getThreadsCount());
 		codeMetadataAdapter = new CodeMetadataAdapter(root);
 		clsDataMap = buildClassDataMap(root.getClasses());
 		if (checkCodeVersion()) {
@@ -61,6 +61,29 @@ public class DiskCodeCache implements ICodeCache {
 		} else {
 			reset();
 		}
+	}
+
+	private static ExecutorService buildWritePool(int threads) {
+		int queueCapacity = Math.max(32, threads * 16);
+		ThreadPoolExecutor executor = new ThreadPoolExecutor(
+				threads,
+				threads,
+				0L,
+				TimeUnit.MILLISECONDS,
+				new ArrayBlockingQueue<>(queueCapacity),
+				Utils.simpleThreadFactory("disk-code-cache-write"));
+		executor.setRejectedExecutionHandler((runnable, pool) -> {
+			if (pool.isShutdown()) {
+				throw new RejectedExecutionException("Disk code cache is closed");
+			}
+			try {
+				pool.getQueue().put(runnable);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				throw new RejectedExecutionException("Interrupted while queuing disk cache write", e);
+			}
+		});
+		return executor;
 	}
 
 	private boolean checkCodeVersion() {
@@ -141,12 +164,18 @@ public class DiskCodeCache implements ICodeCache {
 			return FileUtils.readFile(javaFile);
 		} catch (Exception e) {
 			LOG.error("Failed to read class code for {}", clsFullName, e);
+			invalidateEntry(clsFullName);
 			return null;
 		}
 	}
 
 	@Override
 	public @NotNull ICodeInfo get(String clsFullName) {
+		return getWithKnownCode(clsFullName, null);
+	}
+
+	@Override
+	public @NotNull ICodeInfo getWithKnownCode(String clsFullName, @Nullable String knownCode) {
 		try {
 			if (!contains(clsFullName)) {
 				return ICodeInfo.EMPTY;
@@ -157,15 +186,27 @@ public class DiskCodeCache implements ICodeCache {
 				return tmpCodeInfo;
 			}
 			int clsId = clsData.getClsId();
-			Path javaFile = getJavaFile(clsId);
-			if (!Files.exists(javaFile)) {
-				return ICodeInfo.EMPTY;
+			String code = knownCode;
+			if (code == null) {
+				Path javaFile = getJavaFile(clsId);
+				if (!Files.exists(javaFile)) {
+					return ICodeInfo.EMPTY;
+				}
+				code = FileUtils.readFile(javaFile);
 			}
-			String code = FileUtils.readFile(javaFile);
 			return codeMetadataAdapter.readAndBuild(getMetadataFile(clsId), code);
 		} catch (Exception e) {
 			LOG.error("Failed to read code cache for {}", clsFullName, e);
+			invalidateEntry(clsFullName);
 			return ICodeInfo.EMPTY;
+		}
+	}
+
+	private void invalidateEntry(String clsFullName) {
+		try {
+			remove(clsFullName);
+		} catch (Exception removeError) {
+			LOG.warn("Failed to remove invalid code cache entry for {}", clsFullName, removeError);
 		}
 	}
 
@@ -196,16 +237,10 @@ public class DiskCodeCache implements ICodeCache {
 	}
 
 	private String buildCodeVersion(JadxArgs args, @Nullable JadxDecompiler decompiler) {
-		List<File> inputFiles = new ArrayList<>(args.getInputFiles());
-		if (args.getGeneratedRenamesMappingFileMode().shouldRead()
-				&& args.getGeneratedRenamesMappingFile() != null
-				&& args.getGeneratedRenamesMappingFile().exists()) {
-			inputFiles.add(args.getGeneratedRenamesMappingFile());
-		}
-		return DATA_FORMAT_VERSION
-				+ ":" + Jadx.getVersion()
-				+ ":" + args.makeCodeArgsHash(decompiler)
-				+ ":" + FileUtils.buildInputsHash(Utils.collectionMap(inputFiles, File::toPath));
+		String fingerprint = decompiler == null
+				? AnalysisFingerprint.build(args, null)
+				: decompiler.getAnalysisFingerprint();
+		return DATA_FORMAT_VERSION + ":" + fingerprint;
 	}
 
 	private CacheData getClsData(String clsFullName) {
@@ -269,15 +304,39 @@ public class DiskCodeCache implements ICodeCache {
 
 	@Override
 	public void close() throws IOException {
-		synchronized (this) {
-			try {
-				writePool.shutdown();
-				boolean completed = writePool.awaitTermination(1, TimeUnit.MINUTES);
-				if (!completed) {
-					LOG.warn("Disk code cache closing terminated by timeout");
+		boolean interrupted = false;
+		writePool.shutdown();
+		long gracefulDeadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(1);
+		try {
+			while (!writePool.isTerminated()) {
+				long remaining = gracefulDeadline - System.nanoTime();
+				if (remaining <= 0) {
+					LOG.warn("Disk code cache closing terminated by timeout, forcing pending writes to stop");
+					writePool.shutdownNow();
+					break;
 				}
-			} catch (InterruptedException e) {
-				LOG.error("Failed to close disk code cache", e);
+				try {
+					writePool.awaitTermination(remaining, TimeUnit.NANOSECONDS);
+				} catch (InterruptedException e) {
+					// Project reload can interrupt its coordinator. Do not let old cache
+					// writers escape into the next project lifecycle.
+					interrupted = true;
+				}
+			}
+			long forcedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+			while (!writePool.isTerminated() && System.nanoTime() < forcedDeadline) {
+				try {
+					writePool.awaitTermination(100, TimeUnit.MILLISECONDS);
+				} catch (InterruptedException e) {
+					interrupted = true;
+				}
+			}
+			if (!writePool.isTerminated()) {
+				LOG.warn("Disk code cache write pool did not terminate");
+			}
+		} finally {
+			if (interrupted) {
+				Thread.currentThread().interrupt();
 			}
 		}
 	}

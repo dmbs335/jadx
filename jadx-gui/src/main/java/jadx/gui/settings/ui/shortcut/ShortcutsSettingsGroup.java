@@ -1,6 +1,7 @@
 package jadx.gui.settings.ui.shortcut;
 
 import java.awt.BorderLayout;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -21,6 +22,7 @@ import jadx.gui.utils.shortcut.Shortcut;
 public class ShortcutsSettingsGroup implements ISettingsGroup {
 	private final JadxSettingsWindow settingsWindow;
 	private final JadxSettings settings;
+	private final List<ShortcutEdit> editors = new ArrayList<>();
 
 	public ShortcutsSettingsGroup(JadxSettingsWindow settingsWindow, JadxSettings settings) {
 		this.settingsWindow = settingsWindow;
@@ -53,8 +55,15 @@ public class ShortcutsSettingsGroup implements ISettingsGroup {
 			Shortcut shortcut = settings.getShortcuts().get(actionModel);
 			ShortcutEdit edit = new ShortcutEdit(actionModel, settingsWindow, settings);
 			edit.setShortcut(shortcut);
+			editors.add(edit);
 			group.addRow(actionModel.getName(), edit);
 		}
 		return group;
+	}
+
+	@Override
+	public void close(boolean save) {
+		editors.forEach(ShortcutEdit::dispose);
+		editors.clear();
 	}
 }

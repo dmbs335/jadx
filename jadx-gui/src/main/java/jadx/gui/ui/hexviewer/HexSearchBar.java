@@ -44,6 +44,7 @@ public class HexSearchBar extends JToolBar {
 	private final JToggleButton matchCaseCB;
 	private final JButton nextMatchButton;
 	private final JButton prevMatchButton;
+	private final BinarySearch binarySearch;
 
 	private Control control = null;
 
@@ -132,11 +133,15 @@ public class HexSearchBar extends JToolBar {
 		closeButton.setBorderPainted(false);
 		add(closeButton);
 
-		BinarySearch binarySearch = new BinarySearch(this);
+		binarySearch = new BinarySearch(this);
 		binarySearch.setBinarySearchService(new BinarySearchServiceImpl(hexCodeArea));
 		setFloatable(false);
 		setVisible(false);
 
+	}
+
+	public void dispose() {
+		binarySearch.cancelSearch();
 	}
 
 	/*

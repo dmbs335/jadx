@@ -19,6 +19,7 @@ import org.exbin.auxiliary.binary_data.array.ByteArrayEditableData;
 import jadx.gui.ui.hexviewer.HexSearchBar;
 import jadx.gui.ui.hexviewer.search.service.BinarySearchService;
 import jadx.gui.utils.NLS;
+import jadx.gui.utils.UiUtils;
 
 /**
  * Binary search.
@@ -29,8 +30,9 @@ public class BinarySearch {
 
 	private static final int DEFAULT_DELAY = 500;
 
-	private InvokeSearchThread invokeSearchThread;
-	private SearchThread searchThread;
+	private volatile InvokeSearchThread invokeSearchThread;
+	private volatile SearchThread searchThread;
+	private volatile long searchGeneration;
 
 	private SearchOperation currentSearchOperation = SearchOperation.FIND;
 	private SearchParameters.SearchDirection currentSearchDirection = SearchParameters.SearchDirection.FORWARD;
@@ -199,22 +201,32 @@ public class BinarySearch {
 	}
 
 	private void invokeSearch(SearchOperation searchOperation, SearchParameters searchParameters, final int delay) {
-		if (invokeSearchThread != null) {
-			invokeSearchThread.interrupt();
+		SearchParameters searchSnapshot = new SearchParameters(searchParameters);
+		synchronized (this) {
+			searchGeneration++;
+			interruptSearchThreads();
+			currentSearchOperation = searchOperation;
+			currentSearchParameters.setFromParameters(searchSnapshot);
+			invokeSearchThread = new InvokeSearchThread(searchGeneration, searchOperation, searchSnapshot, delay);
+			invokeSearchThread.start();
 		}
-		invokeSearchThread = new InvokeSearchThread();
-		invokeSearchThread.delay = delay;
-		currentSearchOperation = searchOperation;
-		currentSearchParameters.setFromParameters(searchParameters);
-		invokeSearchThread.start();
 	}
 
-	public void cancelSearch() {
-		if (invokeSearchThread != null) {
-			invokeSearchThread.interrupt();
+	public synchronized void cancelSearch() {
+		searchGeneration++;
+		interruptSearchThreads();
+		invokeSearchThread = null;
+		searchThread = null;
+	}
+
+	private void interruptSearchThreads() {
+		InvokeSearchThread invokeThread = invokeSearchThread;
+		if (invokeThread != null) {
+			invokeThread.interrupt();
 		}
-		if (searchThread != null) {
-			searchThread.interrupt();
+		SearchThread worker = searchThread;
+		if (worker != null) {
+			worker.interrupt();
 		}
 	}
 
@@ -237,45 +249,106 @@ public class BinarySearch {
 
 	private class InvokeSearchThread extends Thread {
 
-		private int delay = DEFAULT_DELAY;
+		private final long generation;
+		private final SearchOperation operation;
+		private final SearchParameters parameters;
+		private final int delay;
 
-		public InvokeSearchThread() {
+		public InvokeSearchThread(long generation, SearchOperation operation, SearchParameters parameters, int delay) {
 			super("InvokeSearchThread");
+			this.generation = generation;
+			this.operation = operation;
+			this.parameters = parameters;
+			this.delay = delay;
 		}
 
 		@Override
 		public void run() {
 			try {
 				Thread.sleep(delay);
-				if (searchThread != null) {
-					searchThread.interrupt();
-				}
-				searchThread = new SearchThread();
-				searchThread.start();
+				startSearch(this, generation, operation, parameters);
 			} catch (InterruptedException ex) {
-				// don't search
+				Thread.currentThread().interrupt();
 			}
 		}
 	}
 
-	private class SearchThread extends Thread {
+	private synchronized void startSearch(InvokeSearchThread source, long generation,
+			SearchOperation operation, SearchParameters parameters) {
+		if (generation != searchGeneration || invokeSearchThread != source) {
+			return;
+		}
+		SearchThread worker = searchThread;
+		if (worker != null) {
+			worker.interrupt();
+		}
+		invokeSearchThread = null;
+		searchThread = new SearchThread(generation, operation, parameters);
+		searchThread.start();
+	}
 
-		public SearchThread() {
+	private class SearchThread extends Thread {
+		private final long generation;
+		private final SearchOperation operation;
+		private final SearchParameters parameters;
+
+		public SearchThread(long generation, SearchOperation operation, SearchParameters parameters) {
 			super("SearchThread");
+			this.generation = generation;
+			this.operation = operation;
+			this.parameters = parameters;
 		}
 
 		@Override
 		public void run() {
-			switch (currentSearchOperation) {
-				case FIND:
-					binarySearchService.performFind(currentSearchParameters, searchStatusListener);
-					break;
-				case FIND_AGAIN:
-					binarySearchService.performFindAgain(searchStatusListener);
-					break;
-				default:
-					throw new UnsupportedOperationException("Not supported yet.");
+			try {
+				BinarySearchService.SearchStatusListener guardedListener = guardedListener(generation);
+				switch (operation) {
+					case FIND:
+						binarySearchService.performFind(parameters, guardedListener);
+						break;
+					case FIND_AGAIN:
+						binarySearchService.performFindAgain(guardedListener);
+						break;
+					default:
+						throw new UnsupportedOperationException("Not supported yet.");
+				}
+			} finally {
+				searchComplete(this);
 			}
+		}
+	}
+
+	private BinarySearchService.SearchStatusListener guardedListener(long generation) {
+		return new BinarySearchService.SearchStatusListener() {
+			@Override
+			public void setStatus(BinarySearchService.FoundMatches matches, SearchParameters.MatchMode matchMode) {
+				UiUtils.uiRun(() -> {
+					if (!isCanceled()) {
+						searchStatusListener.setStatus(matches, matchMode);
+					}
+				});
+			}
+
+			@Override
+			public void clearStatus() {
+				UiUtils.uiRun(() -> {
+					if (!isCanceled()) {
+						searchStatusListener.clearStatus();
+					}
+				});
+			}
+
+			@Override
+			public boolean isCanceled() {
+				return generation != searchGeneration || Thread.currentThread().isInterrupted();
+			}
+		};
+	}
+
+	private synchronized void searchComplete(SearchThread worker) {
+		if (searchThread == worker) {
+			searchThread = null;
 		}
 	}
 

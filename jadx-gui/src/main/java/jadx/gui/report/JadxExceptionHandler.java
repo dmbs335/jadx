@@ -22,6 +22,14 @@ public class JadxExceptionHandler implements Thread.UncaughtExceptionHandler {
 		Thread.setDefaultUncaughtExceptionHandler(new JadxExceptionHandler(mainWindow));
 	}
 
+	public static void unregister(MainWindow mainWindow) {
+		Thread.UncaughtExceptionHandler handler = Thread.getDefaultUncaughtExceptionHandler();
+		if (handler instanceof JadxExceptionHandler
+				&& ((JadxExceptionHandler) handler).mainWindow == mainWindow) {
+			Thread.setDefaultUncaughtExceptionHandler(null);
+		}
+	}
+
 	private final MainWindow mainWindow;
 
 	private JadxExceptionHandler(MainWindow mainWindow) {

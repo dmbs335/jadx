@@ -61,7 +61,7 @@ public class CommentSearchProvider implements ISearchProvider {
 				return null;
 			}
 			ICodeComment comment = comments.get(progress++);
-			JNode result = isMatch(searchSettings, comment);
+			JNode result = isMatch(searchSettings, comment, cancelable);
 			if (result != null) {
 				return result;
 			}
@@ -70,9 +70,9 @@ public class CommentSearchProvider implements ISearchProvider {
 	}
 
 	@Nullable
-	private JNode isMatch(SearchSettings searchSettings, ICodeComment comment) {
+	private JNode isMatch(SearchSettings searchSettings, ICodeComment comment, Cancelable cancelable) {
 		boolean all = searchSettings.getSearchString().isEmpty();
-		if (all || searchSettings.isMatch(comment.getComment())) {
+		if (all || searchSettings.isMatch(comment.getComment(), cancelable)) {
 			JNode refNode = getRefNode(comment);
 			if (refNode == null) {
 				LOG.warn("Failed to get ref node for comment: {}", comment);

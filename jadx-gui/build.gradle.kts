@@ -14,6 +14,7 @@ dependencies {
 	implementation(project(":jadx-cli"))
 	implementation(project(":jadx-plugins-tools"))
 	implementation(project(":jadx-commons:jadx-app-commons"))
+	implementation(project(":jadx-commons:jadx-storage"))
 
 	// import mappings
 	implementation(project(":jadx-plugins:jadx-rename-mappings"))
@@ -70,6 +71,23 @@ val jadxVersion = rootProject.extra["jadxVersion"] as String
 
 tasks.test {
 	exclude("**/tmp/*")
+}
+
+tasks.register<JavaExec>("searchReloadSmoke") {
+	group = "verification"
+	description = "Run a hidden AWT open/search/cancel/reload smoke against a real APK"
+	dependsOn(tasks.testClasses)
+	classpath = sourceSets.test.get().runtimeClasspath
+	mainClass.set("jadx.gui.ui.dialog.SearchReloadSmokeRunner")
+	maxHeapSize = providers.gradleProperty("searchReloadSmokeHeap").orElse("11g").get()
+	doFirst {
+		val input = providers.gradleProperty("searchReloadSmokeInput").orNull
+			?: throw GradleException("Missing -PsearchReloadSmokeInput=<apk>")
+		val output = providers.gradleProperty("searchReloadSmokeOutput")
+			.orElse("build/search-reload-smoke.json").get()
+		val rounds = providers.gradleProperty("searchReloadSmokeRounds").orElse("3").get()
+		args(input, output, rounds)
+	}
 }
 
 application {

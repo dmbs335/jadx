@@ -9,6 +9,7 @@ import jadx.api.JavaClass;
 import jadx.api.JavaPackage;
 import jadx.core.dex.nodes.PackageNode;
 import jadx.core.utils.exceptions.InvalidDataException;
+import jadx.gui.jobs.Cancelable;
 import jadx.gui.search.providers.ResourceFilter;
 import jadx.gui.treemodel.JClass;
 import jadx.gui.treemodel.JResource;
@@ -39,7 +40,7 @@ public class SearchSettings {
 			try {
 				int flags = ignoreCase ? Pattern.CASE_INSENSITIVE : 0;
 				this.regexPattern = Pattern.compile(searchString, flags);
-			} catch (Exception e) {
+			} catch (Exception | StackOverflowError e) {
 				return "Invalid Regex: " + e.getMessage();
 			}
 		}
@@ -62,6 +63,10 @@ public class SearchSettings {
 
 	public boolean isMatch(String searchArea) {
 		return searchMethod.find(searchArea, this.searchString, 0) != -1;
+	}
+
+	public boolean isMatch(String searchArea, Cancelable cancelable) {
+		return searchMethod.find(searchArea, this.searchString, 0, cancelable) != -1;
 	}
 
 	public boolean isUseRegex() {

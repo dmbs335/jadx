@@ -41,6 +41,11 @@ public class IssuesPanel extends JPanel {
 		return issuesListener.getErrors();
 	}
 
+	public void dispose() {
+		LogCollector.getInstance().removeListener(issuesListener);
+		issuesListener.dispose();
+	}
+
 	private void initUI() {
 		JLabel label = new JLabel(NLS.str("issues_panel.label"));
 		errorLabel = new JLabel(ERROR_ICON);

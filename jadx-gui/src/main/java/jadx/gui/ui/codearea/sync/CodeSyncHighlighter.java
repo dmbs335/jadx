@@ -38,7 +38,14 @@ public class CodeSyncHighlighter {
 		HighlightPainter painter =
 				new DefaultHighlighter.DefaultHighlightPainter(this.color);
 		Object tag = hl.addHighlight(startOffset, endOffset, painter);
-		new Timer(1000, e -> hl.removeHighlight(tag)).start();
+		Timer timer = buildRemovalTimer(() -> hl.removeHighlight(tag));
+		timer.start();
+	}
+
+	static Timer buildRemovalTimer(Runnable removeAction) {
+		Timer timer = new Timer(1000, event -> removeAction.run());
+		timer.setRepeats(false);
+		return timer;
 	}
 
 	public static CodeSyncHighlighter defaultHighlighter() {

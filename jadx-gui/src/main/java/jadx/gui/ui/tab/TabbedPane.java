@@ -54,6 +54,9 @@ public class TabbedPane extends JTabbedPane implements ITabStatesListener {
 	private transient ContentPanel lastTab;
 
 	private transient TabDndController dnd;
+	private transient KeyEventDispatcher tabKeyDispatcher;
+	private transient KeyEventDispatcher closeKeyDispatcher;
+	private boolean disposed;
 
 	public TabbedPane(MainWindow window, TabsController controller) {
 		this.mainWindow = window;
@@ -100,7 +103,7 @@ public class TabbedPane extends JTabbedPane implements ITabStatesListener {
 	}
 
 	private void interceptTabKey() {
-		KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(new KeyEventDispatcher() {
+		tabKeyDispatcher = new KeyEventDispatcher() {
 			private static final int ctrlDown = KeyEvent.CTRL_DOWN_MASK;
 			private long ctrlInterval = 0;
 
@@ -140,11 +143,12 @@ public class TabbedPane extends JTabbedPane implements ITabStatesListener {
 				}
 				return consume;
 			}
-		});
+		};
+		KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(tabKeyDispatcher);
 	}
 
 	private void interceptCloseKey() {
-		KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(new KeyEventDispatcher() {
+		closeKeyDispatcher = new KeyEventDispatcher() {
 			private static final int closeKey = KeyEvent.VK_W;
 			private boolean canClose = true;
 
@@ -168,7 +172,19 @@ public class TabbedPane extends JTabbedPane implements ITabStatesListener {
 				}
 				return false;
 			}
-		});
+		};
+		KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(closeKeyDispatcher);
+	}
+
+	public void dispose() {
+		if (disposed) {
+			return;
+		}
+		disposed = true;
+		KeyboardFocusManager focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager();
+		focusManager.removeKeyEventDispatcher(tabKeyDispatcher);
+		focusManager.removeKeyEventDispatcher(closeKeyDispatcher);
+		controller.removeListener(this);
 	}
 
 	private void enableSwitchingTabs() {
@@ -229,7 +245,7 @@ public class TabbedPane extends JTabbedPane implements ITabStatesListener {
 		}
 		selectTab(contentPanel);
 		int pos = jumpPos.getPos();
-		if (pos <= 0) {
+		if (pos < 0) {
 			LOG.warn("Invalid jump: {}", jumpPos, new JadxRuntimeException());
 			pos = Math.max(0, jumpNode.getPos());
 		}

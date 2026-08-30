@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -40,6 +41,8 @@ public class BackgroundExecutor {
 	private ThreadPoolExecutor taskQueueExecutor;
 	private final Map<Long, InternalTask> taskRunning = new ConcurrentHashMap<>();
 	private final AtomicLong idSupplier = new AtomicLong(0);
+	private volatile boolean canceling;
+	private volatile boolean shutdown;
 
 	public BackgroundExecutor(JadxSettings settings, ProgressPanel progressPane) {
 		this.settings = Objects.requireNonNull(settings);
@@ -48,11 +51,19 @@ public class BackgroundExecutor {
 	}
 
 	public synchronized void execute(IBackgroundTask task) {
+		if (canceling || shutdown) {
+			task.cancel();
+			return;
+		}
 		InternalTask internalTask = buildTask(task);
 		taskQueueExecutor.execute(() -> runTask(internalTask));
 	}
 
 	public synchronized Future<TaskStatus> executeWithFuture(IBackgroundTask task) {
+		if (canceling || shutdown) {
+			task.cancel();
+			return CompletableFuture.completedFuture(TaskStatus.CANCEL_BY_USER);
+		}
 		InternalTask internalTask = buildTask(task);
 		return taskQueueExecutor.submit(() -> {
 			runTask(internalTask);
@@ -60,11 +71,45 @@ public class BackgroundExecutor {
 		});
 	}
 
-	public synchronized void cancelAll() {
+	public void cancelAll() {
+		stopExecutor(false);
+	}
+
+	public void shutdown() {
+		stopExecutor(true);
+	}
+
+	private void stopExecutor(boolean finalShutdown) {
+		ThreadPoolExecutor executor;
+		List<InternalTask> tasksToCancel;
+		synchronized (this) {
+			if (finalShutdown) {
+				shutdown = true;
+			}
+			if (canceling) {
+				// The active stop owner can be inside a task's EDT completion callback.
+				// Interrupting its queue runner here lets the Future complete before the
+				// callback and produces an "UI thread interrupted" warning. The owner sees
+				// the shutdown flag in its finally block and performs the final cleanup.
+				return;
+			}
+			if (shutdown && !finalShutdown) {
+				return;
+			}
+			canceling = true;
+			executor = taskQueueExecutor;
+			tasksToCancel = List.copyOf(taskRunning.values());
+		}
 		try {
-			taskRunning.values().forEach(this::cancelTask);
-			taskQueueExecutor.shutdownNow();
-			boolean complete = taskQueueExecutor.awaitTermination(3, TimeUnit.SECONDS);
+			tasksToCancel.forEach(this::cancelTask);
+			// Child task executors are already terminated above. Let the queue runner
+			// finish its EDT completion callback without interrupting invokeAndWait.
+			executor.shutdown();
+			boolean complete = executor.awaitTermination(3, TimeUnit.SECONDS);
+			if (!complete) {
+				executor.shutdownNow();
+				complete = executor.awaitTermination(3, TimeUnit.SECONDS);
+			}
 			if (complete) {
 				LOG.debug("Background task executor canceled successfully");
 			} else {
@@ -76,14 +121,32 @@ public class BackgroundExecutor {
 		} catch (Exception e) {
 			LOG.error("Error terminating task executor", e);
 		} finally {
-			reset();
+			synchronized (this) {
+				taskRunning.clear();
+				if (!shutdown) {
+					taskQueueExecutor = newTaskExecutor();
+				}
+				canceling = false;
+			}
+			if (shutdown) {
+				progressUpdater.shutdown();
+			}
 		}
 	}
 
-	public synchronized void waitForComplete() {
+	boolean isShutdown() {
+		return shutdown && progressUpdater.isShutdown();
+	}
+
+	public void waitForComplete() {
+		Future<?> waitMarker;
+		synchronized (this) {
+			// Serialize only queue access. Holding this monitor while waiting can
+			// deadlock if a task's EDT completion callback submits another task.
+			waitMarker = taskQueueExecutor.submit(UiUtils.EMPTY_RUNNABLE);
+		}
 		try {
-			// add empty task and wait its completion
-			taskQueueExecutor.submit(UiUtils.EMPTY_RUNNABLE).get();
+			waitMarker.get();
 		} catch (Exception e) {
 			throw new JadxRuntimeException("Failed to wait tasks completion", e);
 		}
@@ -110,9 +173,12 @@ public class BackgroundExecutor {
 	}
 
 	private synchronized void reset() {
-		taskQueueExecutor = (ThreadPoolExecutor) Executors.newFixedThreadPool(1, Utils.simpleThreadFactory("bg"));
+		taskQueueExecutor = newTaskExecutor();
 		taskRunning.clear();
-		idSupplier.set(0);
+	}
+
+	private static ThreadPoolExecutor newTaskExecutor() {
+		return (ThreadPoolExecutor) Executors.newFixedThreadPool(1, Utils.simpleThreadFactory("bg"));
 	}
 
 	private InternalTask buildTask(IBackgroundTask task) {
@@ -125,6 +191,10 @@ public class BackgroundExecutor {
 	private void runTask(InternalTask internalTask) {
 		try {
 			IBackgroundTask task = internalTask.getBgTask();
+			if (task.isCanceled()) {
+				internalTask.setStatus(TaskStatus.CANCEL_BY_USER);
+				return;
+			}
 			ITaskExecutor taskExecutor = task.scheduleTasks();
 			taskExecutor.setThreadsCount(settings.getThreadsCount());
 			int tasksCount = taskExecutor.getTasksCount();
@@ -137,6 +207,10 @@ public class BackgroundExecutor {
 			long startTime = System.currentTimeMillis();
 			Supplier<TaskStatus> cancelCheck = buildCancelCheck(internalTask, startTime);
 			internalTask.taskStart(startTime, cancelCheck);
+			if (task.isCanceled()) {
+				internalTask.setStatus(TaskStatus.CANCEL_BY_USER);
+				return;
+			}
 			progressUpdater.addTask(internalTask);
 			taskExecutor.execute();
 			taskExecutor.awaitTermination();
@@ -149,10 +223,19 @@ public class BackgroundExecutor {
 	}
 
 	private void taskComplete(InternalTask internalTask) {
+		// TaskExecutor waits uninterruptibly to prevent workers escaping the project
+		// lifecycle, then restores the interrupt flag. Clear it while dispatching the
+		// completion callback: Swing invokeAndWait rejects an interrupted caller.
+		boolean restoreInterrupt = Thread.interrupted();
 		try {
 			IBackgroundTask task = internalTask.getBgTask();
-			internalTask.setJobsComplete(internalTask.getTaskExecutor().getProgress());
-			internalTask.setStatus(TaskStatus.COMPLETE);
+			ITaskExecutor taskExecutor = internalTask.getTaskExecutor();
+			if (taskExecutor != null) {
+				internalTask.setJobsComplete(taskExecutor.getProgress());
+			}
+			if (internalTask.getStatus() == TaskStatus.STARTED) {
+				internalTask.setStatus(TaskStatus.COMPLETE);
+			}
 			internalTask.updateExecTime();
 			task.onDone(internalTask);
 			// treat UI task operations as part of the task to not mix with others
@@ -171,6 +254,9 @@ public class BackgroundExecutor {
 			internalTask.taskComplete();
 			progressUpdater.taskComplete(internalTask);
 			removeTask(internalTask);
+			if (restoreInterrupt) {
+				Thread.currentThread().interrupt();
+			}
 		}
 	}
 
@@ -183,13 +269,17 @@ public class BackgroundExecutor {
 			IBackgroundTask task = internalTask.getBgTask();
 			if (!internalTask.isRunning()) {
 				// task complete or not yet started
-				task.cancel();
+				if (!task.isCanceled()) {
+					task.cancel();
+				}
 				removeTask(internalTask);
 				return;
 			}
 			ITaskExecutor taskExecutor = internalTask.getTaskExecutor();
 			// force termination
-			task.cancel();
+			if (!task.isCanceled()) {
+				task.cancel();
+			}
 			taskExecutor.terminate();
 
 			ExecutorService executor = taskExecutor.getInternalExecutor();

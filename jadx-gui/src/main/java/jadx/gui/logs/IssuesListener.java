@@ -52,4 +52,8 @@ public class IssuesListener implements ILogListener {
 	public int getWarnings() {
 		return warnings;
 	}
+
+	public void dispose() {
+		updater.dispose();
+	}
 }

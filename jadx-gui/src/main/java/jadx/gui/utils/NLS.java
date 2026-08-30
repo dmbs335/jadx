@@ -46,6 +46,11 @@ public class NLS {
 
 		LangLocale defLang = LANG_LOCALES.get(0);
 		FALLBACK_MESSAGES_MAP = LANG_LOCALES_MAP.get(defLang);
+		// Keep NLS safe for components instantiated before GUI configuration is loaded
+		// (tests, plugins and early error paths). GuiConfigLocale replaces this default
+		// with the configured locale during normal startup.
+		currentLocale = defLang;
+		localizedMessagesMap = FALLBACK_MESSAGES_MAP;
 	}
 
 	private NLS() {

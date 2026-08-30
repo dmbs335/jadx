@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.BooleanSupplier;
 
 import org.exbin.auxiliary.binary_data.BinaryData;
 import org.exbin.bined.CharsetStreamTranslator;
@@ -15,9 +16,11 @@ import org.exbin.bined.highlight.swing.SearchMatch;
 import org.exbin.bined.swing.CodeAreaSwingUtils;
 import org.exbin.bined.swing.capability.ColorAssessorPainterCapable;
 import org.exbin.bined.swing.section.SectCodeArea;
+import org.jetbrains.annotations.Nullable;
 
 import jadx.gui.ui.hexviewer.search.SearchCondition;
 import jadx.gui.ui.hexviewer.search.SearchParameters;
+import jadx.gui.utils.UiUtils;
 
 /**
  * Binary search service.
@@ -37,13 +40,15 @@ public class BinarySearchServiceImpl implements BinarySearchService {
 
 	@Override
 	public void performFind(SearchParameters searchParameters, SearchStatusListener searchStatusListener) {
-		SearchCodeAreaColorAssessor searchAssessor = CodeAreaSwingUtils
-				.findColorAssessor((ColorAssessorPainterCapable) codeArea.getPainter(), SearchCodeAreaColorAssessor.class);
 		SearchCondition condition = searchParameters.getCondition();
 		searchStatusListener.clearStatus();
 		if (condition.isEmpty()) {
-			searchAssessor.clearMatches();
-			codeArea.repaint();
+			UiUtils.uiRun(() -> {
+				if (!searchStatusListener.isCanceled()) {
+					getSearchAssessor().clearMatches();
+					codeArea.repaint();
+				}
+			});
 			return;
 		}
 
@@ -101,27 +106,35 @@ public class BinarySearchServiceImpl implements BinarySearchService {
 	 * Performs search by binary data.
 	 */
 	private void searchForBinaryData(SearchParameters searchParameters, SearchStatusListener searchStatusListener) {
-		SearchCodeAreaColorAssessor searchAssessor = CodeAreaSwingUtils
-				.findColorAssessor((ColorAssessorPainterCapable) codeArea.getPainter(), SearchCodeAreaColorAssessor.class);
-		SearchCondition condition = searchParameters.getCondition();
-		long position = searchParameters.getStartPosition();
-
-		BinaryData searchData = condition.getBinaryData();
-		long searchDataSize = searchData.getDataSize();
 		BinaryData data = codeArea.getContentData();
+		List<SearchMatch> foundMatches = findBinaryMatches(searchParameters, data, searchStatusListener::isCanceled);
+		if (foundMatches == null) {
+			return;
+		}
+		applyMatches(searchParameters, searchStatusListener, foundMatches);
+	}
 
-		List<SearchMatch> foundMatches = new ArrayList<>();
-
+	static @Nullable List<SearchMatch> findBinaryMatches(SearchParameters searchParameters, BinaryData data,
+			BooleanSupplier canceled) {
+		BinaryData searchData = searchParameters.getCondition().getBinaryData();
+		long searchDataSize = searchData.getDataSize();
+		long position = searchParameters.getStartPosition();
 		long dataSize = data.getDataSize();
+		List<SearchMatch> foundMatches = new ArrayList<>();
 		while (position >= 0 && position <= dataSize - searchDataSize) {
+			if (canceled.getAsBoolean()) {
+				return null;
+			}
 			long matchLength = 0;
 			while (matchLength < searchDataSize) {
+				if ((matchLength & 0xFFF) == 0 && canceled.getAsBoolean()) {
+					return null;
+				}
 				if (data.getByte(position + matchLength) != searchData.getByte(matchLength)) {
 					break;
 				}
 				matchLength++;
 			}
-
 			if (matchLength == searchDataSize) {
 				SearchMatch match = new SearchMatch();
 				match.setPosition(position);
@@ -131,38 +144,20 @@ public class BinarySearchServiceImpl implements BinarySearchService {
 				} else {
 					foundMatches.add(match);
 				}
-
-				if (foundMatches.size() == MAX_MATCHES_COUNT || searchParameters.getMatchMode() == SearchParameters.MatchMode.SINGLE) {
+				if (foundMatches.size() == MAX_MATCHES_COUNT
+						|| searchParameters.getMatchMode() == SearchParameters.MatchMode.SINGLE) {
 					break;
 				}
 			}
-
-			position++;
+			position += searchParameters.getSearchDirection() == SearchParameters.SearchDirection.FORWARD ? 1 : -1;
 		}
-
-		searchAssessor.setMatches(foundMatches);
-		if (!foundMatches.isEmpty()) {
-			if (searchParameters.getSearchDirection() == SearchParameters.SearchDirection.BACKWARD) {
-				searchAssessor.setCurrentMatchIndex(foundMatches.size() - 1);
-			} else {
-				searchAssessor.setCurrentMatchIndex(0);
-			}
-			SearchMatch firstMatch = Objects.requireNonNull(searchAssessor.getCurrentMatch());
-			codeArea.revealPosition(firstMatch.getPosition(), 0, codeArea.getActiveSection());
-		}
-		lastSearchParameters.setFromParameters(searchParameters);
-		searchStatusListener.setStatus(
-				new FoundMatches(foundMatches.size(), foundMatches.isEmpty() ? -1 : searchAssessor.getCurrentMatchIndex()),
-				searchParameters.getMatchMode());
-		codeArea.repaint();
+		return foundMatches;
 	}
 
 	/**
 	 * Performs search by text/characters.
 	 */
 	private void searchForText(SearchParameters searchParameters, SearchStatusListener searchStatusListener) {
-		SearchCodeAreaColorAssessor searchAssessor = CodeAreaSwingUtils
-				.findColorAssessor((ColorAssessorPainterCapable) codeArea.getPainter(), SearchCodeAreaColorAssessor.class);
 		SearchCondition condition = searchParameters.getCondition();
 
 		long position = searchParameters.getStartPosition();
@@ -192,7 +187,7 @@ public class BinarySearchServiceImpl implements BinarySearchService {
 			int matchCharLength = 0;
 			int matchLength = 0;
 			while (matchCharLength < (int) searchDataSize) {
-				if (Thread.interrupted()) {
+				if (searchStatusListener.isCanceled()) {
 					return;
 				}
 
@@ -258,25 +253,40 @@ public class BinarySearchServiceImpl implements BinarySearchService {
 			}
 		}
 
-		if (Thread.interrupted()) {
+		if (searchStatusListener.isCanceled()) {
 			return;
 		}
+		applyMatches(searchParameters, searchStatusListener, foundMatches);
+	}
 
-		searchAssessor.setMatches(foundMatches);
-		if (!foundMatches.isEmpty()) {
-			if (searchParameters.getSearchDirection() == SearchParameters.SearchDirection.BACKWARD) {
-				searchAssessor.setCurrentMatchIndex(foundMatches.size() - 1);
-			} else {
-				searchAssessor.setCurrentMatchIndex(0);
+	private void applyMatches(SearchParameters searchParameters, SearchStatusListener searchStatusListener,
+			List<SearchMatch> foundMatches) {
+		UiUtils.uiRun(() -> {
+			if (searchStatusListener.isCanceled()) {
+				return;
 			}
-			SearchMatch firstMatch = searchAssessor.getCurrentMatch();
-			codeArea.revealPosition(firstMatch.getPosition(), 0, codeArea.getActiveSection());
-		}
-		lastSearchParameters.setFromParameters(searchParameters);
-		searchStatusListener.setStatus(
-				new FoundMatches(foundMatches.size(), foundMatches.isEmpty() ? -1 : searchAssessor.getCurrentMatchIndex()),
-				searchParameters.getMatchMode());
-		codeArea.repaint();
+			SearchCodeAreaColorAssessor searchAssessor = getSearchAssessor();
+			searchAssessor.setMatches(foundMatches);
+			if (!foundMatches.isEmpty()) {
+				if (searchParameters.getSearchDirection() == SearchParameters.SearchDirection.BACKWARD) {
+					searchAssessor.setCurrentMatchIndex(foundMatches.size() - 1);
+				} else {
+					searchAssessor.setCurrentMatchIndex(0);
+				}
+				SearchMatch firstMatch = Objects.requireNonNull(searchAssessor.getCurrentMatch());
+				codeArea.revealPosition(firstMatch.getPosition(), 0, codeArea.getActiveSection());
+			}
+			lastSearchParameters.setFromParameters(searchParameters);
+			searchStatusListener.setStatus(
+					new FoundMatches(foundMatches.size(), foundMatches.isEmpty() ? -1 : searchAssessor.getCurrentMatchIndex()),
+					searchParameters.getMatchMode());
+			codeArea.repaint();
+		});
+	}
+
+	private SearchCodeAreaColorAssessor getSearchAssessor() {
+		return CodeAreaSwingUtils.findColorAssessor(
+				(ColorAssessorPainterCapable) codeArea.getPainter(), SearchCodeAreaColorAssessor.class);
 	}
 
 	@Override

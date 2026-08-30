@@ -34,8 +34,11 @@ public final class MethodSearchProvider extends BaseSearchProvider {
 			List<MethodNode> methods = cls.getClassNode().getMethods();
 			if (mthNum < methods.size()) {
 				MethodNode mth = methods.get(mthNum++);
-				if (checkMth(mth.getMethodInfo())) {
-					return convert(mth);
+				if (checkMth(mth.getMethodInfo(), cancelable)) {
+					JNode result = convert(mth);
+					if (result != null) {
+						return result;
+					}
 				}
 			} else {
 				clsNum++;
@@ -47,11 +50,11 @@ public final class MethodSearchProvider extends BaseSearchProvider {
 		}
 	}
 
-	private boolean checkMth(MethodInfo mthInfo) {
-		return isMatch(mthInfo.getShortId())
-				|| isMatch(mthInfo.getAlias())
-				|| isMatch(mthInfo.getFullId())
-				|| isMatch(mthInfo.getAliasFullName());
+	private boolean checkMth(MethodInfo mthInfo, Cancelable cancelable) {
+		return isMatch(mthInfo.getShortId(), cancelable)
+				|| isMatch(mthInfo.getAlias(), cancelable)
+				|| isMatch(mthInfo.getFullId(), cancelable)
+				|| isMatch(mthInfo.getAliasFullName(), cancelable);
 	}
 
 	@Override

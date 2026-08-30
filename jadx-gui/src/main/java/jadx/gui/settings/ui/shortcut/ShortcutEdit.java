@@ -1,8 +1,10 @@
 package jadx.gui.settings.ui.shortcut;
 
 import java.awt.AWTEvent;
+import java.awt.KeyEventDispatcher;
 import java.awt.KeyboardFocusManager;
 import java.awt.Toolkit;
+import java.awt.event.AWTEventListener;
 import java.awt.event.FocusEvent;
 import java.awt.event.FocusListener;
 import java.awt.event.KeyEvent;
@@ -56,6 +58,10 @@ public class ShortcutEdit extends JPanel {
 		textField.reload();
 	}
 
+	public void dispose() {
+		textField.disposeListeners();
+	}
+
 	private void saveShortcut() {
 		settings.getShortcuts().put(actionModel, shortcut);
 		settingsWindow.needReload();
@@ -89,9 +95,12 @@ public class ShortcutEdit extends JPanel {
 
 	private class TextField extends JTextField {
 		private Shortcut tempShortcut;
+		private final KeyEventDispatcher keyEventDispatcher;
+		private final AWTEventListener mouseEventListener;
+		private boolean disposed;
 
 		public TextField() {
-			KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(ev -> {
+			keyEventDispatcher = ev -> {
 				if (!isListening()) {
 					return false;
 				}
@@ -109,7 +118,8 @@ public class ShortcutEdit extends JPanel {
 				}
 				ev.consume();
 				return true;
-			});
+			};
+			KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(keyEventDispatcher);
 
 			addFocusListener(new FocusListener() {
 				@Override
@@ -130,7 +140,7 @@ public class ShortcutEdit extends JPanel {
 				}
 			});
 
-			Toolkit.getDefaultToolkit().addAWTEventListener(event -> {
+			mouseEventListener = event -> {
 				if (!isListening()) {
 					return;
 				}
@@ -164,7 +174,17 @@ public class ShortcutEdit extends JPanel {
 						removeFocus();
 					}
 				}
-			}, AWTEvent.MOUSE_EVENT_MASK);
+			};
+			Toolkit.getDefaultToolkit().addAWTEventListener(mouseEventListener, AWTEvent.MOUSE_EVENT_MASK);
+		}
+
+		private void disposeListeners() {
+			if (disposed) {
+				return;
+			}
+			disposed = true;
+			KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(keyEventDispatcher);
+			Toolkit.getDefaultToolkit().removeAWTEventListener(mouseEventListener);
 		}
 
 		public void reload() {

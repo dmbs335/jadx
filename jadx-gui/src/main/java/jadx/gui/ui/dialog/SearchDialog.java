@@ -14,8 +14,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -44,6 +45,7 @@ import org.slf4j.LoggerFactory;
 import com.formdev.flatlaf.FlatClientProperties;
 import com.formdev.flatlaf.icons.FlatSearchWithHistoryIcon;
 
+import hu.akarnokd.rxjava3.swing.SwingSchedulers;
 import io.reactivex.rxjava3.core.BackpressureStrategy;
 import io.reactivex.rxjava3.core.Emitter;
 import io.reactivex.rxjava3.core.Flowable;
@@ -57,7 +59,6 @@ import jadx.core.dex.nodes.PackageNode;
 import jadx.core.utils.ListUtils;
 import jadx.core.utils.StringUtils;
 import jadx.core.utils.Utils;
-import jadx.gui.jobs.ITaskInfo;
 import jadx.gui.jobs.ITaskProgress;
 import jadx.gui.search.SearchSettings;
 import jadx.gui.search.SearchTask;
@@ -132,6 +133,18 @@ public class SearchDialog extends CommonSearchDialog {
 		searchDialog.setVisible(true);
 	}
 
+	static SearchDialog createHiddenForSmoke(MainWindow mainWindow, SearchPreset preset) {
+		SearchDialog dialog = new SearchDialog(mainWindow, preset, Collections.emptySet());
+		mainWindow.addLoadListener(loaded -> {
+			if (!loaded) {
+				dialog.dispose();
+				return true;
+			}
+			return false;
+		});
+		return dialog;
+	}
+
 	public enum SearchPreset {
 		TEXT, CLASS, COMMENT
 	}
@@ -158,7 +171,8 @@ public class SearchDialog extends CommonSearchDialog {
 	private transient JTextField resExtField;
 	private transient JSpinner resSizeLimit;
 
-	private transient @Nullable SearchTask searchTask;
+	private transient volatile @Nullable SearchTask searchTask;
+	private final LatestSearchRequest<SearchRequest> pendingSearchRequest = new LatestSearchRequest<>();
 	private transient JButton loadAllButton;
 	private transient JButton loadMoreButton;
 	private transient JButton stopBtn;
@@ -177,7 +191,9 @@ public class SearchDialog extends CommonSearchDialog {
 	/**
 	 * Use single thread to do all background work, so additional synchronization not needed
 	 */
-	private final Executor searchBackgroundExecutor = Executors.newSingleThreadExecutor();
+	private final ExecutorService searchBackgroundExecutor = Executors.newSingleThreadExecutor(
+			Utils.simpleThreadFactory("search"));
+	private final ProjectSessionGuard lifecycle;
 
 	// save values between searches
 	private final ValueCache<String, List<JavaClass>> includedClsCache = new ValueCache<>();
@@ -185,6 +201,7 @@ public class SearchDialog extends CommonSearchDialog {
 
 	private SearchDialog(MainWindow mainWindow, SearchPreset preset, Set<SearchOptions> additionalOptions) {
 		super(mainWindow, NLS.str("menu.text_search"));
+		this.lifecycle = new ProjectSessionGuard(mainWindow.getWrapper()::getProjectGeneration);
 		this.searchPreset = preset;
 		this.options = buildOptions(preset);
 		this.options.addAll(additionalOptions);
@@ -198,15 +215,24 @@ public class SearchDialog extends CommonSearchDialog {
 
 	@Override
 	public void dispose() {
+		boolean firstDispose = lifecycle.close();
 		if (searchDisposable != null && !searchDisposable.isDisposed()) {
 			searchDisposable.dispose();
 		}
 		resultsModel.clear();
 		removeActiveTabListener();
-		searchBackgroundExecutor.execute(() -> {
-			stopSearchTask();
-			unloadTempData();
-		});
+		if (firstDispose) {
+			searchBackgroundExecutor.execute(() -> {
+				if (stopSearchTask()) {
+					unloadTempData();
+				} else {
+					// A decompiler worker still owns class state. Unloading here races the
+					// worker and can corrupt a later search; project close/reload will reclaim it.
+					LOG.debug("Skip search cache unload while canceled task is still finishing");
+				}
+			});
+			searchBackgroundExecutor.shutdown();
+		}
 		super.dispose();
 	}
 
@@ -500,8 +526,6 @@ public class SearchDialog extends CommonSearchDialog {
 		resultsActionsPanel.add(loadMoreButton);
 		resultsActionsPanel.add(Box.createRigidArea(new Dimension(10, 0)));
 		resultsActionsPanel.add(stopBtn);
-		resultsActionsPanel.add(Box.createRigidArea(new Dimension(10, 0)));
-		resultsActionsPanel.add(stopBtn);
 		super.addResultsActions(resultsActionsPanel);
 		resultsActionsPanel.add(Box.createRigidArea(new Dimension(10, 0)));
 		resultsActionsPanel.add(sortBtn);
@@ -525,6 +549,25 @@ public class SearchDialog extends CommonSearchDialog {
 
 		public synchronized void emitSearch() {
 			this.emitter.onNext(searchField.getText());
+		}
+	}
+
+	private static final class SearchRequest {
+		private final String text;
+		private final String searchPackage;
+		private final String resourceFilter;
+		private final int resourceSizeLimit;
+		private final Set<SearchOptions> options;
+		private final @Nullable JumpPosition activePosition;
+
+		private SearchRequest(String text, String searchPackage, String resourceFilter,
+				int resourceSizeLimit, Set<SearchOptions> options, @Nullable JumpPosition activePosition) {
+			this.text = text;
+			this.searchPackage = searchPackage;
+			this.resourceFilter = resourceFilter;
+			this.resourceSizeLimit = resourceSizeLimit;
+			this.options = options;
+			this.activePosition = activePosition;
 		}
 	}
 
@@ -556,71 +599,187 @@ public class SearchDialog extends CommonSearchDialog {
 		}
 		searchDisposable = searchEvents
 				.debounce(100, TimeUnit.MILLISECONDS)
+				.observeOn(SwingSchedulers.edt())
+				.map(ignored -> captureSearchRequest())
 				.observeOn(Schedulers.from(searchBackgroundExecutor))
-				.subscribe(t -> this.search(searchField.getText()));
+				.subscribe(this::handleSearchEvent,
+						error -> LOG.error("Search event stream failed", error));
 
 		// set initial values
 		optionsListener.sendUpdate(options);
 	}
 
-	private void search(String text) {
-		UiUtils.notUiThreadGuard();
-		stopSearchTask();
-		UiUtils.uiRun(this::resetSearch);
-		searchTask = prepareSearch(text);
-		if (searchTask == null) {
-			return;
-		}
-		UiUtils.uiRunAndWait(() -> {
-			updateTableHighlight();
-			prepareForSearch();
-		});
-		this.searchTask.setResultsLimit(mainWindow.getSettings().getSearchResultsPerPage());
-		this.searchTask.setProgressListener(this::updateProgress);
-		this.searchTask.fetchResults();
-		LOG.debug("Total search items count estimation: {}", this.searchTask.getTaskProgress().total());
+	private SearchRequest captureSearchRequest() {
+		UiUtils.uiThreadGuard();
+		Set<SearchOptions> optionsSnapshot = EnumSet.noneOf(SearchOptions.class);
+		optionsSnapshot.addAll(options);
+		JumpPosition activePosition = optionsSnapshot.contains(ACTIVE_TAB)
+				? mainWindow.getTabbedPane().getCurrentPosition()
+				: null;
+		return new SearchRequest(
+				searchField.getText(),
+				packageField.getText().trim(),
+				resExtField.getText().trim(),
+				(Integer) resSizeLimit.getValue(),
+				optionsSnapshot,
+				activePosition);
 	}
 
-	private SearchTask prepareSearch(String text) {
-		if (text == null || options.isEmpty()) {
+	void submitForSmoke(String text) {
+		UiUtils.uiThreadGuard();
+		searchField.setText(text);
+		SearchRequest request = captureSearchRequest();
+		if (!tryExecuteSearchBackground(() -> handleSearchEvent(request))) {
+			throw new IllegalStateException("Search dialog is no longer active");
+		}
+	}
+
+	void cancelForSmoke() {
+		UiUtils.uiThreadGuard();
+		pauseSearch();
+	}
+
+	boolean awaitSmokeTaskStarted(long timeoutMs) throws InterruptedException {
+		UiUtils.notUiThreadGuard();
+		long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+		while (System.nanoTime() < deadline) {
+			if (searchTask != null || !lifecycle.isActive()) {
+				return searchTask != null;
+			}
+			Thread.sleep(10);
+		}
+		return false;
+	}
+
+	boolean awaitSmokeTaskFinished(long timeoutMs) throws InterruptedException {
+		UiUtils.notUiThreadGuard();
+		long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+		while (System.nanoTime() < deadline) {
+			SearchTask task = searchTask;
+			if (task == null) {
+				if (!pendingSearchRequest.hasPending()) {
+					return true;
+				}
+			} else if (task.waitTask() && !pendingSearchRequest.hasPending()) {
+				return true;
+			}
+			Thread.sleep(10);
+		}
+		return false;
+	}
+
+	int getSmokeResultCount() {
+		UiUtils.uiThreadGuard();
+		updateTable();
+		return resultsModel.getRowCount();
+	}
+
+	private void handleSearchEvent(SearchRequest request) {
+		if (!lifecycle.isActive()) {
+			return;
+		}
+		try {
+			pendingSearchRequest.offer(request);
+			searchPendingRequest();
+		} catch (Exception e) {
+			// Keep the Rx subscription alive: otherwise one failed search makes all
+			// later search events look like a deadlocked dialog.
+			LOG.error("Search failed for '{}'", request.text, e);
+			UiUtils.uiRun(() -> {
+				stopBtn.setEnabled(false);
+				progressFinishedCommon();
+			});
+		}
+	}
+
+	private void searchPendingRequest() {
+		UiUtils.notUiThreadGuard();
+		SearchRequest request = pendingSearchRequest.peek();
+		if (request == null) {
+			return;
+		}
+		if (!stopSearchTask()) {
+			// Keep only the newest request while the canceled worker finishes. Submitting
+			// it now would queue every keystroke behind the same slow search task.
+			return;
+		}
+		if (!pendingSearchRequest.claim(request)) {
+			return;
+		}
+		if (!lifecycle.isActive()) {
+			return;
+		}
+		UiUtils.uiRun(() -> {
+			if (lifecycle.isActive()) {
+				resetSearch();
+			}
+		});
+		SearchTask task = prepareSearch(request);
+		if (task == null || !lifecycle.isActive()) {
+			return;
+		}
+		searchTask = task;
+		UiUtils.uiRunAndWait(() -> {
+			if (lifecycle.isActive() && searchTask == task) {
+				updateTableHighlight(request);
+				prepareForSearch();
+			}
+		});
+		if (!lifecycle.isActive() || searchTask != task) {
+			task.cancel();
+			return;
+		}
+		task.setResultsLimit(mainWindow.getSettings().getSearchResultsPerPage());
+		task.setProgressListener(this::updateProgress);
+		task.fetchResults();
+		LOG.debug("Total search items count estimation: {}", task.getTaskProgress().total());
+	}
+
+	private SearchTask prepareSearch(SearchRequest request) {
+		String text = request.text;
+		Set<SearchOptions> requestOptions = request.options;
+		if (text == null || requestOptions.isEmpty()) {
 			return null;
 		}
 		// allow empty text for search in comments
-		if (text.isEmpty() && !options.contains(COMMENT)) {
+		if (text.isEmpty() && !requestOptions.contains(COMMENT)) {
 			return null;
 		}
-		LOG.debug("Building search for '{}', options: {}", text, options);
+		LOG.debug("Building search for '{}', options: {}", text, requestOptions);
 		SearchSettings searchSettings = new SearchSettings(text);
-		searchSettings.setIgnoreCase(options.contains(IGNORE_CASE));
-		searchSettings.setUseRegex(options.contains(USE_REGEX));
-		searchSettings.setSearchPkgStr(packageField.getText().trim());
-		searchSettings.setResFilterStr(resExtField.getText().trim());
-		searchSettings.setResSizeLimit((Integer) resSizeLimit.getValue());
+		searchSettings.setIgnoreCase(requestOptions.contains(IGNORE_CASE));
+		searchSettings.setUseRegex(requestOptions.contains(USE_REGEX));
+		searchSettings.setSearchPkgStr(request.searchPackage);
+		searchSettings.setResFilterStr(request.resourceFilter);
+		searchSettings.setResSizeLimit(request.resourceSizeLimit);
 
 		String error = searchSettings.prepare(mainWindow);
-		UiUtils.highlightAsErrorField(searchField, !StringUtils.isEmpty(error));
+		UiUtils.uiRun(() -> UiUtils.highlightAsErrorField(searchField, !StringUtils.isEmpty(error)));
 		if (!StringUtils.isEmpty(error)) {
-			resultsInfoLabel.setText(error);
+			UiUtils.uiRun(() -> resultsInfoLabel.setText(error));
 			return null;
 		}
 
-		SearchTask newSearchTask = new SearchTask(mainWindow, this::addSearchResult, this::searchFinished);
-		if (!buildSearch(newSearchTask, text, searchSettings)) {
-			UiUtils.highlightAsErrorField(searchField, true);
+		SearchTask newSearchTask = new SearchTask(mainWindow, this::addSearchResult, this::searchFinished,
+				lifecycle::isActive);
+		if (!buildSearch(newSearchTask, request, searchSettings)) {
+			UiUtils.uiRun(() -> UiUtils.highlightAsErrorField(searchField, true));
 			return null;
 		}
 		// save search settings
-		mainWindow.getProject().setSearchResourcesFilter(resExtField.getText().trim());
+		mainWindow.getProject().setSearchResourcesFilter(request.resourceFilter);
 		mainWindow.getProject().setSearchResourcesSizeLimit(searchSettings.getResSizeLimit());
 		return newSearchTask;
 	}
 
-	private boolean buildSearch(SearchTask newSearchTask, String text, SearchSettings searchSettings) {
+	private boolean buildSearch(SearchTask newSearchTask, SearchRequest request, SearchSettings searchSettings) {
+		String text = request.text;
+		Set<SearchOptions> requestOptions = request.options;
 		List<JavaClass> searchClasses;
-		if (options.contains(ACTIVE_TAB)) {
-			JumpPosition currentPos = mainWindow.getTabbedPane().getCurrentPosition();
+		if (requestOptions.contains(ACTIVE_TAB)) {
+			JumpPosition currentPos = request.activePosition;
 			if (currentPos == null) {
-				resultsInfoLabel.setText("Can't search in current tab");
+				UiUtils.uiRun(() -> resultsInfoLabel.setText("Can't search in current tab"));
 				return false;
 			}
 			JNode currentNode = currentPos.getNode();
@@ -632,7 +791,7 @@ public class SearchDialog extends CommonSearchDialog {
 				searchSettings.setActiveResource((JResource) currentNode);
 				searchClasses = Collections.emptyList();
 			} else {
-				resultsInfoLabel.setText("Can't search in current tab");
+				UiUtils.uiRun(() -> resultsInfoLabel.setText("Can't search in current tab"));
 				return false;
 			}
 		} else {
@@ -645,7 +804,7 @@ public class SearchDialog extends CommonSearchDialog {
 					.filter(searchSettings::isInSearchPkg)
 					.collect(Collectors.toList());
 		}
-		if (text.isEmpty() && options.contains(COMMENT)) {
+		if (text.isEmpty() && requestOptions.contains(COMMENT)) {
 			// allow empty text for comment search
 			newSearchTask.addProviderJob(new CommentSearchProvider(mainWindow, searchSettings, searchClasses));
 			return true;
@@ -653,13 +812,13 @@ public class SearchDialog extends CommonSearchDialog {
 		if (!searchClasses.isEmpty()) {
 			// using ordered execution for fast tasks
 			MergedSearchProvider merged = new MergedSearchProvider();
-			if (options.contains(CLASS)) {
+			if (requestOptions.contains(CLASS)) {
 				merged.add(new ClassSearchProvider(mainWindow, searchSettings, searchClasses));
 			}
-			if (options.contains(METHOD)) {
+			if (requestOptions.contains(METHOD)) {
 				merged.add(new MethodSearchProvider(mainWindow, searchSettings, searchClasses));
 			}
-			if (options.contains(FIELD)) {
+			if (requestOptions.contains(FIELD)) {
 				merged.add(new FieldSearchProvider(mainWindow, searchSettings, searchClasses));
 			}
 			if (!merged.isEmpty()) {
@@ -667,7 +826,7 @@ public class SearchDialog extends CommonSearchDialog {
 				newSearchTask.addProviderJob(merged);
 			}
 
-			if (options.contains(CODE)) {
+			if (requestOptions.contains(CODE)) {
 				int clsCount = searchClasses.size();
 				if (clsCount == 1) {
 					newSearchTask.addProviderJob(new CodeSearchProvider(mainWindow, searchSettings, searchClasses, null));
@@ -681,11 +840,11 @@ public class SearchDialog extends CommonSearchDialog {
 					}
 				}
 			}
-			if (options.contains(COMMENT)) {
+			if (requestOptions.contains(COMMENT)) {
 				newSearchTask.addProviderJob(new CommentSearchProvider(mainWindow, searchSettings, searchClasses));
 			}
 		}
-		if (options.contains(RESOURCE)) {
+		if (requestOptions.contains(RESOURCE)) {
 			newSearchTask.addProviderJob(new ResourceSearchProvider(mainWindow, searchSettings, this));
 		}
 		return true;
@@ -702,35 +861,56 @@ public class SearchDialog extends CommonSearchDialog {
 
 	private void pauseSearch() {
 		stopBtn.setEnabled(false);
-		searchBackgroundExecutor.execute(() -> {
+		tryExecuteSearchBackground(() -> {
 			if (searchTask != null) {
 				searchTask.cancel();
 			}
 		});
 	}
 
-	private void stopSearchTask() {
+	private boolean stopSearchTask() {
 		UiUtils.notUiThreadGuard();
 		if (searchTask != null) {
-			searchTask.cancel();
-			searchTask.waitTask();
-			searchTask = null;
+			SearchTask task = searchTask;
+			task.cancel();
+			boolean finished = task.waitTask();
+			if (finished && searchTask == task) {
+				searchTask = null;
+			}
+			return finished;
 		}
+		return true;
 	}
 
 	private void loadMoreResults(boolean all) {
-		searchBackgroundExecutor.execute(() -> {
+		tryExecuteSearchBackground(() -> {
 			if (searchTask == null) {
 				return;
 			}
-			searchTask.cancel();
-			searchTask.waitTask();
+			SearchTask task = searchTask;
+			task.cancel();
+			if (!task.waitTask() || searchTask != task) {
+				return;
+			}
 			UiUtils.uiRunAndWait(this::prepareForSearch);
 			if (all) {
-				searchTask.setResultsLimit(0);
+				task.setResultsLimit(0);
 			}
-			searchTask.fetchResults();
+			task.fetchResults();
 		});
+	}
+
+	private boolean tryExecuteSearchBackground(Runnable runnable) {
+		if (!lifecycle.isActive()) {
+			return false;
+		}
+		try {
+			searchBackgroundExecutor.execute(runnable);
+			return true;
+		} catch (RejectedExecutionException e) {
+			LOG.debug("Ignore search action during dialog shutdown");
+			return false;
+		}
 	}
 
 	private void resetSearch() {
@@ -756,6 +936,9 @@ public class SearchDialog extends CommonSearchDialog {
 	}
 
 	private void addSearchResult(JNode node) {
+		if (!lifecycle.isActive()) {
+			return;
+		}
 		Objects.requireNonNull(node);
 		synchronized (pendingResults) {
 			UiUtils.notUiThreadGuard();
@@ -773,31 +956,68 @@ public class SearchDialog extends CommonSearchDialog {
 		}
 	}
 
-	private void updateTableHighlight() {
-		String text = searchField.getText();
-		updateHighlightContext(text, !options.contains(IGNORE_CASE), options.contains(USE_REGEX), false);
-		cache.setLastSearch(text);
-		cache.setLastSearchPackage(packageField.getText());
-		cache.getLastSearchOptions().put(searchPreset, options);
+	private void updateTableHighlight(SearchRequest request) {
+		updateHighlightContext(request.text,
+				!request.options.contains(IGNORE_CASE), request.options.contains(USE_REGEX), false);
+		cache.setLastSearch(request.text);
+		cache.setLastSearchPackage(request.searchPackage);
+		cache.getLastSearchOptions().put(searchPreset, request.options);
 		if (!mainWindow.getSettings().isUseAutoSearch()) {
-			mainWindow.getProject().addToSearchHistory(text);
+			mainWindow.getProject().addToSearchHistory(request.text);
 		}
 	}
 
 	private void updateProgress(ITaskProgress progress) {
+		if (!lifecycle.isActive()) {
+			return;
+		}
 		UiUtils.uiRun(() -> {
+			if (!lifecycle.isActive()) {
+				return;
+			}
 			progressPane.setProgress(progress);
 			updateTable();
 		});
 	}
 
 	public void updateProgressLabel(String text) {
-		UiUtils.uiRun(() -> progressInfoLabel.setText(text));
+		if (lifecycle.isActive()) {
+			UiUtils.uiRun(() -> {
+				if (lifecycle.isActive()) {
+					progressInfoLabel.setText(text);
+				}
+			});
+		}
 	}
 
-	private void searchFinished(ITaskInfo status, Boolean complete) {
+	private void searchFinished(SearchTask task, Boolean complete) {
 		UiUtils.uiThreadGuard();
-		LOG.debug("Search complete: {}, complete: {}", status, complete);
+		if (!lifecycle.isActive()) {
+			LOG.debug("Ignore search completion after dialog disposal");
+			return;
+		}
+		if (task != searchTask) {
+			LOG.debug("Ignore stale search task completion");
+			return;
+		}
+		if (pendingSearchRequest.hasPending()) {
+			searchTask = null;
+			tryExecuteSearchBackground(this::searchPendingRequest);
+			return;
+		}
+		String failure = task.getFailure();
+		if (failure != null) {
+			loadAllButton.setEnabled(false);
+			loadMoreButton.setEnabled(false);
+			stopBtn.setEnabled(false);
+			progressFinishedCommon();
+			updateTable();
+			updateProgressLabel(failure);
+			UiUtils.highlightAsErrorField(searchField, true);
+			sortBtn.setEnabled(resultsModel.getRowCount() != 0);
+			return;
+		}
+		LOG.debug("Search complete: {}, complete: {}", task.getTitle(), complete);
 		loadAllButton.setEnabled(!complete);
 		loadMoreButton.setEnabled(!complete);
 		stopBtn.setEnabled(false);
@@ -805,6 +1025,24 @@ public class SearchDialog extends CommonSearchDialog {
 		updateTable();
 		updateProgressLabel(complete);
 		sortBtn.setEnabled(resultsModel.getRowCount() != 0);
+		if (complete && lifecycle.isActive()) {
+			scheduleCachedClassUnload(task);
+		}
+	}
+
+	private void scheduleCachedClassUnload(SearchTask completedTask) {
+		try {
+			searchBackgroundExecutor.execute(() -> {
+				// A newer search may already be queued or active. In that case its task owns
+				// the class processing state and will schedule cleanup at its own boundary.
+				if (lifecycle.isActive() && searchTask == completedTask) {
+					int unloaded = mainWindow.getWrapper().unloadCachedClasses();
+					LOG.debug("Released cached decompiler IR for {} classes", unloaded);
+				}
+			});
+		} catch (RejectedExecutionException e) {
+			LOG.debug("Skip cached class unload during search shutdown");
+		}
 	}
 
 	private void unloadTempData() {

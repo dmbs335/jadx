@@ -5,6 +5,18 @@ public class SuspendInfo {
 	private boolean newRound;
 	private final InfoSetter updater = new InfoSetter();
 
+	SuspendInfo snapshot() {
+		SuspendInfo copy = new SuspendInfo();
+		copy.terminated = terminated;
+		copy.newRound = newRound;
+		copy.updater.thread = updater.thread;
+		copy.updater.clazz = updater.clazz;
+		copy.updater.method = updater.method;
+		copy.updater.offset = updater.offset;
+		copy.updater.changed = updater.changed;
+		return copy;
+	}
+
 	public long getThreadID() {
 		return updater.thread;
 	}
