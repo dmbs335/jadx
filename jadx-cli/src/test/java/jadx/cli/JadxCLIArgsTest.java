@@ -34,6 +34,21 @@ public class JadxCLIArgsTest {
 	}
 
 	@Test
+	public void testDependencyInputs() {
+		JadxCLIArgs args = parse(
+				"--dependency-input", "dependency-one.dex",
+				"--dependency-input", "dependency-two.dex",
+				"primary.dex");
+
+		assertThat(args.getFiles()).containsExactly("primary.dex");
+		assertThat(args.getDependencyInputFiles())
+				.containsExactly("dependency-one.dex", "dependency-two.dex");
+		assertThat(args.toJadxArgs().getDependencyInputFiles())
+				.extracting(java.io.File::getPath)
+				.containsExactly("dependency-one.dex", "dependency-two.dex");
+	}
+
+	@Test
 	public void testOptionsOverride() {
 		assertThat(override(new JadxCLIArgs(), "--no-imports").isUseImports()).isFalse();
 		assertThat(override(new JadxCLIArgs(), "--no-debug-info").isDebugInfo()).isFalse();

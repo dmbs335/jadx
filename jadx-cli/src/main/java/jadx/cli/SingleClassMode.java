@@ -2,6 +2,7 @@ package jadx.cli;
 
 import java.io.File;
 import java.util.List;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
@@ -56,6 +57,12 @@ public class SingleClassMode {
 				throw new JadxArgsValidateException("Found " + size + " classes, single class output can't be used");
 			}
 		}
+		if (jadx.getArgs().isCfgOutput() || jadx.getArgs().isRawCFGOutput()) {
+			String targetClassName = clsForProcess.getClassInfo().getFullName();
+			Predicate<String> currentFilter = jadx.getArgs().getCfgOutputFilter();
+			jadx.getArgs().setCfgOutputFilter(name -> targetClassName.equals(name)
+					&& (currentFilter == null || currentFilter.test(name)));
+		}
 		ICodeInfo codeInfo;
 		try {
 			codeInfo = clsForProcess.decompile();
@@ -82,7 +89,7 @@ public class SingleClassMode {
 		} else {
 			LOG.info("Saving class '{}' to file '{}'", clsForProcess.getFullName(), resultOut.getAbsolutePath());
 		}
-		SaveCode.save(codeInfo.getCodeStr(), resultOut);
+		SaveCode.save(codeInfo.getCodeStr(), resultOut, jadx.getArgs());
 		return true;
 	}
 }
