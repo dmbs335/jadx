@@ -4,11 +4,14 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -42,7 +45,7 @@ class DiskCodeCacheTest extends IntegrationTest {
 
 		DiskCodeCache cache = new DiskCodeCache(clsNode.root(), tempDir);
 		String codeVersion = Files.readString(tempDir.resolve("code").resolve("code-version"));
-		assertThat(codeVersion).startsWith("18:af2:");
+		assertThat(codeVersion).startsWith("20:af2:");
 
 		String clsKey = clsNode.getFullName();
 		cache.add(clsKey, codeInfo);
@@ -59,7 +62,7 @@ class DiskCodeCacheTest extends IntegrationTest {
 	}
 
 	@Test
-	public void testCorruptedEntryIsRegenerated() throws IOException {
+	public void testCorruptedEntryIsRegenerated() throws Exception {
 		disableCompilation();
 		getArgs().setCodeCache(NoOpCodeCache.INSTANCE);
 		ClassNode clsNode = getClassNode(DiskCodeCacheTest.class);
@@ -70,18 +73,17 @@ class DiskCodeCacheTest extends IntegrationTest {
 		initialCache.add(clsKey, expected);
 		initialCache.close();
 
-		Path entryFile = findCacheFile(tempDir.resolve("code/entries"), ".jadxbc");
-		Files.delete(entryFile);
+		Path dbFile = tempDir.resolve("code/entries.db");
+		executeSql(dbFile, "DELETE FROM code_entries");
 		DiskCodeCache missingSourceCache = new DiskCodeCache(clsNode.root(), tempDir);
 		getArgs().setCodeCache(missingSourceCache);
 		assertThat(clsNode.getCode().getCodeStr()).isEqualTo(expected.getCodeStr());
 		missingSourceCache.close();
-		Path regeneratedEntry = findCacheFile(tempDir.resolve("code/entries"), ".jadxbc");
 		DiskCodeCache regeneratedCache = new DiskCodeCache(clsNode.root(), tempDir);
 		assertThat(regeneratedCache.getCode(clsKey)).isEqualTo(expected.getCodeStr());
 		regeneratedCache.close();
 
-		Files.write(regeneratedEntry, new byte[] { 'b', 'a', 'd' });
+		executeSql(dbFile, "UPDATE code_entries SET bundle = x'626164'");
 		DiskCodeCache corruptMetadataCache = new DiskCodeCache(clsNode.root(), tempDir);
 		getArgs().setCodeCache(corruptMetadataCache);
 		assertThat(clsNode.getCode().getCodeStr()).isEqualTo(expected.getCodeStr());
@@ -178,9 +180,7 @@ class DiskCodeCacheTest extends IntegrationTest {
 		DiskCodeCache reopened = new DiskCodeCache(clsNode.root(), tempDir);
 		assertThat(reopened.getCode(clsKey)).isEqualTo("new");
 		reopened.close();
-		try (Stream<Path> stagingFiles = Files.list(tempDir.resolve("code-staging"))) {
-			assertThat(stagingFiles.filter(Files::isRegularFile)).isEmpty();
-		}
+		assertThat(tempDir.resolve("code-staging")).doesNotExist();
 	}
 
 	@Test
@@ -219,6 +219,7 @@ class DiskCodeCacheTest extends IntegrationTest {
 				.isInstanceOf(RejectedExecutionException.class);
 		assertThat(cache.contains(clsKey)).isFalse();
 		assertThat(cache.getCode(clsKey)).isNull();
+		cache.close();
 	}
 
 	@Test
@@ -231,11 +232,9 @@ class DiskCodeCacheTest extends IntegrationTest {
 		cache.add(clsKey, clsNode.getCode());
 		cache.close();
 
-		Path entry = findCacheFile(tempDir.resolve("code/entries"), ".jadxbc");
-		assertThat(entry).isRegularFile();
-		try (Stream<Path> files = Files.walk(tempDir.resolve("code/entries"))) {
-			assertThat(files.filter(Files::isRegularFile)).hasSize(1);
-		}
+		Path dbFile = tempDir.resolve("code/entries.db");
+		assertThat(dbFile).isRegularFile();
+		assertThat(queryEntryCount(dbFile)).isEqualTo(1);
 	}
 
 	@Test
@@ -254,10 +253,8 @@ class DiskCodeCacheTest extends IntegrationTest {
 		second.add(clsKey, new SimpleCodeInfo("second"));
 		second.close();
 		assertThat(first.getCode(clsKey)).isEqualTo("second");
-		Path entry = findCacheFile(tempDir.resolve("code/entries"), ".jadxbc");
-		try (Stream<Path> entries = Files.list(entry.getParent())) {
-			assertThat(entries.filter(Files::isRegularFile)).hasSize(1);
-		}
+		first.close();
+		assertThat(queryEntryCount(tempDir.resolve("code/entries.db"))).isEqualTo(1);
 	}
 
 	private static ExecutorService getWritePool(DiskCodeCache cache) throws Exception {
@@ -291,12 +288,18 @@ class DiskCodeCacheTest extends IntegrationTest {
 		}
 	}
 
-	private static Path findCacheFile(Path dir, String suffix) throws IOException {
-		try (Stream<Path> files = Files.walk(dir)) {
-			return files.filter(Files::isRegularFile)
-					.filter(path -> path.getFileName().toString().endsWith(suffix))
-					.findFirst()
-					.orElseThrow();
+	private static void executeSql(Path dbFile, String sql) throws Exception {
+		try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile.toAbsolutePath());
+				Statement statement = connection.createStatement()) {
+			statement.executeUpdate(sql);
+		}
+	}
+
+	private static int queryEntryCount(Path dbFile) throws Exception {
+		try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile.toAbsolutePath());
+				Statement statement = connection.createStatement();
+				ResultSet result = statement.executeQuery("SELECT count(*) FROM code_entries")) {
+			return result.getInt(1);
 		}
 	}
 }

@@ -3,16 +3,13 @@ package jadx.gui.cache.code.disk;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,7 +19,6 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.stream.Stream;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -43,29 +39,27 @@ import jadx.core.utils.files.FileUtils;
 public class DiskCodeCache implements ICodeCache {
 	private static final Logger LOG = LoggerFactory.getLogger(DiskCodeCache.class);
 
-	private static final int DATA_FORMAT_VERSION = 18;
-	private static final String ENTRY_SUFFIX = ".jadxbc";
+	private static final int DATA_FORMAT_VERSION = 20;
 	private static final Map<Path, ProcessLockCoordinator> PROCESS_LOCKS = new ConcurrentHashMap<>();
 
 	private final Path baseDir;
-	private final Path entriesDir;
+	private final Path entriesDbFile;
 	private final Path codeVersionFile;
 	private final Path processLockFile;
 	private final ProcessLockCoordinator processLockCoordinator;
-	private final Path stagingRoot;
 	private final String codeVersion;
 	private final CodeMetadataAdapter codeMetadataAdapter;
+	private final SqliteCodeCacheStore store;
 	private final ExecutorService writePool;
 	private final Map<String, CacheData> clsDataMap;
 
 	public DiskCodeCache(RootNode root, Path projectCacheDir) {
 		baseDir = projectCacheDir.resolve("code");
-		entriesDir = baseDir.resolve("entries");
+		entriesDbFile = baseDir.resolve("entries.db");
 		codeVersionFile = baseDir.resolve("code-version");
 		processLockFile = projectCacheDir.resolve("code-cache.lock").toAbsolutePath().normalize();
 		processLockCoordinator = PROCESS_LOCKS.computeIfAbsent(
 				processLockFile, ignored -> new ProcessLockCoordinator());
-		stagingRoot = projectCacheDir.resolve("code-staging");
 		JadxArgs args = root.getArgs();
 		codeVersion = buildCodeVersion(args, root.getDecompiler());
 		writePool = buildWritePool(args.getThreadsCount());
@@ -73,22 +67,24 @@ public class DiskCodeCache implements ICodeCache {
 		clsDataMap = buildClassDataMap(root.getClasses());
 		try {
 			withProcessLock(() -> {
-				if (checkCodeVersion()) {
-					loadCachedSet();
-				} else {
+				if (!checkCodeVersion()) {
 					reset();
 				}
+				return null;
+			});
+			store = new SqliteCodeCacheStore(entriesDbFile);
+			withProcessLock(() -> {
+				loadCachedSet();
 				return null;
 			});
 		} catch (Exception e) {
 			throw new JadxRuntimeException("Failed to initialize disk code cache", e);
 		}
-		FileUtils.makeDirs(stagingRoot);
 	}
 
 	private static ExecutorService buildWritePool(int threads) {
-		// Keep decompiler workers independent from short NTFS latency bursts. Entries stay bounded
-		// because every queued item retains generated code and metadata until publication completes.
+		// Keep decompiler workers independent from compression and SQLite latency. Entries stay
+		// bounded because every queued item retains generated code and metadata until publication.
 		int queueCapacity = Math.max(256, threads * 128);
 		ThreadPoolExecutor executor = new ThreadPoolExecutor(
 				threads,
@@ -146,7 +142,7 @@ public class DiskCodeCache implements ICodeCache {
 				FileUtils.deleteDirIfExists(baseDir.getParent().resolve("sources"));
 				FileUtils.deleteDirIfExists(baseDir.getParent().resolve("metadata"));
 			}
-			FileUtils.makeDirs(entriesDir);
+			FileUtils.makeDirs(baseDir);
 			FileUtils.writeFile(codeVersionFile, codeVersion);
 			if (LOG.isDebugEnabled()) {
 				LOG.info("Reset done in: {}ms", System.currentTimeMillis() - start);
@@ -174,54 +170,25 @@ public class DiskCodeCache implements ICodeCache {
 	}
 
 	private void writeEntry(String clsFullName, CacheData clsData, WriteRequest write, ICodeInfo codeInfo) {
-		Path stagingFile = null;
 		try {
 			int clsId = clsData.getClsId();
-			Path entryFile = getEntryFile(clsId);
-			stagingFile = stagingRoot.resolve(Integer.toHexString(clsId) + '-' + write.fileToken + ".tmp");
-			codeMetadataAdapter.writeBundle(stagingFile, codeInfo);
-			Path completedStagingFile = stagingFile;
+			byte[] bundle = codeMetadataAdapter.writeBundle(codeInfo);
 			boolean published = withProcessLock(() -> {
 				synchronized (clsData) {
 					if (!clsData.isCurrentWrite(write.generation) || !checkCodeVersion()) {
 						return false;
 					}
-					FileUtils.makeDirs(entryFile.getParent());
-					moveAtomically(completedStagingFile, entryFile);
+					store.write(clsId, bundle);
 					clsData.finishWrite(write.generation);
 					return true;
 				}
 			});
-			if (published) {
-				// Atomic move consumed the staging file.
-				stagingFile = null;
-			} else {
+			if (!published) {
 				clsData.failWrite(write.generation);
 			}
 		} catch (Exception e) {
 			LOG.error("Failed to write code cache for " + clsFullName, e);
 			clsData.failWrite(write.generation);
-		} finally {
-			deleteTemporary(stagingFile);
-		}
-	}
-
-	private static void moveAtomically(Path source, Path target) throws IOException {
-		try {
-			Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-		} catch (AtomicMoveNotSupportedException e) {
-			Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
-		}
-	}
-
-	private static void deleteTemporary(@Nullable Path path) {
-		if (path == null) {
-			return;
-		}
-		try {
-			Files.deleteIfExists(path);
-		} catch (IOException e) {
-			LOG.debug("Failed to delete temporary code cache file: {}", path, e);
 		}
 	}
 
@@ -241,12 +208,12 @@ public class DiskCodeCache implements ICodeCache {
 				if (tmpCodeInfo != null) {
 					return tmpCodeInfo.getCodeStr();
 				}
-				Path entryFile = getEntryFile(clsData.getClsId());
-				refreshPublishedEntry(clsData, entryFile);
+				refreshPublishedEntry(clsData);
 				if (!clsData.isCached()) {
 					return null;
 				}
-				return codeMetadataAdapter.readCode(entryFile);
+				byte[] bundle = store.read(clsData.getClsId());
+				return bundle == null ? null : codeMetadataAdapter.readCode(bundle);
 			}
 		} catch (Exception e) {
 			LOG.error("Failed to read class code for {}", clsFullName, e);
@@ -276,12 +243,12 @@ public class DiskCodeCache implements ICodeCache {
 				if (tmpCodeInfo != null) {
 					return tmpCodeInfo;
 				}
-				Path entryFile = getEntryFile(clsData.getClsId());
-				refreshPublishedEntry(clsData, entryFile);
+				refreshPublishedEntry(clsData);
 				if (!clsData.isCached()) {
 					return ICodeInfo.EMPTY;
 				}
-				return codeMetadataAdapter.readAndBuild(entryFile, knownCode);
+				byte[] bundle = store.read(clsData.getClsId());
+				return bundle == null ? ICodeInfo.EMPTY : codeMetadataAdapter.readAndBuild(bundle, knownCode);
 			}
 		} catch (Exception e) {
 			LOG.error("Failed to read code cache for {}", clsFullName, e);
@@ -293,12 +260,12 @@ public class DiskCodeCache implements ICodeCache {
 	/**
 	 * Cold-cache misses are the overwhelmingly common path during the first decompilation. Avoid
 	 * touching the bundle unless this process already knows about an entry or another process has
-	 * installed its atomic file. A publisher can win immediately after the check; that only causes
-	 * one harmless local cache miss and the next lookup observes it.
+	 * published one. A publisher can win immediately after the check; that only causes one harmless
+	 * local cache miss and the next lookup observes it.
 	 */
-	private boolean isUnpublishedMiss(CacheData clsData) {
+	private boolean isUnpublishedMiss(CacheData clsData) throws Exception {
 		return !clsData.isCached()
-				&& !Files.isRegularFile(getEntryFile(clsData.getClsId()));
+				&& !store.contains(clsData.getClsId());
 	}
 
 	private void invalidateEntry(String clsFullName) {
@@ -320,10 +287,9 @@ public class DiskCodeCache implements ICodeCache {
 			CacheData clsData = getClsData(clsFullName);
 			withProcessLock(() -> {
 				synchronized (clsData) {
-					Path entryFile = getEntryFile(clsData.getClsId());
-					if (clsData.invalidate() || Files.isRegularFile(entryFile)) {
+					if (clsData.invalidate() || store.contains(clsData.getClsId())) {
 						LOG.debug("Removing class info from disk: {}", clsFullName);
-						Files.deleteIfExists(entryFile);
+						store.delete(clsData.getClsId());
 					}
 					return null;
 				}
@@ -352,36 +318,26 @@ public class DiskCodeCache implements ICodeCache {
 		long start = System.currentTimeMillis();
 		Map<Integer, CacheData> dataById = new HashMap<>(clsDataMap.size());
 		clsDataMap.values().forEach(data -> dataById.put(data.getClsId(), data));
-		List<Path> entries;
-		try (Stream<Path> stream = Files.walk(entriesDir)) {
-			entries = stream.filter(Files::isRegularFile)
-					.filter(file -> file.getFileName().toString().endsWith(ENTRY_SUFFIX))
-					.toList();
+		List<Integer> entries;
+		try {
+			entries = store.loadIds();
 		} catch (Exception e) {
 			throw new JadxRuntimeException("Failed to enumerate cached classes", e);
 		}
 		int count = 0;
-		for (Path entry : entries) {
-			try {
-				String fileName = entry.getFileName().toString();
-				int clsId = Integer.parseInt(fileName.substring(0, fileName.length() - ENTRY_SUFFIX.length()), 16);
-				CacheData data = dataById.get(clsId);
-				if (data == null) {
-					continue;
-				}
+		for (int clsId : entries) {
+			CacheData data = dataById.get(clsId);
+			if (data != null) {
 				data.loadPublished();
 				count++;
-			} catch (Exception e) {
-				LOG.warn("Ignoring invalid code cache entry: {}", entry, e);
-				deleteTemporary(entry);
 			}
 		}
 		LOG.info("Found {} classes in disk cache, time: {}ms, dir: {}",
-				count, System.currentTimeMillis() - start, entriesDir.getParent());
+				count, System.currentTimeMillis() - start, baseDir);
 	}
 
-	private void refreshPublishedEntry(CacheData clsData, Path entryFile) {
-		if (!Files.isRegularFile(entryFile)) {
+	private void refreshPublishedEntry(CacheData clsData) throws Exception {
+		if (!store.contains(clsData.getClsId())) {
 			clsData.clearPublished();
 			return;
 		}
@@ -390,12 +346,6 @@ public class DiskCodeCache implements ICodeCache {
 
 	private <T> T withProcessLock(LockedAction<T> action) throws Exception {
 		return processLockCoordinator.execute(processLockFile, action);
-	}
-
-	private Path getEntryFile(int clsId) {
-		// all classes divided between 256 top level folders
-		String firstByte = FileUtils.byteToHex(clsId);
-		return entriesDir.resolve(firstByte).resolve(FileUtils.intToHex(clsId) + ENTRY_SUFFIX);
 	}
 
 	private Map<String, CacheData> buildClassDataMap(List<ClassNode> classes) {
@@ -440,6 +390,7 @@ public class DiskCodeCache implements ICodeCache {
 			if (!writePool.isTerminated()) {
 				LOG.warn("Disk code cache write pool did not terminate");
 			}
+			store.close();
 		} finally {
 			if (interrupted) {
 				Thread.currentThread().interrupt();
@@ -477,8 +428,7 @@ public class DiskCodeCache implements ICodeCache {
 			writeGeneration++;
 			tmpCodeInfo = codeInfo;
 			cached = true;
-			String fileToken = Long.toHexString(writeGeneration) + '-' + UUID.randomUUID().toString().replace("-", "");
-			return new WriteRequest(writeGeneration, fileToken);
+			return new WriteRequest(writeGeneration);
 		}
 
 		public synchronized boolean isCurrentWrite(long generation) {
@@ -530,11 +480,9 @@ public class DiskCodeCache implements ICodeCache {
 
 	private static final class WriteRequest {
 		private final long generation;
-		private final String fileToken;
 
-		private WriteRequest(long generation, String fileToken) {
+		private WriteRequest(long generation) {
 			this.generation = generation;
-			this.fileToken = fileToken;
 		}
 	}
 
