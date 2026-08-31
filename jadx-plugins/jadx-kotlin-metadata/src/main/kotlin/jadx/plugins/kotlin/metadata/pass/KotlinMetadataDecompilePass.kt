@@ -100,10 +100,10 @@ class KotlinMetadataDecompilePass(
 			// Usage information is incomplete during the prepare pass, so a prepared
 			// CompanionRename must not carry an early hide decision. Re-evaluate here,
 			// at the same point where mapCompanion historically made this decision.
-			val shouldHide = field.useIn.size == 1
-				&& field.useIn[0].methodInfo.isClassInit
-				&& cls.methods.all { it.isConstructor }
-				&& cls.fields.isEmpty()
+			val shouldHide = field.useIn.size == 1 &&
+				field.useIn[0].methodInfo.isClassInit &&
+				cls.methods.all { it.isConstructor } &&
+				cls.fields.isEmpty()
 			if (shouldHide) {
 				field.add(AFlag.DONT_GENERATE)
 				cls.add(AFlag.DONT_GENERATE)

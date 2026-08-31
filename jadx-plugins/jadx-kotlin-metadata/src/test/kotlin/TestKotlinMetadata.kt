@@ -1,7 +1,5 @@
 package jadx.plugins.kotlin.metadata.tests
 
-import java.io.File
-
 import jadx.plugins.kotlin.metadata.KotlinMetadataOptions.Companion.CLASS_ALIAS_OPT
 import jadx.plugins.kotlin.metadata.KotlinMetadataOptions.Companion.COMPANION_OPT
 import jadx.plugins.kotlin.metadata.KotlinMetadataOptions.Companion.DATA_CLASS_OPT
@@ -13,6 +11,7 @@ import jadx.tests.api.SmaliTest
 import jadx.tests.api.utils.assertj.JadxAssertions.assertThat
 import jadx.tests.api.utils.assertj.JadxCodeAssertions
 import org.junit.jupiter.api.Test
+import java.io.File
 
 class TestKotlinMetadata : SmaliTest() {
 	// @formatter:off

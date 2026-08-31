@@ -287,12 +287,12 @@ public class JadxCLI {
 
 	private static void logIngestStats(IngestStats stats) {
 		LOG.info("content store: run={}, files={}, new objects={}, reused={}, reused bytes={}, indexed={}, time={} ms",
-					stats.getRunId(), stats.getArtifactCount(), stats.getUniqueObjectCount(), stats.getReusedObjectCount(),
-					stats.getDeduplicatedBytes(), stats.getIndexedObjectCount(),
-					stats.getElapsedMillis());
+				stats.getRunId(), stats.getArtifactCount(), stats.getUniqueObjectCount(), stats.getReusedObjectCount(),
+				stats.getDeduplicatedBytes(), stats.getIndexedObjectCount(),
+				stats.getElapsedMillis());
 		if (stats.getHardLinkFallbackCount() != 0) {
 			LOG.warn("content store: {} files could not be hard-linked and were retained normally",
-						stats.getHardLinkFallbackCount());
+					stats.getHardLinkFallbackCount());
 		}
 	}
 
