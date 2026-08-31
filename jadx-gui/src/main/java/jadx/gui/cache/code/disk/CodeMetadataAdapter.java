@@ -19,7 +19,6 @@ import java.util.Map;
 
 import jadx.api.ICodeInfo;
 import jadx.api.impl.AnnotatedCodeInfo;
-import jadx.api.impl.SimpleCodeInfo;
 import jadx.api.metadata.ICodeAnnotation;
 import jadx.api.metadata.ICodeMetadata;
 import jadx.core.dex.nodes.RootNode;
@@ -32,7 +31,7 @@ import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
 import static java.nio.file.StandardOpenOption.WRITE;
 
 public class CodeMetadataAdapter {
-	private static final byte[] JADX_METADATA_HEADER = "jadxmd".getBytes(StandardCharsets.US_ASCII);
+	private static final byte[] JADX_BUNDLE_HEADER = "jadxcb1".getBytes(StandardCharsets.US_ASCII);
 	private static final int MAX_METADATA_ENTRIES = 1_000_000;
 	private static final int INITIAL_MAP_CAPACITY = 1_024;
 
@@ -42,38 +41,72 @@ public class CodeMetadataAdapter {
 		codeAnnotationAdapter = new CodeAnnotationAdapter(root);
 	}
 
-	public void write(Path metadataFile, ICodeMetadata metadata) {
-		FileUtils.makeDirsForFile(metadataFile);
-		try (OutputStream fileOutput = Files.newOutputStream(metadataFile, WRITE, CREATE, TRUNCATE_EXISTING);
+	public void writeBundle(Path bundleFile, ICodeInfo codeInfo) {
+		FileUtils.makeDirsForFile(bundleFile);
+		try (OutputStream fileOutput = Files.newOutputStream(bundleFile, WRITE, CREATE, TRUNCATE_EXISTING);
 				DataOutputStream out = new DataOutputStream(new BufferedOutputStream(fileOutput))) {
-			out.write(JADX_METADATA_HEADER);
+			byte[] code = codeInfo.getCodeStr().getBytes(StandardCharsets.UTF_8);
+			out.write(JADX_BUNDLE_HEADER);
+			out.writeInt(code.length);
+			out.write(code);
+			ICodeMetadata metadata = codeInfo.getCodeMetadata();
 			writeLines(out, metadata.getLineMapping());
 			writeAnnotations(out, metadata.getAsMap());
 		} catch (Exception e) {
-			throw new RuntimeException("Failed to write metadata file", e);
+			throw new RuntimeException("Failed to write code cache bundle", e);
 		}
 	}
 
-	public ICodeInfo readAndBuild(Path metadataFile, String code) {
-		if (!Files.exists(metadataFile)) {
-			return new SimpleCodeInfo(code);
-		}
-		try (InputStream fileInput = Files.newInputStream(metadataFile);
+	public String readCode(Path bundleFile) {
+		try (InputStream fileInput = Files.newInputStream(bundleFile);
 				DataInputStream in = new DataInputStream(new BufferedInputStream(fileInput))) {
-			byte[] header = new byte[JADX_METADATA_HEADER.length];
-			in.readFully(header);
-			if (!Arrays.equals(header, JADX_METADATA_HEADER)) {
-				throw new IOException("Invalid metadata header");
+			int codeSize = readCodeSize(in, bundleFile);
+			return new String(readBytes(in, codeSize), StandardCharsets.UTF_8);
+		} catch (Exception e) {
+			throw new RuntimeException("Failed to read code cache bundle", e);
+		}
+	}
+
+	public ICodeInfo readAndBuild(Path bundleFile, String knownCode) {
+		try (InputStream fileInput = Files.newInputStream(bundleFile);
+				DataInputStream in = new DataInputStream(new BufferedInputStream(fileInput))) {
+			int codeSize = readCodeSize(in, bundleFile);
+			String code;
+			if (knownCode == null) {
+				code = new String(readBytes(in, codeSize), StandardCharsets.UTF_8);
+			} else {
+				in.skipNBytes(codeSize);
+				code = knownCode;
 			}
-			long fileSize = Files.size(metadataFile);
+			long fileSize = Files.size(bundleFile);
 			int entriesLimit = (int) Math.min(MAX_METADATA_ENTRIES,
 					Math.min((long) code.length() + 1, fileSize));
 			Map<Integer, Integer> lines = readLines(in, entriesLimit, code.length());
 			Map<Integer, ICodeAnnotation> annotations = readAnnotations(in, entriesLimit, code.length());
 			return new AnnotatedCodeInfo(code, lines, annotations);
 		} catch (Exception e) {
-			throw new RuntimeException("Failed to parse code annotations", e);
+			throw new RuntimeException("Failed to parse code cache bundle", e);
 		}
+	}
+
+	private static int readCodeSize(DataInputStream in, Path bundleFile) throws IOException {
+		byte[] header = new byte[JADX_BUNDLE_HEADER.length];
+		in.readFully(header);
+		if (!Arrays.equals(header, JADX_BUNDLE_HEADER)) {
+			throw new IOException("Invalid code cache bundle header");
+		}
+		int codeSize = in.readInt();
+		long maxCodeSize = Files.size(bundleFile) - JADX_BUNDLE_HEADER.length - Integer.BYTES;
+		if (codeSize < 0 || codeSize > maxCodeSize) {
+			throw new IOException("Invalid code size: " + codeSize + ", limit: " + maxCodeSize);
+		}
+		return codeSize;
+	}
+
+	private static byte[] readBytes(DataInputStream in, int size) throws IOException {
+		byte[] bytes = new byte[size];
+		in.readFully(bytes);
+		return bytes;
 	}
 
 	private void writeLines(DataOutput out, Map<Integer, Integer> lines) throws IOException {
@@ -99,7 +132,7 @@ public class CodeMetadataAdapter {
 		return lines;
 	}
 
-	private void writeAnnotations(DataOutputStream out, Map<Integer, ICodeAnnotation> annotations) throws IOException {
+	private void writeAnnotations(DataOutput out, Map<Integer, ICodeAnnotation> annotations) throws IOException {
 		out.writeInt(annotations.size());
 		for (Map.Entry<Integer, ICodeAnnotation> entry : annotations.entrySet()) {
 			DataAdapterHelper.writeUVInt(out, entry.getKey());
@@ -107,7 +140,7 @@ public class CodeMetadataAdapter {
 		}
 	}
 
-	private Map<Integer, ICodeAnnotation> readAnnotations(DataInputStream in, int entriesLimit, int codeLength) throws IOException {
+	private Map<Integer, ICodeAnnotation> readAnnotations(DataInput in, int entriesLimit, int codeLength) throws IOException {
 		int size = readSize(in, "annotations", entriesLimit);
 		if (size == 0) {
 			return Collections.emptyMap();

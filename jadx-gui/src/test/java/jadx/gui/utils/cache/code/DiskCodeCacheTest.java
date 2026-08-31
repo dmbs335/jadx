@@ -42,7 +42,7 @@ class DiskCodeCacheTest extends IntegrationTest {
 
 		DiskCodeCache cache = new DiskCodeCache(clsNode.root(), tempDir);
 		String codeVersion = Files.readString(tempDir.resolve("code").resolve("code-version"));
-		assertThat(codeVersion).startsWith("17:af2:");
+		assertThat(codeVersion).startsWith("18:af2:");
 
 		String clsKey = clsNode.getFullName();
 		cache.add(clsKey, codeInfo);
@@ -70,18 +70,18 @@ class DiskCodeCacheTest extends IntegrationTest {
 		initialCache.add(clsKey, expected);
 		initialCache.close();
 
-		Path sourceFile = findCacheFile(tempDir.resolve("code/entries"), ".java");
-		Files.delete(sourceFile);
+		Path entryFile = findCacheFile(tempDir.resolve("code/entries"), ".jadxbc");
+		Files.delete(entryFile);
 		DiskCodeCache missingSourceCache = new DiskCodeCache(clsNode.root(), tempDir);
 		getArgs().setCodeCache(missingSourceCache);
 		assertThat(clsNode.getCode().getCodeStr()).isEqualTo(expected.getCodeStr());
 		missingSourceCache.close();
-		Path regeneratedSource = findCacheFile(tempDir.resolve("code/entries"), ".java");
-		assertThat(Files.readString(regeneratedSource)).isEqualTo(expected.getCodeStr());
+		Path regeneratedEntry = findCacheFile(tempDir.resolve("code/entries"), ".jadxbc");
+		DiskCodeCache regeneratedCache = new DiskCodeCache(clsNode.root(), tempDir);
+		assertThat(regeneratedCache.getCode(clsKey)).isEqualTo(expected.getCodeStr());
+		regeneratedCache.close();
 
-		Path metadataFile = findCacheFile(tempDir.resolve("code/entries"), ".jadxmd");
-		// Valid header followed by an impossible line-mapping count.
-		Files.write(metadataFile, new byte[] { 'j', 'a', 'd', 'x', 'm', 'd', 0x7f, -1, -1, -1 });
+		Files.write(regeneratedEntry, new byte[] { 'b', 'a', 'd' });
 		DiskCodeCache corruptMetadataCache = new DiskCodeCache(clsNode.root(), tempDir);
 		getArgs().setCodeCache(corruptMetadataCache);
 		assertThat(clsNode.getCode().getCodeStr()).isEqualTo(expected.getCodeStr());
@@ -108,7 +108,6 @@ class DiskCodeCacheTest extends IntegrationTest {
 				new BufferCodeCache(new DiskCodeCache(clsNode.root(), tempDir)));
 		String knownCode = cache.getCode(clsKey);
 		assertThat(knownCode).isEqualTo(expected.getCodeStr());
-		Files.delete(findCacheFile(tempDir.resolve("code/entries"), ".java"));
 
 		ICodeInfo readCodeInfo = cache.get(clsKey);
 		assertThat(readCodeInfo.getCodeStr()).isSameAs(knownCode);
@@ -179,6 +178,9 @@ class DiskCodeCacheTest extends IntegrationTest {
 		DiskCodeCache reopened = new DiskCodeCache(clsNode.root(), tempDir);
 		assertThat(reopened.getCode(clsKey)).isEqualTo("new");
 		reopened.close();
+		try (Stream<Path> stagingFiles = Files.list(tempDir.resolve("code-staging"))) {
+			assertThat(stagingFiles.filter(Files::isRegularFile)).isEmpty();
+		}
 	}
 
 	@Test
@@ -220,7 +222,7 @@ class DiskCodeCacheTest extends IntegrationTest {
 	}
 
 	@Test
-	public void publishesCodeAndMetadataThroughOneGenerationPointer() throws Exception {
+	public void publishesCodeAndMetadataThroughOneAtomicEntry() throws Exception {
 		disableCompilation();
 		getArgs().setCodeCache(NoOpCodeCache.INSTANCE);
 		ClassNode clsNode = getClassNode(DiskCodeCacheTest.class);
@@ -229,11 +231,11 @@ class DiskCodeCacheTest extends IntegrationTest {
 		cache.add(clsKey, clsNode.getCode());
 		cache.close();
 
-		Path pointer = findCacheFile(tempDir.resolve("code/entries"), "current");
-		String generation = Files.readString(pointer).trim();
-		Path bundle = pointer.getParent().resolve(generation);
-		assertThat(bundle.resolve("code.java")).isRegularFile();
-		assertThat(bundle.resolve("metadata.jadxmd")).isRegularFile();
+		Path entry = findCacheFile(tempDir.resolve("code/entries"), ".jadxbc");
+		assertThat(entry).isRegularFile();
+		try (Stream<Path> files = Files.walk(tempDir.resolve("code/entries"))) {
+			assertThat(files.filter(Files::isRegularFile)).hasSize(1);
+		}
 	}
 
 	@Test
@@ -252,9 +254,9 @@ class DiskCodeCacheTest extends IntegrationTest {
 		second.add(clsKey, new SimpleCodeInfo("second"));
 		second.close();
 		assertThat(first.getCode(clsKey)).isEqualTo("second");
-		Path pointer = findCacheFile(tempDir.resolve("code/entries"), "current");
-		try (Stream<Path> entries = Files.list(pointer.getParent())) {
-			assertThat(entries.filter(Files::isDirectory)).hasSize(1);
+		Path entry = findCacheFile(tempDir.resolve("code/entries"), ".jadxbc");
+		try (Stream<Path> entries = Files.list(entry.getParent())) {
+			assertThat(entries.filter(Files::isRegularFile)).hasSize(1);
 		}
 	}
 
