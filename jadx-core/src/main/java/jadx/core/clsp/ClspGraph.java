@@ -18,6 +18,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.IMethodDetails;
 import jadx.core.dex.nodes.RootNode;
+import jadx.core.utils.ImmutableArraySet;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.DecodeException;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -27,6 +28,7 @@ import jadx.core.utils.exceptions.JadxRuntimeException;
  */
 public class ClspGraph {
 	private static final Logger LOG = LoggerFactory.getLogger(ClspGraph.class);
+	private static final int ARRAY_SET_MAX_SIZE = 6;
 
 	private final RootNode root;
 	private Map<String, ClspClass> nameMap;
@@ -232,7 +234,9 @@ public class ClspGraph {
 					break;
 				}
 				default: {
-					result = new HashSet<>(tmpSet);
+					result = size <= ARRAY_SET_MAX_SIZE
+							? new ImmutableArraySet<>(tmpSet)
+							: new HashSet<>(tmpSet);
 					break;
 				}
 			}

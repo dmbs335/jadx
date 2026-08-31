@@ -1,7 +1,6 @@
 package jadx.core.utils;
 
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
@@ -256,11 +255,11 @@ public class InsnRemover {
 
 	public static boolean removeWithoutUnbind(MethodNode mth, BlockNode block, InsnNode insn) {
 		// remove by pointer (don't use equals)
-		Iterator<InsnNode> it = block.getInstructions().iterator();
-		while (it.hasNext()) {
-			InsnNode ir = it.next();
-			if (ir == insn) {
-				it.remove();
+		List<InsnNode> insns = block.getInstructions();
+		int insnsCount = insns.size();
+		for (int i = 0; i < insnsCount; i++) {
+			if (insns.get(i) == insn) {
+				insns.remove(i);
 				return true;
 			}
 		}

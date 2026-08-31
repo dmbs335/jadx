@@ -69,7 +69,10 @@ public class ApplyVariableNames extends AbstractVisitor {
 
 	@Override
 	public void visit(MethodNode mth) throws JadxException {
-		for (SSAVar ssaVar : mth.getSVars()) {
+		List<SSAVar> ssaVars = mth.getSVars();
+		int varsCount = ssaVars.size();
+		for (int i = 0; i < varsCount; i++) {
+			SSAVar ssaVar = ssaVars.get(i);
 			CodeVar codeVar = ssaVar.getCodeVar();
 			String newName = guessName(codeVar);
 			if (newName != null) {
@@ -92,12 +95,15 @@ public class ApplyVariableNames extends AbstractVisitor {
 		}
 		List<SSAVar> ssaVars = var.getSsaVars();
 		if (Utils.notEmpty(ssaVars)) {
-			boolean mthArg = ssaVars.stream().anyMatch(ssaVar -> ssaVar.getAssign().contains(AFlag.METHOD_ARGUMENT));
-			if (mthArg) {
-				// for method args use defined type and ignore usage
-				return makeNameForType(var.getType());
+			int varsCount = ssaVars.size();
+			for (int i = 0; i < varsCount; i++) {
+				if (ssaVars.get(i).getAssign().contains(AFlag.METHOD_ARGUMENT)) {
+					// for method args use defined type and ignore usage
+					return makeNameForType(var.getType());
+				}
 			}
-			for (SSAVar ssaVar : ssaVars) {
+			for (int i = 0; i < varsCount; i++) {
+				SSAVar ssaVar = ssaVars.get(i);
 				String name = makeNameForSSAVar(ssaVar);
 				if (name != null) {
 					return name;
@@ -144,7 +150,9 @@ public class ApplyVariableNames extends AbstractVisitor {
 			case ARITH:
 			case TERNARY:
 			case CAST:
-				for (InsnArg arg : insn.getArguments()) {
+				int argsCount = insn.getArgsCount();
+				for (int i = 0; i < argsCount; i++) {
+					InsnArg arg = insn.getArg(i);
 					if (arg.isInsnWrap()) {
 						InsnNode wrapInsn = ((InsnWrapArg) arg).getWrapInsn();
 						String wName = makeNameFromInsn(ssaVar, wrapInsn);

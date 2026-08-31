@@ -7,6 +7,10 @@ import jadx.api.plugins.input.data.annotations.IAnnotation;
 import jadx.api.plugins.input.data.attributes.IJadxAttrType;
 import jadx.api.plugins.input.data.attributes.IJadxAttribute;
 
+/**
+ * Compatibility singleton for callers which need an immutable empty attribute store.
+ * {@link AttrNode} uses a null-backed fast path and no longer delegates its empty reads here.
+ */
 public final class EmptyAttrStorage extends AttributeStorage {
 
 	public static final AttributeStorage INSTANCE = new EmptyAttrStorage();

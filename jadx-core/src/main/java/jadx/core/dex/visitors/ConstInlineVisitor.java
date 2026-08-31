@@ -49,10 +49,13 @@ public class ConstInlineVisitor extends AbstractVisitor {
 
 	public static void process(MethodNode mth) {
 		List<InsnNode> toRemove = new ArrayList<>();
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int blockIndex = 0, blocksCount = blocks.size(); blockIndex < blocksCount; blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
 			toRemove.clear();
-			for (InsnNode insn : block.getInstructions()) {
-				checkInsn(mth, insn, toRemove);
+			List<InsnNode> insns = block.getInstructions();
+			for (int insnIndex = 0, insnsCount = insns.size(); insnIndex < insnsCount; insnIndex++) {
+				checkInsn(mth, insns.get(insnIndex), toRemove);
 			}
 			InsnRemover.removeAllAndUnbind(mth, block, toRemove);
 		}
@@ -124,7 +127,8 @@ public class ConstInlineVisitor extends AbstractVisitor {
 			return false;
 		}
 		int k = 0;
-		for (RegisterArg useArg : useList) {
+		for (int i = 0, count = useList.size(); i < count; i++) {
+			RegisterArg useArg = useList.get(i);
 			InsnNode insn = useArg.getParentInsn();
 			if (insn != null && forbidNullArgInline(insn, useArg)) {
 				k++;
@@ -173,7 +177,8 @@ public class ConstInlineVisitor extends AbstractVisitor {
 		}
 		List<RegisterArg> useList = new ArrayList<>(ssaVar.getUseList());
 		int replaceCount = 0;
-		for (RegisterArg arg : useList) {
+		for (int i = 0, count = useList.size(); i < count; i++) {
+			RegisterArg arg = useList.get(i);
 			if (canInline(mth, arg) && replaceArg(mth, arg, constArg, constInsn)) {
 				replaceCount++;
 			}
@@ -182,10 +187,19 @@ public class ConstInlineVisitor extends AbstractVisitor {
 			return true;
 		}
 		// hide insn if used only in not generated insns
-		if (ssaVar.getUseList().stream().allMatch(ConstInlineVisitor::canIgnoreInsn)) {
+		if (allUsesCanBeIgnored(ssaVar.getUseList())) {
 			constInsn.add(AFlag.DONT_GENERATE);
 		}
 		return false;
+	}
+
+	private static boolean allUsesCanBeIgnored(List<RegisterArg> useList) {
+		for (int i = 0, count = useList.size(); i < count; i++) {
+			if (!canIgnoreInsn(useList.get(i))) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private static boolean canIgnoreInsn(RegisterArg reg) {

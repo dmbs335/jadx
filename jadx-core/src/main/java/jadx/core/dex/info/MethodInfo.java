@@ -1,5 +1,6 @@
 package jadx.core.dex.info;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
@@ -10,6 +11,7 @@ import jadx.api.plugins.input.data.IMethodRef;
 import jadx.core.codegen.TypeGen;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.RootNode;
+import jadx.core.utils.ImmutableList;
 import jadx.core.utils.Utils;
 
 public final class MethodInfo implements Comparable<MethodInfo> {
@@ -21,6 +23,7 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 	private final String shortId;
 	private final String rawFullId;
 	private final int hash;
+	private final int overloadKeyHash;
 
 	private String alias;
 
@@ -33,6 +36,7 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 		this.shortId = makeShortId(name, argTypes, retType);
 		this.rawFullId = declClass.makeRawFullName() + '.' + shortId;
 		this.hash = calcHashCode();
+		this.overloadKeyHash = 31 * name.hashCode() + argTypes.size();
 	}
 
 	public static MethodInfo fromRef(RootNode root, IMethodRef methodRef) {
@@ -48,7 +52,7 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 		ArgType parentClsType = infoStorage.getType(methodRef.getParentClassType());
 		ClassInfo parentClass = ClassInfo.fromType(root, parentClsType);
 		ArgType returnType = infoStorage.getType(methodRef.getReturnType());
-		List<ArgType> args = Utils.collectionMap(methodRef.getArgTypes(), infoStorage::getType);
+		List<ArgType> args = mapArgTypes(infoStorage, methodRef.getArgTypes());
 		MethodInfo newMth = new MethodInfo(parentClass, methodRef.getName(), args, returnType);
 		MethodInfo uniqMth = infoStorage.putMethod(newMth);
 		if (uniqId != 0) {
@@ -64,9 +68,24 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 
 	public static MethodInfo fromMethodProto(RootNode root, ClassInfo declClass, String name, IMethodProto proto) {
 		InfoStorage infoStorage = root.getInfoStorage();
-		List<ArgType> args = Utils.collectionMap(proto.getArgTypes(), infoStorage::getType);
+		List<ArgType> args = mapArgTypes(infoStorage, proto.getArgTypes());
 		ArgType returnType = infoStorage.getType(proto.getReturnType());
 		return fromDetails(root, declClass, name, args, returnType);
+	}
+
+	private static List<ArgType> mapArgTypes(InfoStorage infoStorage, List<String> types) {
+		int size = types.size();
+		if (size == 0) {
+			return Collections.emptyList();
+		}
+		if (size == 1) {
+			return Collections.singletonList(infoStorage.getType(types.get(0)));
+		}
+		ArgType[] args = new ArgType[size];
+		for (int i = 0; i < size; i++) {
+			args[i] = infoStorage.getType(types.get(i));
+		}
+		return new ImmutableList<>(args);
 	}
 
 	public String makeSignature(boolean includeRetType) {
@@ -83,20 +102,22 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 		StringBuilder sb = new StringBuilder();
 		sb.append(name);
 		sb.append('(');
-		for (ArgType arg : argTypes) {
-			sb.append(TypeGen.signature(arg));
+		int argsCount = argTypes.size();
+		for (int i = 0; i < argsCount; i++) {
+			TypeGen.appendSignature(sb, argTypes.get(i));
 		}
 		sb.append(')');
 		if (retType != null) {
-			sb.append(TypeGen.signature(retType));
+			TypeGen.appendSignature(sb, retType);
 		}
 		return sb.toString();
 	}
 
 	public boolean isOverloadedBy(MethodInfo otherMthInfo) {
-		return argTypes.size() == otherMthInfo.argTypes.size()
+		return overloadKeyHash == otherMthInfo.overloadKeyHash
+				&& argTypes.size() == otherMthInfo.argTypes.size()
 				&& name.equals(otherMthInfo.name)
-				&& !Objects.equals(this.shortId, otherMthInfo.shortId);
+				&& !shortId.equals(otherMthInfo.shortId);
 	}
 
 	public String getName() {

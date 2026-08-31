@@ -46,6 +46,8 @@ public class TypeUpdateRequest {
 	}
 
 	void recycle(@Nullable TypeUpdateRequest nextFree) {
+		this.arg = null;
+		this.candidateType = null;
 		this.callback = null;
 		this.nextFree = nextFree;
 	}

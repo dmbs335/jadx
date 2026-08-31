@@ -100,7 +100,9 @@ public class ModVisitor extends AbstractVisitor {
 
 	private static void replaceStep(MethodNode mth, InsnRemover remover) {
 		ClassNode parentClass = mth.getParentClass();
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int blockIndex = 0, blocksCount = blocks.size(); blockIndex < blocksCount; blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
 			remover.setBlock(block);
 			List<InsnNode> insnsList = block.getInstructions();
 			int size = insnsList.size();
@@ -173,7 +175,9 @@ public class ModVisitor extends AbstractVisitor {
 		if (insn.getType() == InsnType.CONSTRUCTOR) {
 			processAnonymousConstructor(mth, (ConstructorInsn) insn);
 		}
-		for (InsnArg arg : insn.getArguments()) {
+		int argsCount = insn.getArgsCount();
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = insn.getArg(i);
 			if (arg instanceof InsnWrapArg) {
 				processAnonymousConstructors(mth, ((InsnWrapArg) arg).getWrapInsn());
 			}

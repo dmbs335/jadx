@@ -44,6 +44,7 @@ public final class TypeUpdate {
 	private final Map<InsnType, ITypeListener> listenerRegistry;
 	private final TypeCompare comparator;
 	private final JadxArgs args;
+	private final ThreadLocal<TypeUpdateInfo> updateInfoPool = new ThreadLocal<>();
 
 	public TypeUpdate(RootNode root) {
 		this.root = root;
@@ -78,14 +79,14 @@ public final class TypeUpdate {
 	}
 
 	private TypeUpdateResult apply(MethodNode mth, SSAVar ssaVar, ArgType candidateType, TypeUpdateFlags flags) {
+		if (candidateType == null || !candidateType.isTypeKnown()) {
+			return REJECT;
+		}
+		TypeUpdateInfo updateInfo = acquireUpdateInfo(mth, flags);
 		try {
-			if (candidateType == null || !candidateType.isTypeKnown()) {
-				return REJECT;
-			}
 			if (Consts.DEBUG_TYPE_INFERENCE) {
 				LOG.debug("Start type update for {} to {}", ssaVar.toShortString(), candidateType);
 			}
-			TypeUpdateInfo updateInfo = new TypeUpdateInfo(mth, flags, args);
 			TypeUpdateResult result = queueTypeUpdate(updateInfo, ssaVar.getAssign(), candidateType, null);
 			if (result == null) {
 				result = runUpdate(updateInfo);
@@ -107,7 +108,24 @@ public final class TypeUpdate {
 			throw e;
 		} catch (Exception e) {
 			throw new JadxRuntimeException("Type update failed for variable: " + ssaVar + ", new type: " + candidateType, e);
+		} finally {
+			releaseUpdateInfo(updateInfo);
 		}
+	}
+
+	private TypeUpdateInfo acquireUpdateInfo(MethodNode mth, TypeUpdateFlags flags) {
+		TypeUpdateInfo updateInfo = updateInfoPool.get();
+		if (updateInfo == null) {
+			return new TypeUpdateInfo(mth, flags, args);
+		}
+		updateInfoPool.set(updateInfo.getNextFree());
+		updateInfo.init(mth, flags, args);
+		return updateInfo;
+	}
+
+	private void releaseUpdateInfo(TypeUpdateInfo updateInfo) {
+		updateInfo.recycle(updateInfoPool.get());
+		updateInfoPool.set(updateInfo);
 	}
 
 	private TypeUpdateResult runUpdate(TypeUpdateInfo updateInfo) {
@@ -434,8 +452,9 @@ public final class TypeUpdate {
 				getArgType = argTypes::get;
 			} else {
 				// resolve types before apply
+				Map<ArgType, ArgType> classGenericsMap = typeUtils.getClassGenericsMapping(candidateType, candidateType);
 				getReturnType = () -> typeUtils.replaceTypeVariablesUsingMap(returnType, typeVarsMap);
-				getArgType = argNum -> typeUtils.replaceClassGenerics(candidateType, argTypes.get(argNum));
+				getArgType = argNum -> typeUtils.replaceTypeVariablesUsingMap(argTypes.get(argNum), classGenericsMap);
 			}
 			return new InvokeUpdateCallback(this, updateInfo, invoke, argsCount, knownTypeVars, getReturnType, getArgType)
 					.runQueue();

@@ -543,27 +543,33 @@ public final class FinishTypeInference extends AbstractVisitor {
 	}
 
 	static List<SSAVar> collectWarnVars(List<SSAVar> vars) {
-		Set<CodeVar> reportedCodeVars = Collections.newSetFromMap(new IdentityHashMap<>());
-		List<SSAVar> warnVars = new ArrayList<>();
+		Set<CodeVar> reportedCodeVars = null;
+		List<SSAVar> warnVars = null;
 		for (SSAVar var : vars) {
 			ArgType type = var.getTypeInfo().getType();
 			CodeVar codeVar = var.getCodeVar();
 			ArgType codeVarType = codeVar.getType();
 			if (!type.isTypeKnown()
 					&& (codeVarType == null || !codeVarType.isTypeKnown())
-					&& hasGeneratedUse(var)
-					&& reportedCodeVars.add(codeVar)) {
+					&& hasGeneratedUse(var)) {
+				if (reportedCodeVars == null) {
+					reportedCodeVars = Collections.newSetFromMap(new IdentityHashMap<>());
+					warnVars = new ArrayList<>();
+				}
+				if (!reportedCodeVars.add(codeVar)) {
+					continue;
+				}
 				warnVars.add(var);
 			}
 		}
-		return warnVars;
+		return warnVars == null ? Collections.emptyList() : warnVars;
 	}
 
 	private static void repairPhiCodeVarTypes(MethodNode mth) {
 		normalizeProvenNullMoveSources(mth);
 		Map<CodeVar, List<SSAVar>> groups = collectCodeVarGroups(mth);
 		if (splitBroadcastConsumeEachMethodArgLifetime(mth, groups) != 0) {
-			groups = collectCodeVarGroups(mth);
+			groups = recollectCodeVarGroups(mth, groups);
 		}
 		for (List<SSAVar> group : groups.values()) {
 			replaceNullOnlyPhiUses(mth, group);
@@ -582,17 +588,17 @@ public final class FinishTypeInference extends AbstractVisitor {
 		int cleanupSplitCount = repairExceptionCleanupSiblingNullFlows(
 				mth.getSVars(), groups, mth.root().getTypeCompare(), insn -> isInExceptionHandler(mth, insn));
 		if (cleanupSplitCount != 0) {
-			groups = collectCodeVarGroups(mth);
+			groups = recollectCodeVarGroups(mth, groups);
 		}
 		boolean coroutineMethod = isCoroutineMethod(mth);
 		int receiverPhiSplitCount = splitClosedReferenceReceiverPhiLifetimes(groups);
 		if (receiverPhiSplitCount != 0) {
-			groups = collectCodeVarGroups(mth);
+			groups = recollectCodeVarGroups(mth, groups);
 		}
 		int constructorSplitCount = splitTerminalReferenceConstructorLifetimes(
 				groups, mth.root().getTypeCompare());
 		if (constructorSplitCount != 0) {
-			groups = collectCodeVarGroups(mth);
+			groups = recollectCodeVarGroups(mth, groups);
 		}
 		int splitCount = cleanupSplitCount + receiverPhiSplitCount + constructorSplitCount
 				+ splitMixedPrimitiveCodeVars(groups,
@@ -601,12 +607,12 @@ public final class FinishTypeInference extends AbstractVisitor {
 			int referenceMoveSplitCount = splitStructuralReferenceMoveRootLifetimes(groups);
 			splitCount += referenceMoveSplitCount;
 			if (referenceMoveSplitCount != 0) {
-				groups = collectCodeVarGroups(mth);
+				groups = recollectCodeVarGroups(mth, groups);
 			}
 			splitCount += splitMixedReferenceLifetimes(groups);
 		}
 		if (splitCount != 0) {
-			groups = collectCodeVarGroups(mth);
+			groups = recollectCodeVarGroups(mth, groups);
 		}
 		if (coroutineMethod) {
 			repairCoroutineContinuationPathCasts(mth, groups);
@@ -700,14 +706,14 @@ public final class FinishTypeInference extends AbstractVisitor {
 		if (coroutineMethod && mth.contains(AType.NORMALIZED_COROUTINE_LOOP)
 				&& repairExceptionReferencePrimitivePhiLifetimes(
 						groups, FinishTypeInference::isExceptionSplitterPhiInput) != 0) {
-			groups = collectCodeVarGroups(mth);
+			groups = recollectCodeVarGroups(mth, groups);
 		}
 		int mixedReferencePrimitiveRepairs = hasMixedReferencePrimitiveCandidate
 				? repairMixedReferencePrimitivePhiLifetimes(
 						groups, (root, input) -> isAssignDominatingPhiInput(mth, root, input))
 				: 0;
 		if (mixedReferencePrimitiveRepairs != 0) {
-			groups = collectCodeVarGroups(mth);
+			groups = recollectCodeVarGroups(mth, groups);
 		}
 		for (Map.Entry<CodeVar, List<SSAVar>> entry : groups.entrySet()) {
 			CodeVar codeVar = entry.getKey();
@@ -4376,10 +4382,65 @@ public final class FinishTypeInference extends AbstractVisitor {
 		return collectCodeVarGroups(mth.getSVars());
 	}
 
+	private static Map<CodeVar, List<SSAVar>> recollectCodeVarGroups(
+			MethodNode mth, Map<CodeVar, List<SSAVar>> previousGroups) {
+		List<SSAVar> vars = mth.getSVars();
+		int varsCount = vars.size();
+		if (varsCount <= 1) {
+			return collectCodeVarGroups(vars);
+		}
+		int expectedGroups = Math.min(varsCount, Math.max(8, previousGroups.size() + 4));
+		Map<CodeVar, List<SSAVar>> groups = new LinkedHashMap<>(expectedGroups * 4 / 3 + 1);
+		for (int i = 0; i < varsCount; i++) {
+			SSAVar var = vars.get(i);
+			CodeVar codeVar = var.getCodeVar();
+			List<SSAVar> group = groups.get(codeVar);
+			if (group == null) {
+				List<SSAVar> previousGroup = previousGroups.get(codeVar);
+				if (previousGroup instanceof ArrayList) {
+					previousGroup.clear();
+					group = previousGroup;
+				} else {
+					group = new ArrayList<>(Math.max(1, codeVar.getSsaVars().size()));
+				}
+				groups.put(codeVar, group);
+			}
+			group.add(var);
+		}
+		return groups;
+	}
+
 	private static Map<CodeVar, List<SSAVar>> collectCodeVarGroups(List<SSAVar> vars) {
-		Map<CodeVar, List<SSAVar>> groups = new LinkedHashMap<>();
-		for (SSAVar var : vars) {
-			groups.computeIfAbsent(var.getCodeVar(), key -> new ArrayList<>()).add(var);
+		int varsCount = vars.size();
+		if (varsCount == 0) {
+			return Collections.emptyMap();
+		}
+		SSAVar firstVar = vars.get(0);
+		CodeVar firstCodeVar = firstVar.getCodeVar();
+		if (varsCount == 1) {
+			return Collections.singletonMap(firstCodeVar, Collections.singletonList(firstVar));
+		}
+		boolean singleGroup = true;
+		for (int i = 1; i < varsCount; i++) {
+			if (vars.get(i).getCodeVar() != firstCodeVar) {
+				singleGroup = false;
+				break;
+			}
+		}
+		if (singleGroup) {
+			return Collections.singletonMap(firstCodeVar, new ArrayList<>(vars));
+		}
+		int mapCapacity = Math.max(1, varsCount * 4 / 3 + 1);
+		Map<CodeVar, List<SSAVar>> groups = new LinkedHashMap<>(mapCapacity);
+		for (int i = 0; i < varsCount; i++) {
+			SSAVar var = vars.get(i);
+			CodeVar codeVar = var.getCodeVar();
+			List<SSAVar> group = groups.get(codeVar);
+			if (group == null) {
+				group = new ArrayList<>(Math.max(1, codeVar.getSsaVars().size()));
+				groups.put(codeVar, group);
+			}
+			group.add(var);
 		}
 		return groups;
 	}
@@ -6559,13 +6620,17 @@ public final class FinishTypeInference extends AbstractVisitor {
 		if (replaceClosedNullFlowUses(vars)) {
 			return true;
 		}
-		for (SSAVar var : vars) {
+		int varsCount = vars.size();
+		for (int varIndex = 0; varIndex < varsCount; varIndex++) {
+			SSAVar var = vars.get(varIndex);
 			InsnNode assignInsn = var.getAssignInsn();
 			if (!(assignInsn instanceof PhiInsn) || assignInsn.getArgsCount() == 0) {
 				continue;
 			}
 			boolean allNull = true;
-			for (InsnArg arg : assignInsn.getArguments()) {
+			int assignArgsCount = assignInsn.getArgsCount();
+			for (int argIndex = 0; argIndex < assignArgsCount; argIndex++) {
+				InsnArg arg = assignInsn.getArg(argIndex);
 				if (!arg.isRegister() || !isProvenNullValue((RegisterArg) arg, new HashSet<>())) {
 					allNull = false;
 					break;
@@ -6580,10 +6645,11 @@ public final class FinishTypeInference extends AbstractVisitor {
 					? collectTypedNullBoundaries(var, new HashSet<>(), terminalUses, passThroughUses)
 					: collectDirectTypedNullUses(var, terminalUses);
 			if (!collected
-					|| terminalUses.isEmpty() || new HashSet<>(terminalUses.values()).size() < 2) {
+					|| terminalUses.isEmpty() || !hasAtLeastTwoDistinctTypes(terminalUses)) {
 				continue;
 			}
-			for (SSAVar groupVar : vars) {
+			for (int groupIndex = 0; groupIndex < varsCount; groupIndex++) {
+				SSAVar groupVar = vars.get(groupIndex);
 				InsnNode groupAssign = groupVar.getAssignInsn();
 				RegisterArg groupResult = groupVar.getAssign();
 				if (groupAssign == null
@@ -6603,12 +6669,14 @@ public final class FinishTypeInference extends AbstractVisitor {
 				}
 				InsnRemover.unbindArgUsage(mth, use);
 			}
-			for (RegisterArg use : passThroughUses) {
+			int passThroughCount = passThroughUses.size();
+			for (int useIndex = 0; useIndex < passThroughCount; useIndex++) {
+				RegisterArg use = passThroughUses.get(useIndex);
 				use.getParentInsn().add(AFlag.DONT_GENERATE);
 				InsnRemover.unbindArgUsage(mth, use);
 			}
-			for (SSAVar groupVar : vars) {
-				groupVar.getAssignInsn().add(AFlag.DONT_GENERATE);
+			for (int groupIndex = 0; groupIndex < varsCount; groupIndex++) {
+				vars.get(groupIndex).getAssignInsn().add(AFlag.DONT_GENERATE);
 			}
 			var.getCodeVar().setType(ArgType.OBJECT);
 			return true;
@@ -6624,7 +6692,9 @@ public final class FinishTypeInference extends AbstractVisitor {
 	 * concrete reference consumers; each can then receive its own correctly typed null literal.
 	 */
 	private static boolean replaceClosedNullFlowUses(List<SSAVar> candidates) {
-		for (SSAVar root : candidates) {
+		int candidatesCount = candidates.size();
+		for (int candidateIndex = 0; candidateIndex < candidatesCount; candidateIndex++) {
+			SSAVar root = candidates.get(candidateIndex);
 			InsnNode rootAssign = root.getAssignInsn();
 			if (!(rootAssign instanceof PhiInsn) || rootAssign.getArgsCount() == 0) {
 				continue;
@@ -6638,14 +6708,10 @@ public final class FinishTypeInference extends AbstractVisitor {
 			}
 			Map<RegisterArg, ArgType> terminalUses = new IdentityHashMap<>();
 			boolean terminalsCollected = collectClosedNullFlowTerminals(flowVars, terminalUses);
-			long concreteTypeCount = terminalUses.values().stream()
-					.filter(type -> !type.equals(ArgType.OBJECT))
-					.distinct()
-					.count();
 			if (!terminalsCollected
 					|| terminalUses.isEmpty()
 					|| terminalUses.containsValue(ArgType.OBJECT)
-					|| concreteTypeCount < 2) {
+					|| !hasAtLeastTwoDistinctTypes(terminalUses)) {
 				continue;
 			}
 			Set<CodeVar> referenceBoundaries = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -6677,7 +6743,7 @@ public final class FinishTypeInference extends AbstractVisitor {
 			}
 			for (CodeVar codeVar : flowCodeVars) {
 				List<SSAVar> codeVars = codeVar.getSsaVars();
-				if (codeVars.isEmpty() || codeVars.stream().allMatch(flowVars::contains)) {
+				if (codeVars.isEmpty() || containsAllIdentity(flowVars, codeVars)) {
 					codeVar.setType(ArgType.OBJECT);
 				}
 			}
@@ -6687,6 +6753,28 @@ public final class FinishTypeInference extends AbstractVisitor {
 			return true;
 		}
 		return false;
+	}
+
+	private static boolean hasAtLeastTwoDistinctTypes(Map<RegisterArg, ArgType> terminalUses) {
+		ArgType first = null;
+		for (ArgType type : terminalUses.values()) {
+			if (first == null) {
+				first = type;
+			} else if (!first.equals(type)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean containsAllIdentity(Set<SSAVar> set, List<SSAVar> values) {
+		int valuesCount = values.size();
+		for (int i = 0; i < valuesCount; i++) {
+			if (!set.contains(values.get(i))) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private static boolean collectClosedNullFlow(SSAVar root, Set<SSAVar> flowVars) {
@@ -6718,10 +6806,12 @@ public final class FinishTypeInference extends AbstractVisitor {
 					queue.add(((RegisterArg) source).getSVar());
 				}
 			} else if (assignType == InsnType.PHI) {
-				if (assignInsn.getArgsCount() == 0) {
+				int argsCount = assignInsn.getArgsCount();
+				if (argsCount == 0) {
 					return false;
 				}
-				for (InsnArg arg : assignInsn.getArguments()) {
+				for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+					InsnArg arg = assignInsn.getArg(argIndex);
 					if (!arg.isRegister() || ((RegisterArg) arg).getSVar() == null) {
 						return false;
 					}
@@ -6730,7 +6820,10 @@ public final class FinishTypeInference extends AbstractVisitor {
 			} else {
 				return false;
 			}
-			for (RegisterArg use : new ArrayList<>(var.getUseList())) {
+			List<RegisterArg> useList = var.getUseList();
+			int usesCount = useList.size();
+			for (int useIndex = 0; useIndex < usesCount; useIndex++) {
+				RegisterArg use = useList.get(useIndex);
 				InsnNode useInsn = use.getParentInsn();
 				if (useInsn == null) {
 					return false;
@@ -6757,8 +6850,13 @@ public final class FinishTypeInference extends AbstractVisitor {
 		if (type == null || !type.isTypeKnown() || !type.isObject() && !type.isArray()) {
 			return;
 		}
-		for (SSAVar var : codeVar.getSsaVars()) {
-			for (RegisterArg use : var.getUseList()) {
+		List<SSAVar> ssaVars = codeVar.getSsaVars();
+		int varsCount = ssaVars.size();
+		for (int varIndex = 0; varIndex < varsCount; varIndex++) {
+			List<RegisterArg> useList = ssaVars.get(varIndex).getUseList();
+			int usesCount = useList.size();
+			for (int useIndex = 0; useIndex < usesCount; useIndex++) {
+				RegisterArg use = useList.get(useIndex);
 				InsnNode useInsn = use.getParentInsn();
 				if (!(useInsn instanceof IfNode) || !isZeroComparison(use)) {
 					continue;
@@ -6793,7 +6891,10 @@ public final class FinishTypeInference extends AbstractVisitor {
 			return false;
 		}
 		active.add(var);
-		for (InsnArg arg : var.getAssignInsn().getArguments()) {
+		InsnNode assignInsn = var.getAssignInsn();
+		int argsCount = assignInsn.getArgsCount();
+		for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+			InsnArg arg = assignInsn.getArg(argIndex);
 			if (arg.isRegister()) {
 				SSAVar input = ((RegisterArg) arg).getSVar();
 				if (input != null && flowVars.contains(input)
@@ -6827,7 +6928,9 @@ public final class FinishTypeInference extends AbstractVisitor {
 	}
 
 	private static boolean hasGroundedNullInput(InsnNode assignInsn, Set<SSAVar> grounded) {
-		for (InsnArg arg : assignInsn.getArguments()) {
+		int argsCount = assignInsn.getArgsCount();
+		for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+			InsnArg arg = assignInsn.getArg(argIndex);
 			if (arg.isZeroConst()
 					|| arg.isRegister() && grounded.contains(((RegisterArg) arg).getSVar())) {
 				return true;
@@ -6839,7 +6942,10 @@ public final class FinishTypeInference extends AbstractVisitor {
 	private static boolean collectClosedNullFlowTerminals(Set<SSAVar> flowVars,
 			Map<RegisterArg, ArgType> terminalUses) {
 		for (SSAVar var : flowVars) {
-			for (RegisterArg use : new ArrayList<>(var.getUseList())) {
+			List<RegisterArg> useList = var.getUseList();
+			int usesCount = useList.size();
+			for (int useIndex = 0; useIndex < usesCount; useIndex++) {
+				RegisterArg use = useList.get(useIndex);
 				InsnNode useInsn = use.getParentInsn();
 				if (useInsn == null) {
 					return false;
@@ -6882,7 +6988,10 @@ public final class FinishTypeInference extends AbstractVisitor {
 	}
 
 	private static boolean hasGeneratedMoveUse(SSAVar var) {
-		for (RegisterArg use : var.getUseList()) {
+		List<RegisterArg> useList = var.getUseList();
+		int usesCount = useList.size();
+		for (int useIndex = 0; useIndex < usesCount; useIndex++) {
+			RegisterArg use = useList.get(useIndex);
 			InsnNode useInsn = use.getParentInsn();
 			if (useInsn != null && !useInsn.contains(AFlag.DONT_GENERATE) && useInsn.getType() == InsnType.MOVE) {
 				return true;
@@ -6892,7 +7001,10 @@ public final class FinishTypeInference extends AbstractVisitor {
 	}
 
 	private static boolean collectDirectTypedNullUses(SSAVar var, Map<RegisterArg, ArgType> terminalUses) {
-		for (RegisterArg use : var.getUseList()) {
+		List<RegisterArg> useList = var.getUseList();
+		int usesCount = useList.size();
+		for (int useIndex = 0; useIndex < usesCount; useIndex++) {
+			RegisterArg use = useList.get(useIndex);
 			InsnNode useInsn = use.getParentInsn();
 			if (useInsn == null) {
 				return false;
@@ -6915,7 +7027,10 @@ public final class FinishTypeInference extends AbstractVisitor {
 		if (!visited.add(var)) {
 			return true;
 		}
-		for (RegisterArg use : new ArrayList<>(var.getUseList())) {
+		List<RegisterArg> useList = var.getUseList();
+		int usesCount = useList.size();
+		for (int useIndex = 0; useIndex < usesCount; useIndex++) {
+			RegisterArg use = useList.get(useIndex);
 			InsnNode useInsn = use.getParentInsn();
 			if (useInsn == null) {
 				return false;

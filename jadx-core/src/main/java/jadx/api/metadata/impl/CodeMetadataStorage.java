@@ -22,10 +22,18 @@ public class CodeMetadataStorage implements ICodeMetadata {
 		if (map.isEmpty() && lines.isEmpty()) {
 			return ICodeMetadata.EMPTY;
 		}
-		Comparator<Integer> reverseCmp = Comparator.comparingInt(Integer::intValue).reversed();
-		NavigableMap<Integer, ICodeAnnotation> navMap = new TreeMap<>(reverseCmp);
-		navMap.putAll(map);
+		NavigableMap<Integer, ICodeAnnotation> navMap;
+		if (map instanceof ReverseAnnotationMap) {
+			navMap = (ReverseAnnotationMap) map;
+		} else {
+			navMap = newAnnotationMap();
+			navMap.putAll(map);
+		}
 		return new CodeMetadataStorage(lines, navMap);
+	}
+
+	public static NavigableMap<Integer, ICodeAnnotation> newAnnotationMap() {
+		return new ReverseAnnotationMap();
 	}
 
 	public static ICodeMetadata empty() {
@@ -38,6 +46,14 @@ public class CodeMetadataStorage implements ICodeMetadata {
 	// <character index into the file> -> <code annotation>
 	// the key is what is returned by AbstractCodeArea#getCaretPos() when clicking in a code panel.
 	private final NavigableMap<Integer, ICodeAnnotation> navMap;
+
+	private static final class ReverseAnnotationMap extends TreeMap<Integer, ICodeAnnotation> {
+		private static final long serialVersionUID = 2874416599039750427L;
+
+		private ReverseAnnotationMap() {
+			super(Comparator.comparingInt(Integer::intValue).reversed());
+		}
+	}
 
 	private CodeMetadataStorage(Map<Integer, Integer> lines, NavigableMap<Integer, ICodeAnnotation> navMap) {
 		this.lines = lines;

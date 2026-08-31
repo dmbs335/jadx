@@ -110,7 +110,9 @@ public class SimplifyVisitor extends AbstractVisitor {
 
 	private void simplifyArgs(MethodNode mth, InsnNode insn) {
 		boolean changed = false;
-		for (InsnArg arg : insn.getArguments()) {
+		int argsCount = insn.getArgsCount();
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = insn.getArg(i);
 			if (arg.isInsnWrap()) {
 				InsnNode wrapInsn = ((InsnWrapArg) arg).getWrapInsn();
 				InsnNode replaceInsn = simplifyInsn(mth, wrapInsn, insn);

@@ -21,40 +21,95 @@ import jadx.core.utils.exceptions.JadxRuntimeException;
 public class TypeUpdateInfo {
 	private static final int LIST_UPDATES_LIMIT = 8;
 
-	private final MethodNode mth;
-	private final TypeUpdateFlags flags;
+	private MethodNode mth;
+	private TypeUpdateFlags flags;
 	private InsnArg @Nullable [] updateArgs;
 	private ArgType @Nullable [] updateTypes;
-	private int @Nullable [] updateSeqs;
 	private int updateCount;
 	private @Nullable Map<InsnArg, ArgType> updateMap;
-	private final List<TypeUpdateRequest> queue = new ArrayList<>();
-	private final List<TypeUpdateRequest> callbackQueue = new ArrayList<>();
+	private @Nullable Map<InsnArg, ArgType> cachedUpdateMap;
+	private @Nullable List<TypeUpdateRequest> queue;
+	private @Nullable List<TypeUpdateRequest> callbackQueue;
 	private @Nullable TypeUpdateRequest requestPool;
 	private @Nullable ArgsListUpdateCallback<?> argsListCallbackPool;
-	private final int updatesLimitCount;
+	private int updatesLimitCount;
 	private int updateSeq = 0;
+	private @Nullable TypeUpdateInfo nextFree;
 
 	public TypeUpdateInfo(MethodNode mth, TypeUpdateFlags flags, JadxArgs args) {
+		init(mth, flags, args);
+	}
+
+	void init(MethodNode mth, TypeUpdateFlags flags, JadxArgs args) {
 		this.mth = mth;
 		this.flags = flags;
 		this.updatesLimitCount = mth.getInsnsCount() * args.getTypeUpdatesLimitCount();
+		this.nextFree = null;
+	}
+
+	void recycle(@Nullable TypeUpdateInfo nextFree) {
+		recycleRequests(queue);
+		recycleRequests(callbackQueue);
+		if (updateArgs != null) {
+			Arrays.fill(updateArgs, 0, updateCount, null);
+			Arrays.fill(updateTypes, 0, updateCount, null);
+		}
+		updateCount = 0;
+		updateSeq = 0;
+		Map<InsnArg, ArgType> map = updateMap;
+		if (map != null) {
+			map.clear();
+			cachedUpdateMap = map;
+			updateMap = null;
+		}
+		mth = null;
+		flags = null;
+		this.nextFree = nextFree;
+	}
+
+	private void recycleRequests(@Nullable List<TypeUpdateRequest> requests) {
+		if (requests == null) {
+			return;
+		}
+		for (int i = 0, count = requests.size(); i < count; i++) {
+			releaseRequest(requests.get(i));
+		}
+		requests.clear();
+	}
+
+	@Nullable
+	TypeUpdateInfo getNextFree() {
+		return nextFree;
 	}
 
 	public void queueRequest(InsnArg arg, ArgType candidateType, boolean direct, @Nullable ITypeUpdateCallback callback) {
-		queue.add(acquireRequest(arg, candidateType, direct, callback));
+		List<TypeUpdateRequest> requests = queue;
+		if (requests == null) {
+			requests = new ArrayList<>();
+			queue = requests;
+		}
+		requests.add(acquireRequest(arg, candidateType, direct, callback));
 	}
 
 	public void saveCallback(InsnArg arg, ArgType candidateType, boolean direct, ITypeUpdateCallback callback) {
-		callbackQueue.add(acquireRequest(arg, candidateType, direct, callback));
+		addCallback(acquireRequest(arg, candidateType, direct, callback));
 	}
 
 	public void saveCallback(TypeUpdateRequest request) {
 		if (request.getCallback() != null) {
-			callbackQueue.add(request);
+			addCallback(request);
 		} else {
 			releaseRequest(request);
 		}
+	}
+
+	private void addCallback(TypeUpdateRequest request) {
+		List<TypeUpdateRequest> callbacks = callbackQueue;
+		if (callbacks == null) {
+			callbacks = new ArrayList<>();
+			callbackQueue = callbacks;
+		}
+		callbacks.add(request);
 	}
 
 	public void releaseRequest(TypeUpdateRequest request) {
@@ -92,11 +147,13 @@ public class TypeUpdateInfo {
 	}
 
 	public @Nullable TypeUpdateRequest pollNextRequest() {
-		return ListUtils.removeLast(queue);
+		List<TypeUpdateRequest> requests = queue;
+		return requests == null ? null : ListUtils.removeLast(requests);
 	}
 
 	public @Nullable TypeUpdateRequest pollNextCallback() {
-		return ListUtils.removeLast(callbackQueue);
+		List<TypeUpdateRequest> callbacks = callbackQueue;
+		return callbacks == null ? null : ListUtils.removeLast(callbacks);
 	}
 
 	public void requestUpdate(InsnArg arg, ArgType changeType) {
@@ -119,10 +176,9 @@ public class TypeUpdateInfo {
 		ensureUpdateCapacity();
 		InsnArg[] args = updateArgs;
 		ArgType[] types = updateTypes;
-		int[] seqs = updateSeqs;
 		args[updateCount] = arg;
 		types[updateCount] = changeType;
-		seqs[updateCount] = updateSeq++;
+		updateSeq++;
 		updateCount++;
 		if (map != null && updateCount == LIST_UPDATES_LIMIT + 1) {
 			map.put(arg, changeType);
@@ -137,7 +193,12 @@ public class TypeUpdateInfo {
 	}
 
 	private Map<InsnArg, ArgType> promoteToMap() {
-		Map<InsnArg, ArgType> map = new IdentityHashMap<>();
+		Map<InsnArg, ArgType> map = cachedUpdateMap;
+		if (map == null) {
+			map = new IdentityHashMap<>();
+		} else {
+			cachedUpdateMap = null;
+		}
 		InsnArg[] args = updateArgs;
 		ArgType[] types = updateTypes;
 		for (int i = 0; i < updateCount; i++) {
@@ -152,14 +213,12 @@ public class TypeUpdateInfo {
 		if (args == null) {
 			updateArgs = new InsnArg[LIST_UPDATES_LIMIT];
 			updateTypes = new ArgType[LIST_UPDATES_LIMIT];
-			updateSeqs = new int[LIST_UPDATES_LIMIT];
 			return;
 		}
 		if (updateCount == args.length) {
 			int newLength = args.length * 2;
 			updateArgs = Arrays.copyOf(args, newLength);
 			updateTypes = Arrays.copyOf(updateTypes, newLength);
-			updateSeqs = Arrays.copyOf(updateSeqs, newLength);
 		}
 	}
 
@@ -230,9 +289,8 @@ public class TypeUpdateInfo {
 		List<TypeUpdateEntry> result = new ArrayList<>(updateCount);
 		InsnArg[] args = updateArgs;
 		ArgType[] types = updateTypes;
-		int[] seqs = updateSeqs;
 		for (int i = 0; i < updateCount; i++) {
-			result.add(new TypeUpdateEntry(seqs[i], args[i], types[i]));
+			result.add(new TypeUpdateEntry(i, args[i], types[i]));
 		}
 		return result;
 	}

@@ -1,12 +1,12 @@
 package jadx.core.dex.attributes.nodes;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import jadx.api.CommentsLevel;
 import jadx.api.plugins.input.data.attributes.IJadxAttrType;
@@ -34,22 +34,40 @@ public class JadxCommentsAttr implements IJadxAttribute {
 	private final Map<CommentsLevel, Set<String>> comments = new EnumMap<>(CommentsLevel.class);
 
 	public void add(CommentsLevel level, String comment) {
-		comments.computeIfAbsent(level, l -> new HashSet<>()).add(comment);
+		Set<String> levelComments = comments.get(level);
+		if (levelComments == null) {
+			levelComments = new HashSet<>();
+			comments.put(level, levelComments);
+		}
+		levelComments.add(comment);
 	}
 
 	public List<String> formatAndFilter(CommentsLevel level) {
 		if (level == CommentsLevel.NONE || level == CommentsLevel.USER_ONLY) {
 			return Collections.emptyList();
 		}
-		return comments.entrySet().stream()
-				.filter(e -> e.getKey().filter(level))
-				.flatMap(e -> {
-					String levelName = e.getKey().name();
-					return e.getValue().stream()
-							.map(v -> "JADX " + levelName + ": " + v);
-				})
-				.sorted()
-				.collect(Collectors.toList());
+		int resultSize = 0;
+		for (Map.Entry<CommentsLevel, Set<String>> entry : comments.entrySet()) {
+			if (entry.getKey().filter(level)) {
+				resultSize += entry.getValue().size();
+			}
+		}
+		if (resultSize == 0) {
+			return Collections.emptyList();
+		}
+		List<String> result = new ArrayList<>(resultSize);
+		for (Map.Entry<CommentsLevel, Set<String>> entry : comments.entrySet()) {
+			CommentsLevel commentLevel = entry.getKey();
+			if (!commentLevel.filter(level)) {
+				continue;
+			}
+			String prefix = "JADX " + commentLevel.name() + ": ";
+			for (String comment : entry.getValue()) {
+				result.add(prefix + comment);
+			}
+		}
+		Collections.sort(result);
+		return result;
 	}
 
 	public Map<CommentsLevel, Set<String>> getComments() {

@@ -1,7 +1,9 @@
 package jadx.core.dex.nodes.utils;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -74,12 +76,12 @@ public class MethodUtils {
 	 * Beware {@code startCls} can be different from {@code mthInfo.getDeclClass()}
 	 */
 	public boolean isMethodArgsOverloaded(ArgType startCls, MethodInfo mthInfo) {
-		return processMethodArgsOverloaded(startCls, mthInfo, null);
+		return processMethodArgsOverloaded(startCls, mthInfo, null, null);
 	}
 
 	public List<IMethodDetails> collectOverloadedMethods(ArgType startCls, MethodInfo mthInfo) {
 		List<IMethodDetails> list = new ArrayList<>();
-		processMethodArgsOverloaded(startCls, mthInfo, list);
+		processMethodArgsOverloaded(startCls, mthInfo, list, null);
 		return list;
 	}
 
@@ -95,14 +97,21 @@ public class MethodUtils {
 		return null;
 	}
 
-	private boolean processMethodArgsOverloaded(ArgType startCls, MethodInfo mthInfo, @Nullable List<IMethodDetails> collectedMths) {
+	private boolean processMethodArgsOverloaded(ArgType startCls, MethodInfo mthInfo,
+			@Nullable List<IMethodDetails> collectedMths, @Nullable Set<ArgType> visited) {
 		if (startCls == null || !startCls.isObject()) {
+			return false;
+		}
+		if (visited != null && !visited.add(startCls)) {
 			return false;
 		}
 		boolean isMthConstructor = mthInfo.isConstructor() || mthInfo.isClassInit();
 		ClassNode classNode = root.resolveClass(startCls);
 		if (classNode != null) {
-			for (MethodNode mth : classNode.getMethods()) {
+			List<MethodNode> methods = classNode.getMethods();
+			int methodsCount = methods.size();
+			for (int methodIndex = 0; methodIndex < methodsCount; methodIndex++) {
+				MethodNode mth = methods.get(methodIndex);
 				if (mthInfo.isOverloadedBy(mth.getMethodInfo())) {
 					if (collectedMths == null) {
 						return true;
@@ -111,13 +120,18 @@ public class MethodUtils {
 				}
 			}
 			if (!isMthConstructor) {
-				if (processMethodArgsOverloaded(classNode.getSuperClass(), mthInfo, collectedMths)) {
+				List<ArgType> interfaces = classNode.getInterfaces();
+				Set<ArgType> hierarchyVisited = ensureVisitedForBranch(visited, startCls,
+						(classNode.getSuperClass() == null ? 0 : 1) + interfaces.size());
+				if (processMethodArgsOverloaded(classNode.getSuperClass(), mthInfo, collectedMths, hierarchyVisited)) {
 					if (collectedMths == null) {
 						return true;
 					}
 				}
-				for (ArgType parentInterface : classNode.getInterfaces()) {
-					if (processMethodArgsOverloaded(parentInterface, mthInfo, collectedMths)) {
+				int interfacesCount = interfaces.size();
+				for (int interfaceIndex = 0; interfaceIndex < interfacesCount; interfaceIndex++) {
+					if (processMethodArgsOverloaded(
+							interfaces.get(interfaceIndex), mthInfo, collectedMths, hierarchyVisited)) {
 						if (collectedMths == null) {
 							return true;
 						}
@@ -139,8 +153,10 @@ public class MethodUtils {
 				}
 			}
 			if (!isMthConstructor) {
-				for (ArgType parent : clsDetails.getParents()) {
-					if (processMethodArgsOverloaded(parent, mthInfo, collectedMths)) {
+				ArgType[] parents = clsDetails.getParents();
+				Set<ArgType> hierarchyVisited = ensureVisitedForBranch(visited, startCls, parents.length);
+				for (ArgType parent : parents) {
+					if (processMethodArgsOverloaded(parent, mthInfo, collectedMths, hierarchyVisited)) {
 						if (collectedMths == null) {
 							return true;
 						}
@@ -149,6 +165,16 @@ public class MethodUtils {
 			}
 		}
 		return false;
+	}
+
+	private static @Nullable Set<ArgType> ensureVisitedForBranch(
+			@Nullable Set<ArgType> visited, ArgType currentType, int parentCount) {
+		if (visited != null || parentCount < 2) {
+			return visited;
+		}
+		Set<ArgType> newVisited = new HashSet<>(8);
+		newVisited.add(currentType);
+		return newVisited;
 	}
 
 	@Nullable

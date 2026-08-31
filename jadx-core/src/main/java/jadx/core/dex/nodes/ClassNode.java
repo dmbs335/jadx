@@ -738,8 +738,11 @@ public class ClassNode extends NotificationAttrNode
 	}
 
 	public FieldNode searchField(FieldInfo field) {
-		for (FieldNode f : fields) {
-			if (f.getFieldInfo().equals(field)) {
+		int fieldsCount = fields.size();
+		for (int i = 0; i < fieldsCount; i++) {
+			FieldNode f = fields.get(i);
+			FieldInfo fieldInfo = f.getFieldInfo();
+			if (fieldInfo == field || fieldInfo.equals(field)) {
 				return f;
 			}
 		}

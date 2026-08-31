@@ -143,11 +143,12 @@ public class FileUtils {
 	private static final Object MKDIR_SYNC = new Object();
 
 	public static void makeDirs(@Nullable File dir) {
-		if (dir != null) {
-			synchronized (MKDIR_SYNC) {
-				if (!dir.mkdirs() && !dir.isDirectory()) {
-					throw new JadxRuntimeException("Can't create directory " + dir);
-				}
+		if (dir == null || dir.isDirectory()) {
+			return;
+		}
+		synchronized (MKDIR_SYNC) {
+			if (!dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) {
+				throw new JadxRuntimeException("Can't create directory " + dir);
 			}
 		}
 	}

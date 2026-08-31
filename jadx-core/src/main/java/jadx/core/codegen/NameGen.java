@@ -39,12 +39,18 @@ public class NameGen {
 
 	private void addNamesUsedInClass() {
 		ClassNode parentClass = mth.getParentClass();
-		for (FieldNode field : parentClass.getFields()) {
+		List<FieldNode> fields = parentClass.getFields();
+		int fieldsCount = fields.size();
+		for (int i = 0; i < fieldsCount; i++) {
+			FieldNode field = fields.get(i);
 			if (field.isStatic()) {
 				varNames.add(field.getAlias());
 			}
 		}
-		for (ClassNode innerClass : parentClass.getInnerClasses()) {
+		List<ClassNode> innerClasses = parentClass.getInnerClasses();
+		int innerClassesCount = innerClasses.size();
+		for (int i = 0; i < innerClassesCount; i++) {
+			ClassNode innerClass = innerClasses.get(i);
 			varNames.add(innerClass.getClassInfo().getAliasShortName());
 		}
 	}

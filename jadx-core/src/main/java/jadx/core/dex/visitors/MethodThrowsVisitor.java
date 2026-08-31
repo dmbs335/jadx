@@ -198,7 +198,9 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 		if (snapshot) {
 			blocks = new ArrayList<>(blocks);
 		}
-		blocks: for (BlockNode block : blocks) {
+		int blocksCount = blocks.size();
+		blocks: for (int blockIndex = 0; blockIndex < blocksCount; blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
 			// Skip e.g. throw instructions of synchronized regions
 			boolean skipExceptions = block.contains(AFlag.REMOVE) || block.contains(AFlag.DONT_GENERATE);
 			Set<String> excludedExceptions = java.util.Collections.emptySet();
@@ -208,7 +210,9 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 				if (snapshot) {
 					handlers = new ArrayList<>(handlers);
 				}
-				for (ExceptionHandler handler : handlers) {
+				int handlersCount = handlers.size();
+				for (int i = 0; i < handlersCount; i++) {
+					ExceptionHandler handler = handlers.get(i);
 					if (handler.isCatchAll()) {
 						continue blocks;
 					}
@@ -222,7 +226,9 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 			if (snapshot) {
 				instructions = new ArrayList<>(instructions);
 			}
-			for (InsnNode insn : instructions) {
+			int instructionsCount = instructions.size();
+			for (int i = 0; i < instructionsCount; i++) {
+				InsnNode insn = instructions.get(i);
 				checkInsn(mth, insn, excludedExceptions, skipExceptions);
 			}
 		}

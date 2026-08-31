@@ -49,7 +49,9 @@ public class DominatorTree {
 				List<BlockNode> preds = predFunc.apply(b);
 				int pickedPred = -1;
 				BlockNode newIDom = null;
-				for (BlockNode pred : preds) {
+				int predsCount = preds.size();
+				for (int i = 0; i < predsCount; i++) {
+					BlockNode pred = preds.get(i);
 					int id = pred.getId();
 					if (doms[id] != null) {
 						newIDom = pred;
@@ -60,7 +62,8 @@ public class DominatorTree {
 				if (newIDom == null) {
 					throw new JadxRuntimeException("No immediate dominator for block: " + b);
 				}
-				for (BlockNode predBlock : preds) {
+				for (int i = 0; i < predsCount; i++) {
+					BlockNode predBlock = preds.get(i);
 					int predId = predBlock.getId();
 					if (predId == pickedPred) {
 						continue;
@@ -109,7 +112,7 @@ public class DominatorTree {
 	}
 
 	static BitSet collectDoms(BlockNode[] doms, BlockNode idom) {
-		BitSet domBS = new BitSet(doms.length);
+		BitSet domBS = new BitSet();
 		BlockNode nextIDom = idom;
 		while (true) {
 			int id = nextIDom.getId();

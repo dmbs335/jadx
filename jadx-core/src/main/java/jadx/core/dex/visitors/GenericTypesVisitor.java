@@ -1,5 +1,7 @@
 package jadx.core.dex.visitors;
 
+import java.util.List;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,8 +33,13 @@ public class GenericTypesVisitor extends AbstractVisitor {
 		if (mth.isNoCode()) {
 			return;
 		}
-		for (BlockNode block : mth.getBasicBlocks()) {
-			for (InsnNode insn : block.getInstructions()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		int blocksCount = blocks.size();
+		for (int blockIndex = 0; blockIndex < blocksCount; blockIndex++) {
+			List<InsnNode> insns = blocks.get(blockIndex).getInstructions();
+			int insnsCount = insns.size();
+			for (int insnIndex = 0; insnIndex < insnsCount; insnIndex++) {
+				InsnNode insn = insns.get(insnIndex);
 				if (insn.getType() == InsnType.CONSTRUCTOR) {
 					attachGenericTypesInfo(mth, (ConstructorInsn) insn);
 				}

@@ -32,6 +32,27 @@ public class TypeGen {
 		return stype.getShortName();
 	}
 
+	public static void appendSignature(StringBuilder sb, ArgType type) {
+		PrimitiveType stype = type.getPrimitiveType();
+		if (stype == PrimitiveType.OBJECT) {
+			int start = sb.length();
+			sb.append('L').append(type.getObject()).append(';');
+			int end = sb.length() - 1;
+			for (int i = start + 1; i < end; i++) {
+				if (sb.charAt(i) == '.') {
+					sb.setCharAt(i, '/');
+				}
+			}
+			return;
+		}
+		if (stype == PrimitiveType.ARRAY) {
+			sb.append('[');
+			appendSignature(sb, type.getArrayElement());
+			return;
+		}
+		sb.append(stype.getShortName());
+	}
+
 	public static List<String> signatures(List<ArgType> types) {
 		return Utils.collectionMap(types, TypeGen::signature);
 	}

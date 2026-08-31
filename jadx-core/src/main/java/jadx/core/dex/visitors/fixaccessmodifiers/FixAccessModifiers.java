@@ -1,7 +1,7 @@
 package jadx.core.dex.visitors.fixaccessmodifiers;
 
+import java.util.HashSet;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import jadx.api.CommentsLevel;
 import jadx.api.plugins.input.data.AccessFlags;
@@ -81,9 +81,10 @@ public class FixAccessModifiers extends AbstractVisitor {
 			boolean isCandidateForInline = useMth.contains(AFlag.METHOD_CANDIDATE_FOR_INLINE);
 
 			if (isInline || isCandidateForInline) {
-				Set<ClassNode> usedInClss = useMth.getUseIn().stream()
-						.map(MethodNode::getParentClass)
-						.collect(Collectors.toSet());
+				Set<ClassNode> usedInClss = new HashSet<>();
+				for (MethodNode use : useMth.getUseIn()) {
+					usedInClss.add(use.getParentClass());
+				}
 
 				for (ClassNode useCls : usedInClss) {
 					visibilityUtils.checkVisibility(cls, useCls, (node, visFlag) -> {
@@ -102,7 +103,7 @@ public class FixAccessModifiers extends AbstractVisitor {
 			IMethodDetails parentMD = overrideAttr.getOverrideList().get(0);
 			AccessInfo parentAccInfo = new AccessInfo(parentMD.getRawAccessFlags(), AccessInfo.AFType.METHOD);
 			if (accessFlags.isVisibilityWeakerThan(parentAccInfo)) {
-				changeVisibility(mth, parentAccInfo.getVisibility().rawValue());
+				changeVisibility(mth, parentAccInfo.rawValue() & AccessInfo.VISIBILITY_FLAGS);
 			}
 		}
 

@@ -1,7 +1,5 @@
 package jadx.core.dex.visitors.fixaccessmodifiers;
 
-import java.util.function.Consumer;
-
 import jadx.api.plugins.input.data.AccessFlags;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.nodes.ClassNode;
@@ -26,23 +24,22 @@ class VisibilityUtils {
 				? (ClassNode) callerNode
 				: callerNode.getDeclaringClass();
 
-		if (targetCls.equals(callerCls) || inSameTopClass(targetCls, callerCls)) {
+		if (targetCls == callerCls || inSameTopClass(targetCls, callerCls)) {
 			return;
 		}
 
 		if (inSamePkg(targetCls, callerCls)) {
-			visitDeclaringNodes(targetNode, node -> {
+			ICodeNode node = targetNode;
+			do {
 				if (node.getAccessFlags().isPrivate()) {
 					callback.onBadVisibility(node, 0); // PACKAGE_PRIVATE
 				}
-			});
+				node = node.getDeclaringClass();
+			} while (node != null);
 		} else {
-			visitDeclaringNodes(targetNode, node -> {
-				AccessInfo nodeVisFlags = node.getAccessFlags().getVisibility();
-				if (nodeVisFlags.isPublic()) {
-					return;
-				}
-
+			ICodeNode node = targetNode;
+			do {
+				AccessInfo nodeVisFlags = node.getAccessFlags();
 				if (nodeVisFlags.isPrivate() || nodeVisFlags.isPackagePrivate()) {
 					ClassNode nodeDeclaringCls = node.getDeclaringClass();
 					int expectedVisFlag = nodeDeclaringCls != null && isSuperType(callerCls, nodeDeclaringCls)
@@ -55,32 +52,24 @@ class VisibilityUtils {
 					if (nodeDeclaringCls == null || !isSuperType(callerCls, nodeDeclaringCls)) {
 						callback.onBadVisibility(node, AccessFlags.PUBLIC);
 					}
-				} else {
+				} else if (!nodeVisFlags.isPublic()) {
 					throw new JadxRuntimeException(nodeVisFlags + " is not supported");
 				}
-			});
+				node = node.getDeclaringClass();
+			} while (node != null);
 		}
 	}
 
-	private static void visitDeclaringNodes(ICodeNode targetNode, Consumer<ICodeNode> action) {
-		ICodeNode currentNode = targetNode;
-		do {
-			action.accept(currentNode);
-			currentNode = currentNode.getDeclaringClass();
-		} while (currentNode != null);
-	}
-
 	private static boolean inSamePkg(ClassNode cls1, ClassNode cls2) {
-		return cls1.getPackageNode().equals(cls2.getPackageNode());
+		return cls1.getPackageNode() == cls2.getPackageNode();
 	}
 
 	private static boolean inSameTopClass(ClassNode cls1, ClassNode cls2) {
-		return cls1.getTopParentClass().equals(cls2.getTopParentClass());
+		return cls1.getTopParentClass() == cls2.getTopParentClass();
 	}
 
 	private boolean isSuperType(ClassNode cls, ClassNode superCls) {
-		return root.getClsp().getSuperTypes(cls.getRawName()).stream()
-				.anyMatch(x -> x.equals(superCls.getRawName()));
+		return root.getClsp().isImplements(cls.getRawName(), superCls.getRawName());
 	}
 
 	interface OnBadVisibilityCallback {

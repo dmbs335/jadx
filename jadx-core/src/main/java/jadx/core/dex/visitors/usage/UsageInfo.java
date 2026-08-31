@@ -4,7 +4,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.function.Consumer;
 
 import jadx.api.usage.IUsageInfoData;
 import jadx.api.usage.IUsageInfoVisitor;
@@ -87,33 +86,27 @@ public class UsageInfo implements IUsageInfoData {
 	}
 
 	public void clsUse(ClassNode cls, ArgType useType) {
-		processType(useType, depCls -> clsUse(cls, depCls));
+		processType(useType, cls, null);
 	}
 
 	public void clsUse(MethodNode mth, ArgType useType) {
-		processType(useType, depCls -> clsUse(mth, depCls));
+		processType(useType, mth.getParentClass(), mth);
 	}
 
 	public void clsUse(ICodeNode node, ArgType useType) {
-		Consumer<ClassNode> consumer;
 		switch (node.getAnnType()) {
 			case CLASS:
-				ClassNode cls = (ClassNode) node;
-				consumer = depCls -> clsUse(cls, depCls);
-				break;
+				clsUse((ClassNode) node, useType);
+				return;
 			case METHOD:
-				MethodNode mth = (MethodNode) node;
-				consumer = depCls -> clsUse(mth, depCls);
-				break;
+				clsUse((MethodNode) node, useType);
+				return;
 			case FIELD:
-				FieldNode fld = (FieldNode) node;
-				ClassNode fldCls = fld.getParentClass();
-				consumer = depCls -> clsUse(fldCls, depCls);
-				break;
+				clsUse(((FieldNode) node).getParentClass(), useType);
+				return;
 			default:
 				throw new JadxRuntimeException("Unexpected use type: " + node.getAnnType());
 		}
-		processType(useType, consumer);
 	}
 
 	public void clsUse(MethodNode mth, ClassNode useCls) {
@@ -145,7 +138,9 @@ public class UsageInfo implements IUsageInfoData {
 		}
 		// implicit usage
 		clsUse(mth, useMth.getReturnType());
-		useMth.getMethodInfo().getArgumentsTypes().forEach(argType -> clsUse(mth, argType));
+		for (ArgType argType : useMth.getMethodInfo().getArgumentsTypes()) {
+			clsUse(mth, argType);
+		}
 	}
 
 	/**
@@ -186,12 +181,12 @@ public class UsageInfo implements IUsageInfoData {
 	/**
 	 * Visit all class nodes found in subtypes of the provided type.
 	 */
-	private void processType(ArgType type, Consumer<ClassNode> consumer) {
+	private void processType(ArgType type, ClassNode sourceCls, MethodNode sourceMth) {
 		if (type == null || type == ArgType.OBJECT) {
 			return;
 		}
 		if (type.isArray()) {
-			processType(type.getArrayRootElement(), consumer);
+			processType(type.getArrayRootElement(), sourceCls, sourceMth);
 			return;
 		}
 		if (type.isObject()) {
@@ -202,23 +197,27 @@ public class UsageInfo implements IUsageInfoData {
 			}
 			ClassNode clsNode = root.resolveClass(type);
 			if (clsNode != null) {
-				consumer.accept(clsNode);
+				clsUse(sourceCls, clsNode);
+				if (sourceMth != null && sourceCls != clsNode) {
+					// exclude class usage in self methods
+					clsUseInMth.add(clsNode, sourceMth);
+				}
 			}
 			List<ArgType> genericTypes = type.getGenericTypes();
 			if (notEmpty(genericTypes)) {
 				for (ArgType argType : genericTypes) {
-					processType(argType, consumer);
+					processType(argType, sourceCls, sourceMth);
 				}
 			}
 			List<ArgType> extendTypes = type.getExtendTypes();
 			if (notEmpty(extendTypes)) {
 				for (ArgType extendType : extendTypes) {
-					processType(extendType, consumer);
+					processType(extendType, sourceCls, sourceMth);
 				}
 			}
 			ArgType wildcardType = type.getWildcardType();
 			if (wildcardType != null) {
-				processType(wildcardType, consumer);
+				processType(wildcardType, sourceCls, sourceMth);
 			}
 			// TODO: process 'outer' types (check TestOuterGeneric test)
 		}

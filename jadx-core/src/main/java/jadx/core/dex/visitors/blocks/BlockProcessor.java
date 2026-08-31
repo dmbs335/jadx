@@ -522,7 +522,9 @@ public class BlockProcessor extends AbstractVisitor {
 	}
 
 	private static boolean modifyBlocksTree(MethodNode mth) {
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int i = 0, count = blocks.size(); i < count; i++) {
+			BlockNode block = blocks.get(i);
 			if (checkLoops(mth, block)) {
 				return true;
 			}
@@ -530,13 +532,15 @@ public class BlockProcessor extends AbstractVisitor {
 		if (mergeConstReturn(mth)) {
 			return true;
 		}
-		for (BlockNode basicBlock : mth.getBasicBlocks()) {
+		for (int i = 0, count = blocks.size(); i < count; i++) {
+			BlockNode basicBlock = blocks.get(i);
 			if (duplicateLoopSharedMoveBlock(mth, basicBlock)) {
 				return true;
 			}
 		}
 		if (CodeFeaturesAttr.contains(mth, CodeFeaturesAttr.CodeFeature.SWITCH)) {
-			for (BlockNode basicBlock : mth.getBasicBlocks()) {
+			for (int i = 0, count = blocks.size(); i < count; i++) {
+				BlockNode basicBlock = blocks.get(i);
 				if (duplicateSharedStringIfDiamond(mth, basicBlock)) {
 					return true;
 				}
@@ -1130,8 +1134,14 @@ public class BlockProcessor extends AbstractVisitor {
 	}
 
 	private static boolean isInMarkedLoop(MethodNode mth, BlockNode block) {
-		for (BlockNode loopEndPoint : mth.getBasicBlocks()) {
-			for (LoopInfo loop : loopEndPoint.getAll(AType.LOOP)) {
+		List<BlockNode> basicBlocks = mth.getBasicBlocks();
+		int blocksCount = basicBlocks.size();
+		for (int blockIndex = 0; blockIndex < blocksCount; blockIndex++) {
+			BlockNode loopEndPoint = basicBlocks.get(blockIndex);
+			List<LoopInfo> loops = loopEndPoint.getAll(AType.LOOP);
+			int loopsCount = loops.size();
+			for (int loopIndex = 0; loopIndex < loopsCount; loopIndex++) {
+				LoopInfo loop = loops.get(loopIndex);
 				if (loop.getLoopBlocks().contains(block)) {
 					return true;
 				}
@@ -1584,14 +1594,14 @@ public class BlockProcessor extends AbstractVisitor {
 	private static boolean insertBlocksForBreak(MethodNode mth, LoopInfo loop) {
 		boolean change = false;
 		List<Edge> edges = loop.getExitEdges();
-		if (!edges.isEmpty()) {
-			for (Edge edge : edges) {
-				BlockNode target = edge.getTarget();
-				BlockNode source = edge.getSource();
-				if (!target.contains(AFlag.SYNTHETIC) && !source.contains(AFlag.SYNTHETIC)) {
-					BlockSplitter.insertBlockBetween(mth, source, target);
-					change = true;
-				}
+		int edgesCount = edges.size();
+		for (int edgeIndex = 0; edgeIndex < edgesCount; edgeIndex++) {
+			Edge edge = edges.get(edgeIndex);
+			BlockNode target = edge.getTarget();
+			BlockNode source = edge.getSource();
+			if (!target.contains(AFlag.SYNTHETIC) && !source.contains(AFlag.SYNTHETIC)) {
+				BlockSplitter.insertBlockBetween(mth, source, target);
+				change = true;
 			}
 		}
 		if (DEBUG_MODS && change) {
@@ -1647,7 +1657,9 @@ public class BlockProcessor extends AbstractVisitor {
 
 	private static boolean splitExitBlocks(MethodNode mth) {
 		boolean changed = false;
-		for (BlockNode preExitBlock : mth.getPreExitBlocks()) {
+		List<BlockNode> preExitBlocks = mth.getPreExitBlocks();
+		for (int i = 0, count = preExitBlocks.size(); i < count; i++) {
+			BlockNode preExitBlock = preExitBlocks.get(i);
 			if (splitReturn(mth, preExitBlock)) {
 				changed = true;
 			} else if (splitThrow(mth, preExitBlock)) {
@@ -1666,7 +1678,9 @@ public class BlockProcessor extends AbstractVisitor {
 	private static void updateExitBlockConnections(MethodNode mth) {
 		BlockNode exitBlock = mth.getExitBlock();
 		BlockSplitter.removePredecessors(exitBlock);
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int i = 0, count = blocks.size(); i < count; i++) {
+			BlockNode block = blocks.get(i);
 			if (block != exitBlock
 					&& block.getSuccessors().isEmpty()
 					&& !block.contains(AFlag.REMOVE)) {

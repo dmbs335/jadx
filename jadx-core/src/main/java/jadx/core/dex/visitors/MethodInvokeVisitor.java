@@ -60,11 +60,15 @@ public class MethodInvokeVisitor extends AbstractVisitor {
 		if (mth.isNoCode()) {
 			return;
 		}
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int blockIndex = 0, blocksCount = blocks.size(); blockIndex < blocksCount; blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
 			if (block.contains(AFlag.DONT_GENERATE)) {
 				continue;
 			}
-			for (InsnNode insn : block.getInstructions()) {
+			List<InsnNode> instructions = block.getInstructions();
+			for (int insnIndex = 0, insnsCount = instructions.size(); insnIndex < insnsCount; insnIndex++) {
+				InsnNode insn = instructions.get(insnIndex);
 				if (insn.contains(AFlag.DONT_GENERATE)) {
 					continue;
 				}
@@ -112,8 +116,8 @@ public class MethodInvokeVisitor extends AbstractVisitor {
 		Map<ArgType, ArgType> typeVarsMapping = getTypeVarsMapping(invokeInsn);
 		IMethodDetails effectiveMthDetails = resolveTypeVars(mthDetails, typeVarsMapping);
 		List<IMethodDetails> effectiveOverloadMethods = new ArrayList<>(overloadMethods.size() + 1);
-		for (IMethodDetails overloadMethod : overloadMethods) {
-			effectiveOverloadMethods.add(resolveTypeVars(overloadMethod, typeVarsMapping));
+		for (int i = 0, count = overloadMethods.size(); i < count; i++) {
+			effectiveOverloadMethods.add(resolveTypeVars(overloadMethods.get(i), typeVarsMapping));
 		}
 		effectiveOverloadMethods.add(effectiveMthDetails);
 
@@ -338,11 +342,13 @@ public class MethodInvokeVisitor extends AbstractVisitor {
 			return false;
 		}
 		// TODO: search closest method, instead filtering
-		List<IMethodDetails> strictMethods = filterApplicableMethods(overloadedMethods, castTypes, MethodInvokeVisitor::isStrictTypes);
+		List<IMethodDetails> strictMethods = filterApplicableMethods(
+				overloadedMethods, castTypes, MethodInvokeVisitor::isStrictTypes);
 		if (strictMethods.size() == 1) {
 			return strictMethods.get(0).equals(expectedMthDetails);
 		}
-		List<IMethodDetails> resolvedMethods = filterApplicableMethods(overloadedMethods, castTypes, MethodInvokeVisitor::isTypeApplicable);
+		List<IMethodDetails> resolvedMethods = filterApplicableMethods(
+				overloadedMethods, castTypes, MethodInvokeVisitor::isTypeApplicable);
 		if (resolvedMethods.size() == 1) {
 			return resolvedMethods.get(0).equals(expectedMthDetails);
 		}
@@ -360,7 +366,8 @@ public class MethodInvokeVisitor extends AbstractVisitor {
 	private List<IMethodDetails> filterApplicableMethods(List<IMethodDetails> methods, List<ArgType> types,
 			Function<TypeCompareEnum, Boolean> acceptFunction) {
 		List<IMethodDetails> list = new ArrayList<>(methods.size());
-		for (IMethodDetails m : methods) {
+		for (int i = 0, count = methods.size(); i < count; i++) {
+			IMethodDetails m = methods.get(i);
 			if (isMethodAcceptable(m, types, acceptFunction)) {
 				list.add(m);
 			}

@@ -126,7 +126,9 @@ public class RegionMaker {
 	}
 
 	private void restoreLinearSyntheticMoveBlocks(Region rootRegion) {
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int i = 0, count = blocks.size(); i < count; i++) {
+			BlockNode block = blocks.get(i);
 			if (!block.contains(AFlag.SYNTHETIC)
 					|| block.getPredecessors().size() != 1
 					|| block.getCleanSuccessors().size() != 1

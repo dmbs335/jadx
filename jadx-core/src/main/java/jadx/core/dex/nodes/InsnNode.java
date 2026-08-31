@@ -251,7 +251,9 @@ public class InsnNode extends LineAttrNode {
 			}
 			return true;
 		}
-		for (InsnArg arg : getArguments()) {
+		int argsCount = getArgsCount();
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = getArg(i);
 			if (arg.isInsnWrap()) {
 				InsnNode wrapInsn = ((InsnWrapArg) arg).getWrapInsn();
 				if (!wrapInsn.canReorder()) {

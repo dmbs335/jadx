@@ -1,6 +1,9 @@
 package jadx.core.dex.attributes;
 
+import java.util.Collections;
 import java.util.List;
+
+import org.jetbrains.annotations.Nullable;
 
 import jadx.api.CommentsLevel;
 import jadx.api.plugins.input.data.annotations.IAnnotation;
@@ -12,9 +15,7 @@ import jadx.core.utils.Utils;
 
 public abstract class AttrNode implements IAttributeNode {
 
-	private static final AttributeStorage EMPTY_ATTR_STORAGE = EmptyAttrStorage.INSTANCE;
-
-	private AttributeStorage storage = EMPTY_ATTR_STORAGE;
+	private @Nullable AttributeStorage storage;
 
 	@Override
 	public void add(AFlag flag) {
@@ -56,7 +57,7 @@ public abstract class AttrNode implements IAttributeNode {
 	@Override
 	public void copyAttributesFrom(AttrNode attrNode) {
 		AttributeStorage copyFrom = attrNode.storage;
-		if (!copyFrom.isEmpty()) {
+		if (copyFrom != null && !copyFrom.isEmpty()) {
 			initStorage().addAll(copyFrom);
 		}
 	}
@@ -80,7 +81,7 @@ public abstract class AttrNode implements IAttributeNode {
 
 	private AttributeStorage initStorage() {
 		AttributeStorage store = storage;
-		if (store == EMPTY_ATTR_STORAGE) {
+		if (store == null) {
 			store = new AttributeStorage();
 			storage = store;
 		}
@@ -88,81 +89,100 @@ public abstract class AttrNode implements IAttributeNode {
 	}
 
 	private void unloadIfEmpty() {
-		if (storage.isEmpty() && storage != EMPTY_ATTR_STORAGE) {
-			storage = EMPTY_ATTR_STORAGE;
+		AttributeStorage store = storage;
+		if (store != null && store.isEmpty()) {
+			storage = null;
 		}
 	}
 
 	@Override
 	public boolean contains(AFlag flag) {
-		return storage.contains(flag);
+		AttributeStorage store = storage;
+		return store != null && store.contains(flag);
 	}
 
 	@Override
 	public <T extends IJadxAttribute> boolean contains(IJadxAttrType<T> type) {
-		return storage.contains(type);
+		AttributeStorage store = storage;
+		return store != null && store.contains(type);
 	}
 
 	@Override
 	public <T extends IJadxAttribute> T get(IJadxAttrType<T> type) {
-		return storage.get(type);
+		AttributeStorage store = storage;
+		return store == null ? null : store.get(type);
 	}
 
 	@Override
 	public IAnnotation getAnnotation(String cls) {
-		return storage.getAnnotation(cls);
+		AttributeStorage store = storage;
+		return store == null ? null : store.getAnnotation(cls);
 	}
 
 	@Override
 	public <T> List<T> getAll(IJadxAttrType<AttrList<T>> type) {
-		return storage.getAll(type);
+		AttributeStorage store = storage;
+		return store == null ? Collections.emptyList() : store.getAll(type);
 	}
 
 	@Override
 	public void remove(AFlag flag) {
-		storage.remove(flag);
-		unloadIfEmpty();
+		AttributeStorage store = storage;
+		if (store != null) {
+			store.remove(flag);
+			unloadIfEmpty();
+		}
 	}
 
 	@Override
 	public <T extends IJadxAttribute> void remove(IJadxAttrType<T> type) {
-		storage.remove(type);
-		unloadIfEmpty();
+		AttributeStorage store = storage;
+		if (store != null) {
+			store.remove(type);
+			unloadIfEmpty();
+		}
 	}
 
 	@Override
 	public void removeAttr(IJadxAttribute attr) {
-		storage.remove(attr);
-		unloadIfEmpty();
+		AttributeStorage store = storage;
+		if (store != null) {
+			store.remove(attr);
+			unloadIfEmpty();
+		}
 	}
 
 	@Override
 	public void clearAttributes() {
-		storage = EMPTY_ATTR_STORAGE;
+		storage = null;
 	}
 
 	public void unloadAttributes() {
-		if (storage == EMPTY_ATTR_STORAGE) {
+		AttributeStorage store = storage;
+		if (store == null) {
 			return;
 		}
-		storage.unloadAttributes();
-		storage.clearFlags();
+		store.unloadAttributes();
+		store.clearFlags();
 		unloadIfEmpty();
 	}
 
 	@Override
 	public List<String> getAttributesStringsList() {
-		return storage.getAttributeStrings();
+		AttributeStorage store = storage;
+		return store == null ? Collections.emptyList() : store.getAttributeStrings();
 	}
 
 	@Override
 	public String getAttributesString() {
-		return storage.toString();
+		AttributeStorage store = storage;
+		return store == null ? "" : store.toString();
 	}
 
 	@Override
 	public boolean isAttrStorageEmpty() {
-		return storage.isEmpty();
+		AttributeStorage store = storage;
+		return store == null || store.isEmpty();
 	}
 
 	private void addDebugComment(String msg) {

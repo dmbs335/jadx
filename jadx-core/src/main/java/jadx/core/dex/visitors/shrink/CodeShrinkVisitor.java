@@ -1,6 +1,7 @@
 package jadx.core.dex.visitors.shrink;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Objects;
@@ -44,39 +45,52 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 			return;
 		}
 		mth.remove(AFlag.REQUEST_CODE_SHRINK);
-		for (BlockNode block : mth.getBasicBlocks()) {
-			shrinkBlock(mth, block);
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		int blocksCount = blocks.size();
+		int maxInsnsCount = 0;
+		for (int i = 0; i < blocksCount; i++) {
+			maxInsnsCount = Math.max(maxInsnsCount, blocks.get(i).getInstructions().size());
+		}
+		ArgsInfo[] argsList = new ArgsInfo[maxInsnsCount];
+		for (int i = 0; i < blocksCount; i++) {
+			BlockNode block = blocks.get(i);
+			shrinkBlock(mth, block, argsList);
 			simplifyMoveInsns(mth, block);
 		}
 	}
 
-	private static void shrinkBlock(MethodNode mth, BlockNode block) {
+	private static void shrinkBlock(MethodNode mth, BlockNode block, ArgsInfo[] argsList) {
 		if (block.getInstructions().isEmpty()) {
 			return;
 		}
 		List<InsnNode> insnList = block.getInstructions();
 		int insnCount = insnList.size();
-		ArgsInfo[] argsList = new ArgsInfo[insnCount];
 		for (int i = 0; i < insnCount; i++) {
 			argsList[i] = new ArgsInfo(insnList.get(i), argsList, i);
 		}
-		List<WrapInfo> wrapList = null;
-		for (ArgsInfo argsInfo : argsList) {
-			List<RegisterArg> args = argsInfo.getArgs();
-			for (int i = args.size() - 1; i >= 0; i--) {
-				WrapInfo wrapInfo = checkInline(mth, block, insnList, argsInfo, args.get(i));
-				if (wrapInfo != null) {
-					if (wrapList == null) {
-						wrapList = new ArrayList<>();
+		try {
+			List<WrapInfo> wrapList = null;
+			for (int argsInfoIndex = 0; argsInfoIndex < insnCount; argsInfoIndex++) {
+				ArgsInfo argsInfo = argsList[argsInfoIndex];
+				for (int i = argsInfo.getArgsCount() - 1; i >= 0; i--) {
+					WrapInfo wrapInfo = checkInline(mth, block, insnList, argsInfo, argsInfo.getArg(i));
+					if (wrapInfo != null) {
+						if (wrapList == null) {
+							wrapList = new ArrayList<>(1);
+						}
+						wrapList.add(wrapInfo);
 					}
-					wrapList.add(wrapInfo);
 				}
 			}
-		}
-		if (wrapList != null) {
-			for (WrapInfo wrapInfo : wrapList) {
-				inline(mth, wrapInfo.getArg(), wrapInfo.getInsn(), block);
+			if (wrapList != null) {
+				int wrapCount = wrapList.size();
+				for (int i = 0; i < wrapCount; i++) {
+					WrapInfo wrapInfo = wrapList.get(i);
+					inline(mth, wrapInfo.getArg(), wrapInfo.getInsn(), block);
+				}
 			}
+		} finally {
+			Arrays.fill(argsList, 0, insnCount, null);
 		}
 	}
 
@@ -103,7 +117,10 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 		}
 		// allow inline only one use arg
 		int useCount = 0;
-		for (RegisterArg useArg : sVar.getUseList()) {
+		List<RegisterArg> useList = sVar.getUseList();
+		int usesCount = useList.size();
+		for (int i = 0; i < usesCount; i++) {
+			RegisterArg useArg = useList.get(i);
 			InsnNode parentInsn = useArg.getParentInsn();
 			if (parentInsn != null && parentInsn.contains(AFlag.DONT_GENERATE)) {
 				continue;
@@ -154,7 +171,10 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 	 */
 	private static boolean checkLambdaInline(RegisterArg arg, InsnNode assignInsn) {
 		if (assignInsn.getType() == InsnType.INVOKE && assignInsn instanceof InvokeCustomNode) {
-			for (RegisterArg useArg : arg.getSVar().getUseList()) {
+			List<RegisterArg> useList = arg.getSVar().getUseList();
+			int usesCount = useList.size();
+			for (int i = 0; i < usesCount; i++) {
+				RegisterArg useArg = useList.get(i);
 				InsnNode parentInsn = useArg.getParentInsn();
 				if (parentInsn != null && parentInsn.getType() == InsnType.INVOKE) {
 					InvokeNode invokeNode = (InvokeNode) parentInsn;
@@ -169,7 +189,10 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 	}
 
 	private static boolean varWithSameNameExists(MethodNode mth, SSAVar inlineVar) {
-		for (SSAVar ssaVar : mth.getSVars()) {
+		List<SSAVar> ssaVars = mth.getSVars();
+		int varsCount = ssaVars.size();
+		for (int i = 0; i < varsCount; i++) {
+			SSAVar ssaVar = ssaVars.get(i);
 			if (ssaVar == inlineVar || ssaVar.getCodeVar() == inlineVar.getCodeVar()) {
 				continue;
 			}
@@ -230,13 +253,13 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 			return false;
 		}
 
-		List<RegisterArg> argsList = ArgsInfo.getArgs(assignInsn);
 		BitSet args = new BitSet();
-		for (RegisterArg arg : argsList) {
-			args.set(arg.getRegNum());
-		}
+		ArgsInfo.fillArgsSet(assignInsn, args);
 		boolean startCheck = false;
-		for (InsnNode insn : assignBlock.getInstructions()) {
+		List<InsnNode> assignInsns = assignBlock.getInstructions();
+		int assignInsnsCount = assignInsns.size();
+		for (int insnIndex = 0; insnIndex < assignInsnsCount; insnIndex++) {
+			InsnNode insn = assignInsns.get(insnIndex);
 			if (startCheck && (!insn.canReorder() || ArgsInfo.usedArgAssign(insn, args))) {
 				return false;
 			}
@@ -260,13 +283,19 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 				// skip checks for not generated blocks
 				continue;
 			}
-			for (InsnNode insn : block.getInstructions()) {
+			List<InsnNode> blockInsns = block.getInstructions();
+			int blockInsnsCount = blockInsns.size();
+			for (int insnIndex = 0; insnIndex < blockInsnsCount; insnIndex++) {
+				InsnNode insn = blockInsns.get(insnIndex);
 				if (!insn.canReorder() || ArgsInfo.usedArgAssign(insn, args)) {
 					return false;
 				}
 			}
 		}
-		for (InsnNode insn : useBlock.getInstructions()) {
+		List<InsnNode> useInsns = useBlock.getInstructions();
+		int useInsnsCount = useInsns.size();
+		for (int insnIndex = 0; insnIndex < useInsnsCount; insnIndex++) {
+			InsnNode insn = useInsns.get(insnIndex);
 			if (insn == useInsn) {
 				return true;
 			}

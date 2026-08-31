@@ -47,8 +47,8 @@ public class TypeSearchState {
 		return arg.getType();
 	}
 
-	public List<TypeSearchVarInfo> getAllVars() {
-		return new ArrayList<>(allVars);
+	Iterable<TypeSearchVarInfo> getAllVars() {
+		return allVars;
 	}
 
 	public List<TypeSearchVarInfo> getUnresolvedVars() {
@@ -61,13 +61,4 @@ public class TypeSearchState {
 		return result;
 	}
 
-	public List<TypeSearchVarInfo> getResolvedVars() {
-		List<TypeSearchVarInfo> result = new ArrayList<>(allVars.size());
-		for (TypeSearchVarInfo varInfo : allVars) {
-			if (varInfo.isTypeResolved()) {
-				result.add(varInfo);
-			}
-		}
-		return result;
-	}
 }

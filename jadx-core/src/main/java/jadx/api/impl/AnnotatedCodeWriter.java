@@ -1,7 +1,6 @@
 package jadx.api.impl;
 
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -13,6 +12,7 @@ import jadx.api.JadxArgs;
 import jadx.api.metadata.ICodeAnnotation;
 import jadx.api.metadata.ICodeNodeRef;
 import jadx.api.metadata.annotations.NodeDeclareRef;
+import jadx.api.metadata.impl.CodeMetadataStorage;
 import jadx.core.utils.StringUtils;
 
 public class AnnotatedCodeWriter extends SimpleCodeWriter implements ICodeWriter {
@@ -130,7 +130,7 @@ public class AnnotatedCodeWriter extends SimpleCodeWriter implements ICodeWriter
 
 	private void attachAnnotation(ICodeAnnotation obj, int pos) {
 		if (annotations.isEmpty()) {
-			annotations = new HashMap<>();
+			annotations = CodeMetadataStorage.newAnnotationMap();
 		}
 		annotations.put(pos, obj);
 	}

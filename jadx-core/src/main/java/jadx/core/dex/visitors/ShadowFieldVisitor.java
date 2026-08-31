@@ -132,8 +132,13 @@ public class ShadowFieldVisitor extends AbstractVisitor {
 	}
 
 	private static void fixShadowFieldAccess(MethodNode mth, Map<String, FieldFixInfo> fixInfoMap) {
-		for (BlockNode block : mth.getBasicBlocks()) {
-			for (InsnNode insn : block.getInstructions()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		int blocksCount = blocks.size();
+		for (int i = 0; i < blocksCount; i++) {
+			List<InsnNode> instructions = blocks.get(i).getInstructions();
+			int instructionsCount = instructions.size();
+			for (int j = 0; j < instructionsCount; j++) {
+				InsnNode insn = instructions.get(j);
 				processInsn(mth, insn, fixInfoMap);
 			}
 		}

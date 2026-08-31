@@ -19,7 +19,7 @@ import jadx.core.utils.exceptions.JadxRuntimeException;
 final class ArgsInfo {
 	private final InsnNode insn;
 	private final ArgsInfo[] argsList;
-	private final List<RegisterArg> args;
+	private final @Nullable Object args;
 	private final int pos;
 	private int inlineBorder;
 	private ArgsInfo inlinedInsn;
@@ -30,44 +30,109 @@ final class ArgsInfo {
 		this.argsList = argsList;
 		this.pos = pos;
 		this.inlineBorder = pos;
-		this.args = getArgs(insn);
+		this.args = addArgs(insn, null);
 	}
 
-	public static List<RegisterArg> getArgs(InsnNode insn) {
-		List<RegisterArg> args = new ArrayList<>();
-		addArgs(insn, args);
-		return args;
-	}
-
-	private static void addArgs(InsnNode insn, List<RegisterArg> args) {
+	public static void fillArgsSet(InsnNode insn, BitSet set) {
 		if (insn.getType() == InsnType.TERNARY) {
-			args.addAll(((TernaryInsn) insn).getCondition().getRegisterArgs());
+			List<RegisterArg> conditionArgs = ((TernaryInsn) insn).getCondition().getRegisterArgs();
+			int conditionArgsCount = conditionArgs.size();
+			for (int i = 0; i < conditionArgsCount; i++) {
+				set.set(conditionArgs.get(i).getRegNum());
+			}
 		}
 		int argsCount = insn.getArgsCount();
 		for (int i = 0; i < argsCount; i++) {
 			InsnArg arg = insn.getArg(i);
 			if (arg.isRegister()) {
-				args.add((RegisterArg) arg);
+				set.set(((RegisterArg) arg).getRegNum());
+			} else if (arg.isInsnWrap()) {
+				fillArgsSet(((InsnWrapArg) arg).getWrapInsn(), set);
+			}
+		}
+	}
+
+	private static @Nullable Object addArgs(InsnNode insn, @Nullable Object args) {
+		int argsCount = insn.getArgsCount();
+		if (insn.getType() == InsnType.TERNARY) {
+			List<RegisterArg> conditionArgs = ((TernaryInsn) insn).getCondition().getRegisterArgs();
+			int conditionArgsCount = conditionArgs.size();
+			for (int i = 0; i < conditionArgsCount; i++) {
+				args = addArg(args, conditionArgs.get(i));
+			}
+		}
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = insn.getArg(i);
+			if (arg.isRegister()) {
+				args = addArg(args, (RegisterArg) arg);
 			}
 		}
 		for (int i = 0; i < argsCount; i++) {
 			InsnArg arg = insn.getArg(i);
 			if (arg.isInsnWrap()) {
-				addArgs(((InsnWrapArg) arg).getWrapInsn(), args);
+				args = addArgs(((InsnWrapArg) arg).getWrapInsn(), args);
 			}
 		}
+		return args;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static Object addArg(@Nullable Object args, RegisterArg arg) {
+		if (args == null) {
+			return arg;
+		}
+		if (args instanceof RegisterArg) {
+			return new ArgsPair((RegisterArg) args, arg);
+		}
+		if (args instanceof ArgsPair) {
+			ArgsPair pair = (ArgsPair) args;
+			List<RegisterArg> list = new ArrayList<>(4);
+			list.add(pair.first);
+			list.add(pair.second);
+			list.add(arg);
+			return list;
+		}
+		((List<RegisterArg>) args).add(arg);
+		return args;
 	}
 
 	public InsnNode getInsn() {
 		return insn;
 	}
 
-	List<RegisterArg> getArgs() {
-		return args;
+	int getArgsCount() {
+		if (args == null) {
+			return 0;
+		}
+		if (args instanceof RegisterArg) {
+			return 1;
+		}
+		return args instanceof ArgsPair ? 2 : ((List<?>) args).size();
+	}
+
+	@SuppressWarnings("unchecked")
+	RegisterArg getArg(int index) {
+		if (args instanceof RegisterArg) {
+			if (index != 0) {
+				throw new IndexOutOfBoundsException(index);
+			}
+			return (RegisterArg) args;
+		}
+		if (args instanceof ArgsPair) {
+			ArgsPair pair = (ArgsPair) args;
+			if (index == 0) {
+				return pair.first;
+			}
+			if (index == 1) {
+				return pair.second;
+			}
+			throw new IndexOutOfBoundsException(index);
+		}
+		return ((List<RegisterArg>) args).get(index);
 	}
 
 	public BitSet getArgsSet() {
-		if (args.isEmpty() && Utils.isEmpty(wrappedInsns)) {
+		if (args == null && Utils.isEmpty(wrappedInsns)) {
 			return EmptyBitSet.EMPTY;
 		}
 		BitSet set = new BitSet();
@@ -76,13 +141,25 @@ final class ArgsInfo {
 	}
 
 	private void fillArgsSet(BitSet set) {
-		for (RegisterArg arg : args) {
-			set.set(arg.getRegNum());
+		if (args instanceof RegisterArg) {
+			set.set(((RegisterArg) args).getRegNum());
+		} else if (args instanceof ArgsPair) {
+			ArgsPair pair = (ArgsPair) args;
+			set.set(pair.first.getRegNum());
+			set.set(pair.second.getRegNum());
+		} else if (args != null) {
+			@SuppressWarnings("unchecked")
+			List<RegisterArg> argsList = (List<RegisterArg>) args;
+			int argsCount = argsList.size();
+			for (int i = 0; i < argsCount; i++) {
+				set.set(argsList.get(i).getRegNum());
+			}
 		}
 		List<ArgsInfo> wrapList = wrappedInsns;
 		if (wrapList != null) {
-			for (ArgsInfo wrappedInsn : wrapList) {
-				wrappedInsn.fillArgsSet(set);
+			int wrappedCount = wrapList.size();
+			for (int i = 0; i < wrappedCount; i++) {
+				wrapList.get(i).fillArgsSet(set);
 			}
 		}
 	}
@@ -135,8 +212,9 @@ final class ArgsInfo {
 		}
 		List<ArgsInfo> wrapList = wrappedInsns;
 		if (wrapList != null) {
-			for (ArgsInfo wrapInsn : wrapList) {
-				if (!wrapInsn.canReorder()) {
+			int wrappedCount = wrapList.size();
+			for (int i = 0; i < wrappedCount; i++) {
+				if (!wrapList.get(i).canReorder()) {
 					return false;
 				}
 			}
@@ -159,7 +237,7 @@ final class ArgsInfo {
 		ArgsInfo argsInfo = argsList[assignInsnPos];
 		argsInfo.inlinedInsn = this;
 		if (wrappedInsns == null) {
-			wrappedInsns = new ArrayList<>(args.size());
+			wrappedInsns = new ArrayList<>(Math.max(1, getArgsCount()));
 		}
 		wrappedInsns.add(argsInfo);
 		return new WrapInfo(argsInfo.insn, arg);
@@ -173,6 +251,21 @@ final class ArgsInfo {
 			}
 		}
 		return inlinedInsn;
+	}
+
+	private static final class ArgsPair {
+		private final RegisterArg first;
+		private final RegisterArg second;
+
+		private ArgsPair(RegisterArg first, RegisterArg second) {
+			this.first = first;
+			this.second = second;
+		}
+
+		@Override
+		public String toString() {
+			return '[' + first.toString() + ", " + second + ']';
+		}
 	}
 
 	@Override

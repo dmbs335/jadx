@@ -13,6 +13,7 @@ import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
+import jadx.core.utils.EmptyBitSet;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public class LiveVarAnalysis {
@@ -33,15 +34,16 @@ public class LiveVarAnalysis {
 	public void runAnalysis() {
 		int bbCount = mth.getBasicBlocks().size();
 		int regsCount = mth.getRegsCount();
-		this.uses = initBitSetArray(bbCount, regsCount);
-		this.defs = initBitSetArray(bbCount, regsCount);
-		this.assignBlocks = initBitSetArray(regsCount, bbCount);
+		this.uses = new BitSet[bbCount];
+		this.defs = new BitSet[bbCount];
+		this.assignBlocks = new BitSet[regsCount];
 		fillBasicBlockInfo();
 		processLiveInfo();
 	}
 
 	public BitSet getAssignBlocks(int regNum) {
-		return assignBlocks[regNum];
+		BitSet blocks = assignBlocks[regNum];
+		return blocks == null ? EmptyBitSet.EMPTY : blocks;
 	}
 
 	public boolean isLive(int blockId, int regNum) {
@@ -49,7 +51,8 @@ public class LiveVarAnalysis {
 			LOG.warn("LiveVarAnalysis: out of bounds block: {}, max: {}", blockId, liveIn.length);
 			return false;
 		}
-		return liveIn[blockId].get(regNum);
+		BitSet blockLiveIn = liveIn[blockId];
+		return blockLiveIn != null && blockLiveIn.get(regNum);
 	}
 
 	public boolean isLive(BlockNode block, int regNum) {
@@ -88,7 +91,8 @@ public class LiveVarAnalysis {
 				continue;
 			}
 			reachable.set(blockId);
-			if (defs[blockId].get(regNum)) {
+			BitSet blockDefs = defs[blockId];
+			if (blockDefs != null && blockDefs.get(regNum)) {
 				continue;
 			}
 			queue.addAll(block.getSuccessors());
@@ -113,7 +117,11 @@ public class LiveVarAnalysis {
 					InsnArg arg = insn.getArg(argIndex);
 					if (arg.isRegister()) {
 						int regNum = ((RegisterArg) arg).getRegNum();
-						if (!kill.get(regNum)) {
+						if (kill == null || !kill.get(regNum)) {
+							if (gen == null) {
+								gen = new BitSet();
+								uses[blockId] = gen;
+							}
 							gen.set(regNum);
 						}
 					}
@@ -121,8 +129,17 @@ public class LiveVarAnalysis {
 				RegisterArg result = insn.getResult();
 				if (result != null) {
 					int regNum = result.getRegNum();
+					if (kill == null) {
+						kill = new BitSet();
+						defs[blockId] = kill;
+					}
 					kill.set(regNum);
-					assignBlocks[regNum].set(blockId);
+					BitSet assignedBlocks = assignBlocks[regNum];
+					if (assignedBlocks == null) {
+						assignedBlocks = new BitSet(blocksCount);
+						assignBlocks[regNum] = assignedBlocks;
+					}
+					assignedBlocks.set(blockId);
 				}
 			}
 		}
@@ -131,7 +148,7 @@ public class LiveVarAnalysis {
 	private void processLiveInfo() {
 		int bbCount = mth.getBasicBlocks().size();
 		int regsCount = mth.getRegsCount();
-		BitSet[] liveInBlocks = initBitSetArray(bbCount, regsCount);
+		BitSet[] liveInBlocks = new BitSet[bbCount];
 		List<BlockNode> blocks = mth.getBasicBlocks();
 		int blocksCount = blocks.size();
 		int iterationsLimit = blocksCount * 10;
@@ -140,7 +157,10 @@ public class LiveVarAnalysis {
 		int k = 0;
 		do {
 			changed = false;
-			for (int blockIndex = 0; blockIndex < blocksCount; blockIndex++) {
+			// Liveness flows from successors to predecessors. Basic blocks are normally ordered
+			// in the forward CFG direction, so walking them backwards propagates values through
+			// linear regions in one pass instead of one block per fixed-point iteration.
+			for (int blockIndex = blocksCount - 1; blockIndex >= 0; blockIndex--) {
 				BlockNode block = blocks.get(blockIndex);
 				int blockId = block.getId();
 				BitSet prevIn = liveInBlocks[blockId];
@@ -149,11 +169,26 @@ public class LiveVarAnalysis {
 				int successorsCount = successors.size();
 				for (int successorIndex = 0; successorIndex < successorsCount; successorIndex++) {
 					BlockNode successor = successors.get(successorIndex);
-					newIn.or(liveInBlocks[successor.getId()]);
+					BitSet successorLiveIn = liveInBlocks[successor.getId()];
+					if (successorLiveIn != null) {
+						newIn.or(successorLiveIn);
+					}
 				}
-				newIn.andNot(defs[blockId]);
-				newIn.or(uses[blockId]);
-				if (!prevIn.equals(newIn)) {
+				BitSet blockDefs = defs[blockId];
+				if (blockDefs != null) {
+					newIn.andNot(blockDefs);
+				}
+				BitSet blockUses = uses[blockId];
+				if (blockUses != null) {
+					newIn.or(blockUses);
+				}
+				if (prevIn == null) {
+					if (newIn.isEmpty()) {
+						continue;
+					}
+					changed = true;
+					liveInBlocks[blockId] = (BitSet) newIn.clone();
+				} else if (!prevIn.equals(newIn)) {
 					changed = true;
 					liveInBlocks[blockId] = newIn;
 					newIn = prevIn;
@@ -167,11 +202,4 @@ public class LiveVarAnalysis {
 		this.liveIn = liveInBlocks;
 	}
 
-	private static BitSet[] initBitSetArray(int length, int bitsCount) {
-		BitSet[] array = new BitSet[length];
-		for (int i = 0; i < length; i++) {
-			array[i] = new BitSet(bitsCount);
-		}
-		return array;
-	}
 }

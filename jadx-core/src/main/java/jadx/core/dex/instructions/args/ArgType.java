@@ -297,7 +297,7 @@ public abstract class ArgType {
 		@Override
 		boolean internalEquals(Object obj) {
 			return super.internalEquals(obj)
-					&& extendTypes.equals(((GenericType) obj).extendTypes);
+					&& typeListsEqual(extendTypes, ((GenericType) obj).extendTypes);
 		}
 
 		@Override
@@ -408,7 +408,7 @@ public abstract class ArgType {
 		@Override
 		boolean internalEquals(Object obj) {
 			return super.internalEquals(obj)
-					&& Objects.equals(generics, ((GenericObject) obj).generics);
+					&& typeListsEqual(generics, ((GenericObject) obj).generics);
 		}
 
 		@Override
@@ -931,6 +931,22 @@ public abstract class ArgType {
 	}
 
 	abstract boolean internalEquals(Object obj);
+
+	private static boolean typeListsEqual(List<ArgType> first, List<ArgType> second) {
+		if (first == second) {
+			return true;
+		}
+		int size = first.size();
+		if (size != second.size()) {
+			return false;
+		}
+		for (int i = 0; i < size; i++) {
+			if (!first.get(i).equals(second.get(i))) {
+				return false;
+			}
+		}
+		return true;
+	}
 
 	@Override
 	public boolean equals(Object obj) {

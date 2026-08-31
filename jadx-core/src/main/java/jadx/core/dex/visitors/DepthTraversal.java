@@ -1,5 +1,7 @@
 package jadx.core.dex.visitors;
 
+import java.util.List;
+
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.MethodNode;
@@ -11,11 +13,15 @@ public class DepthTraversal {
 		try {
 			Utils.checkThreadInterrupt();
 			if (visitor.visit(cls)) {
-				for (ClassNode innerCls : cls.getInnerClasses()) {
-					visit(visitor, innerCls);
+				List<ClassNode> innerClasses = cls.getInnerClasses();
+				int innerClassesCount = innerClasses.size();
+				for (int innerClassIndex = 0; innerClassIndex < innerClassesCount; innerClassIndex++) {
+					visit(visitor, innerClasses.get(innerClassIndex));
 				}
-				for (MethodNode method : cls.getMethods()) {
-					visit(visitor, method);
+				List<MethodNode> methods = cls.getMethods();
+				int methodsCount = methods.size();
+				for (int methodIndex = 0; methodIndex < methodsCount; methodIndex++) {
+					visit(visitor, methods.get(methodIndex));
 				}
 			}
 			Utils.checkThreadInterrupt();

@@ -16,6 +16,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.RandomAccess;
 import java.util.Set;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -343,22 +344,43 @@ public class Utils {
 		}
 	}
 
+	@SuppressWarnings("unchecked")
 	public static <T, R> List<R> collectionMap(Collection<T> list, Function<T, R> mapFunc) {
 		if (list == null || list.isEmpty()) {
 			return Collections.emptyList();
 		}
-		List<R> result = new ArrayList<>(list.size());
+		int size = list.size();
+		List<R> result = new ArrayList<>(size);
+		if (list instanceof List && list instanceof RandomAccess) {
+			List<T> randomAccessList = (List<T>) list;
+			for (int i = 0; i < size; i++) {
+				result.add(mapFunc.apply(randomAccessList.get(i)));
+			}
+			return result;
+		}
 		for (T t : list) {
 			result.add(mapFunc.apply(t));
 		}
 		return result;
 	}
 
+	@SuppressWarnings("unchecked")
 	public static <T, R> List<R> collectionMapNoNull(Collection<T> list, Function<T, R> mapFunc) {
 		if (list == null || list.isEmpty()) {
 			return Collections.emptyList();
 		}
-		List<R> result = new ArrayList<>(list.size());
+		int size = list.size();
+		List<R> result = new ArrayList<>(size);
+		if (list instanceof List && list instanceof RandomAccess) {
+			List<T> randomAccessList = (List<T>) list;
+			for (int i = 0; i < size; i++) {
+				R r = mapFunc.apply(randomAccessList.get(i));
+				if (r != null) {
+					result.add(r);
+				}
+			}
+			return result;
+		}
 		for (T t : list) {
 			R r = mapFunc.apply(t);
 			if (r != null) {
@@ -395,6 +417,9 @@ public class Utils {
 	}
 
 	public static <T> List<T> lockList(List<T> list) {
+		if (list instanceof ImmutableList) {
+			return list;
+		}
 		if (list.isEmpty()) {
 			return Collections.emptyList();
 		}

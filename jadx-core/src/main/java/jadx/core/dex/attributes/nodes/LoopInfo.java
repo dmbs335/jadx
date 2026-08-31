@@ -45,7 +45,10 @@ public class LoopInfo {
 		Set<BlockNode> blocks = getLoopBlocks();
 		for (BlockNode block : blocks) {
 			// exit: successor node not from this loop, (don't change to getCleanSuccessors)
-			for (BlockNode s : block.getSuccessors()) {
+			List<BlockNode> successors = block.getSuccessors();
+			int successorsCount = successors.size();
+			for (int i = 0; i < successorsCount; i++) {
+				BlockNode s = successors.get(i);
 				if (!blocks.contains(s) && !BlockUtils.isExceptionHandlerPath(s)) {
 					nodes.add(block);
 				}
@@ -61,7 +64,10 @@ public class LoopInfo {
 		List<Edge> edges = new ArrayList<>();
 		Set<BlockNode> blocks = getLoopBlocks();
 		for (BlockNode block : blocks) {
-			for (BlockNode s : block.getSuccessors()) { // don't use clean successors to include loop back edges
+			List<BlockNode> successors = block.getSuccessors();
+			int successorsCount = successors.size();
+			for (int i = 0; i < successorsCount; i++) { // don't use clean successors to include loop back edges
+				BlockNode s = successors.get(i);
 				if (!blocks.contains(s) && !BlockUtils.isExceptionHandlerPath(s)) {
 					edges.add(new Edge(block, s));
 				}

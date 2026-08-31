@@ -81,8 +81,10 @@ public class ProcessKotlinInternals extends AbstractVisitor {
 		if (kotlinIntrinsicsCls == null) {
 			return false;
 		}
-		for (MethodNode mth : cls.getMethods()) {
-			processMth(mth);
+		List<MethodNode> methods = cls.getMethods();
+		int methodsCount = methods.size();
+		for (int i = 0; i < methodsCount; i++) {
+			processMth(methods.get(i));
 		}
 		return true;
 	}
@@ -91,8 +93,13 @@ public class ProcessKotlinInternals extends AbstractVisitor {
 		if (mth.isNoCode() || mth.contains(AType.JADX_ERROR)) {
 			return;
 		}
-		for (BlockNode block : mth.getBasicBlocks()) {
-			for (InsnNode insn : block.getInstructions()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		int blocksCount = blocks.size();
+		for (int i = 0; i < blocksCount; i++) {
+			List<InsnNode> instructions = blocks.get(i).getInstructions();
+			int instructionsCount = instructions.size();
+			for (int j = 0; j < instructionsCount; j++) {
+				InsnNode insn = instructions.get(j);
 				if (insn.getType() == InsnType.INVOKE) {
 					try {
 						processInvoke(mth, insn);

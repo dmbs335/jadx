@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.function.BiConsumer;
 
 import org.jetbrains.annotations.Nullable;
@@ -33,7 +34,12 @@ import static jadx.core.utils.Utils.isEmpty;
 import static jadx.core.utils.Utils.notEmpty;
 
 public class TypeUtils {
+	private static final int TYPE_MAPPING_CACHE_SIZE = 1 << 15;
+	private static final int TYPE_MAPPING_CACHE_MASK = TYPE_MAPPING_CACHE_SIZE - 1;
+
 	private final RootNode root;
+	private final AtomicReferenceArray<TypeMappingCacheEntry> typeMappingCache =
+			new AtomicReferenceArray<>(TYPE_MAPPING_CACHE_SIZE);
 
 	public TypeUtils(RootNode rootNode) {
 		this.root = rootNode;
@@ -178,6 +184,11 @@ public class TypeUtils {
 		if (typeWithGeneric == null || genericSourceType == null) {
 			return null;
 		}
+		Map<ArgType, ArgType> typeVarsMap = getClassGenericsMapping(instanceType, genericSourceType);
+		return replaceTypeVariablesUsingMap(typeWithGeneric, typeVarsMap);
+	}
+
+	public Map<ArgType, ArgType> getClassGenericsMapping(ArgType instanceType, ArgType genericSourceType) {
 		Map<ArgType, ArgType> typeVarsMap = Collections.emptyMap();
 		ClassTypeVarsAttr typeVars = getClassTypeVars(instanceType);
 		if (typeVars != null) {
@@ -189,7 +200,7 @@ public class TypeUtils {
 			typeVarsMap = mergeTypeMapping(typeVarsMap, getTypeVariablesMapping(outerType));
 			outerType = outerType.getOuterType();
 		}
-		return replaceTypeVariablesUsingMap(typeWithGeneric, typeVarsMap);
+		return typeVarsMap;
 	}
 
 	private static Map<ArgType, ArgType> mergeTypeMaps(Map<ArgType, ArgType> base, Map<ArgType, ArgType> addition) {
@@ -215,7 +226,9 @@ public class TypeUtils {
 
 	private static Map<ArgType, ArgType> mergeTypeMapping(
 			Map<ArgType, ArgType> base, Map<ArgType, ArgType> typeMapping) {
-		if (!base.isEmpty() && !typeMapping.isEmpty() && typeMapping.size() <= 3) {
+		if (!base.isEmpty() && !typeMapping.isEmpty()) {
+			// mergeTypeMaps consumes entries from its second argument. Type mappings are
+			// shared by the cache, so always merge through a private mutable copy.
 			typeMapping = new HashMap<>(typeMapping);
 		}
 		return mergeTypeMaps(base, typeMapping);
@@ -225,6 +238,17 @@ public class TypeUtils {
 		if (!clsType.isGeneric()) {
 			return Collections.emptyMap();
 		}
+		int cacheIndex = spreadHash(clsType.hashCode()) & TYPE_MAPPING_CACHE_MASK;
+		TypeMappingCacheEntry cached = typeMappingCache.get(cacheIndex);
+		if (cached != null && cached.type.equals(clsType)) {
+			return cached.mapping;
+		}
+		Map<ArgType, ArgType> mapping = buildTypeVariablesMapping(clsType);
+		typeMappingCache.set(cacheIndex, new TypeMappingCacheEntry(clsType, mapping));
+		return mapping;
+	}
+
+	private Map<ArgType, ArgType> buildTypeVariablesMapping(ArgType clsType) {
 		List<ArgType> typeParameters = root.getTypeUtils().getClassGenerics(clsType);
 		if (typeParameters.isEmpty()) {
 			return Collections.emptyMap();
@@ -271,7 +295,24 @@ public class TypeUtils {
 			ArgType typeVar = normalizeTypeVar(typeParameters.get(i));
 			replaceMap.put(typeVar, actualType);
 		}
-		return replaceMap;
+		// Cached mappings are shared across all visitors for this RootNode. Keep the
+		// uncommon large-map path immutable as well, otherwise an accidental caller
+		// mutation would poison subsequent decompilation results.
+		return Collections.unmodifiableMap(replaceMap);
+	}
+
+	private static int spreadHash(int hash) {
+		return hash ^ (hash >>> 16);
+	}
+
+	private static final class TypeMappingCacheEntry {
+		private final ArgType type;
+		private final Map<ArgType, ArgType> mapping;
+
+		private TypeMappingCacheEntry(ArgType type, Map<ArgType, ArgType> mapping) {
+			this.type = type;
+			this.mapping = mapping;
+		}
 	}
 
 	/**

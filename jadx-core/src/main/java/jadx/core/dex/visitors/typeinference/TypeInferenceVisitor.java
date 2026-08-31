@@ -84,8 +84,13 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 	 */
 	void initTypeBounds(MethodNode mth) {
 		List<SSAVar> ssaVars = mth.getSVars();
-		ssaVars.forEach(this::attachBounds);
-		ssaVars.forEach(this::mergePhiBounds);
+		int varsCount = ssaVars.size();
+		for (int i = 0; i < varsCount; i++) {
+			attachBounds(ssaVars.get(i));
+		}
+		for (int i = 0; i < varsCount; i++) {
+			mergePhiBounds(ssaVars.get(i));
+		}
 		if (Consts.DEBUG_TYPE_INFERENCE) {
 			ssaVars.stream().sorted()
 					.forEach(ssaVar -> LOG.debug("Type bounds for {}: {}", ssaVar.toShortString(), ssaVar.getTypeInfo().getBounds()));
@@ -98,8 +103,13 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 	 */
 	boolean runTypePropagation(MethodNode mth) {
 		List<SSAVar> ssaVars = mth.getSVars();
-		ssaVars.forEach(var -> setImmutableType(mth, var));
-		ssaVars.forEach(var -> setBestType(mth, var));
+		int varsCount = ssaVars.size();
+		for (int i = 0; i < varsCount; i++) {
+			setImmutableType(mth, ssaVars.get(i));
+		}
+		for (int i = 0; i < varsCount; i++) {
+			setBestType(mth, ssaVars.get(i));
+		}
 		return true;
 	}
 
@@ -170,17 +180,23 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 		RegisterArg assign = var.getAssign();
 		addAssignBound(typeInfo, assign);
 
-		for (RegisterArg regArg : var.getUseList()) {
-			addBound(typeInfo, makeUseBound(regArg));
+		List<RegisterArg> useList = var.getUseList();
+		int useCount = useList.size();
+		for (int i = 0; i < useCount; i++) {
+			addBound(typeInfo, makeUseBound(useList.get(i)));
 		}
 	}
 
 	private void mergePhiBounds(SSAVar ssaVar) {
-		for (PhiInsn usedInPhi : ssaVar.getUsedInPhi()) {
+		List<PhiInsn> usedInPhiList = ssaVar.getUsedInPhi();
+		int usedInPhiCount = usedInPhiList.size();
+		for (int i = 0; i < usedInPhiCount; i++) {
+			PhiInsn usedInPhi = usedInPhiList.get(i);
 			Set<ITypeBound> bounds = ssaVar.getTypeInfo().getBounds();
 			addPhiVarBounds(bounds, usedInPhi.getResult());
-			for (InsnArg arg : usedInPhi.getArguments()) {
-				addPhiVarBounds(bounds, (RegisterArg) arg);
+			int argsCount = usedInPhi.getArgsCount();
+			for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+				addPhiVarBounds(bounds, (RegisterArg) usedInPhi.getArg(argIndex));
 			}
 		}
 	}
@@ -357,7 +373,10 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 	}
 
 	private void assignImmutableTypes(MethodNode mth) {
-		for (SSAVar ssaVar : mth.getSVars()) {
+		List<SSAVar> ssaVars = mth.getSVars();
+		int varsCount = ssaVars.size();
+		for (int i = 0; i < varsCount; i++) {
+			SSAVar ssaVar = ssaVars.get(i);
 			ArgType immutableType = getSsaImmutableType(ssaVar);
 			if (immutableType != null) {
 				ssaVar.markAsImmutable(immutableType);
@@ -370,7 +389,10 @@ public final class TypeInferenceVisitor extends AbstractVisitor {
 		if (ssaVar.getAssign().contains(AFlag.IMMUTABLE_TYPE)) {
 			return ssaVar.getAssign().getInitType();
 		}
-		for (RegisterArg reg : ssaVar.getUseList()) {
+		List<RegisterArg> useList = ssaVar.getUseList();
+		int useCount = useList.size();
+		for (int i = 0; i < useCount; i++) {
+			RegisterArg reg = useList.get(i);
 			if (reg.contains(AFlag.IMMUTABLE_TYPE)) {
 				return reg.getInitType();
 			}

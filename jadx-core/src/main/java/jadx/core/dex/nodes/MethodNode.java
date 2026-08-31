@@ -235,7 +235,9 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 			return;
 		}
 		argsList = new ArrayList<>(args.size());
-		for (ArgType argType : args) {
+		int argsCount = args.size();
+		for (int i = 0; i < argsCount; i++) {
+			ArgType argType = args.get(i);
 			ArgType expandedType = typeUtils.expandTypeVariables(this, argType);
 			RegisterArg regArg = InsnArg.reg(pos, expandedType);
 			regArg.add(AFlag.METHOD_ARGUMENT);
@@ -463,7 +465,9 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 		if (loops.isEmpty()) {
 			return null;
 		}
-		for (LoopInfo loop : loops) {
+		int loopsCount = loops.size();
+		for (int i = 0; i < loopsCount; i++) {
+			LoopInfo loop = loops.get(i);
 			if (loop.getLoopBlocks().contains(block)) {
 				return loop;
 			}

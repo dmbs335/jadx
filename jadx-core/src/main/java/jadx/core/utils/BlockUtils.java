@@ -75,14 +75,28 @@ public class BlockUtils {
 	}
 
 	public static BlockNode getBlockByOffset(int offset, Iterable<BlockNode> casesBlocks) {
+		if (casesBlocks instanceof List) {
+			List<BlockNode> blocks = (List<BlockNode>) casesBlocks;
+			int blocksCount = blocks.size();
+			for (int i = 0; i < blocksCount; i++) {
+				BlockNode block = blocks.get(i);
+				if (block.getStartOffset() == offset) {
+					return block;
+				}
+			}
+			throw blockByOffsetError(offset, casesBlocks);
+		}
 		for (BlockNode block : casesBlocks) {
 			if (block.getStartOffset() == offset) {
 				return block;
 			}
 		}
-		throw new JadxRuntimeException("Can't find block by offset: "
-				+ InsnUtils.formatOffset(offset)
-				+ " in list " + casesBlocks);
+		throw blockByOffsetError(offset, casesBlocks);
+	}
+
+	private static JadxRuntimeException blockByOffsetError(int offset, Iterable<BlockNode> casesBlocks) {
+		return new JadxRuntimeException("Can't find block by offset: "
+				+ InsnUtils.formatOffset(offset) + " in list " + casesBlocks);
 	}
 
 	public static BlockNode selectOther(BlockNode node, List<BlockNode> blocks) {
@@ -187,8 +201,10 @@ public class BlockUtils {
 	 * Check if instruction contains in block (use == for comparison, not equals)
 	 */
 	public static boolean blockContains(BlockNode block, InsnNode insn) {
-		for (InsnNode bi : block.getInstructions()) {
-			if (bi == insn) {
+		List<InsnNode> insns = block.getInstructions();
+		int insnsCount = insns.size();
+		for (int i = 0; i < insnsCount; i++) {
+			if (insns.get(i) == insn) {
 				return true;
 			}
 		}
@@ -292,7 +308,9 @@ public class BlockUtils {
 		if (insn.contains(AFlag.WRAPPED)) {
 			return getBlockByWrappedInsn(mth, insn);
 		}
-		for (BlockNode bn : blocks) {
+		int blocksCount = blocks.size();
+		for (int i = 0; i < blocksCount; i++) {
+			BlockNode bn = blocks.get(i);
 			if (blockContains(bn, insn)) {
 				return bn;
 			}
@@ -301,11 +319,14 @@ public class BlockUtils {
 	}
 
 	public static BlockNode searchBlockWithPhi(MethodNode mth, PhiInsn insn) {
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int blockIndex = 0, blocksCount = blocks.size(); blockIndex < blocksCount; blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
 			PhiListAttr phiListAttr = block.get(AType.PHI_LIST);
 			if (phiListAttr != null) {
-				for (PhiInsn phiInsn : phiListAttr.getList()) {
-					if (phiInsn == insn) {
+				List<PhiInsn> phiInsns = phiListAttr.getList();
+				for (int phiIndex = 0, phiCount = phiInsns.size(); phiIndex < phiCount; phiIndex++) {
+					if (phiInsns.get(phiIndex) == insn) {
 						return block;
 					}
 				}
@@ -315,8 +336,12 @@ public class BlockUtils {
 	}
 
 	private static BlockNode getBlockByWrappedInsn(MethodNode mth, InsnNode insn) {
-		for (BlockNode bn : mth.getBasicBlocks()) {
-			for (InsnNode bi : bn.getInstructions()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int blockIndex = 0, blocksCount = blocks.size(); blockIndex < blocksCount; blockIndex++) {
+			BlockNode bn = blocks.get(blockIndex);
+			List<InsnNode> instructions = bn.getInstructions();
+			for (int insnIndex = 0, insnsCount = instructions.size(); insnIndex < insnsCount; insnIndex++) {
+				InsnNode bi = instructions.get(insnIndex);
 				if (bi == insn || foundWrappedInsn(bi, insn) != null) {
 					return bn;
 				}
@@ -337,8 +362,12 @@ public class BlockUtils {
 		if (!insn.contains(AFlag.WRAPPED)) {
 			return null;
 		}
-		for (BlockNode bn : mth.getBasicBlocks()) {
-			for (InsnNode bi : bn.getInstructions()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int blockIndex = 0, blocksCount = blocks.size(); blockIndex < blocksCount; blockIndex++) {
+			BlockNode bn = blocks.get(blockIndex);
+			List<InsnNode> instructions = bn.getInstructions();
+			for (int insnIndex = 0, insnsCount = instructions.size(); insnIndex < insnsCount; insnIndex++) {
+				InsnNode bi = instructions.get(insnIndex);
 				InsnArg res = foundWrappedInsn(bi, insn);
 				if (res != null) {
 					return res;
@@ -349,7 +378,8 @@ public class BlockUtils {
 	}
 
 	private static InsnArg foundWrappedInsn(InsnNode container, InsnNode insn) {
-		for (InsnArg arg : container.getArguments()) {
+		for (int i = 0, count = container.getArgsCount(); i < count; i++) {
+			InsnArg arg = container.getArg(i);
 			if (arg.isInsnWrap()) {
 				InsnNode wrapInsn = ((InsnWrapArg) arg).getWrapInsn();
 				if (wrapInsn == insn) {
@@ -372,7 +402,9 @@ public class BlockUtils {
 			IfNode cmpInsn = cond.getCompare().getInsn();
 			return foundWrappedInsn(cmpInsn, insn);
 		}
-		for (IfCondition nestedCond : cond.getArgs()) {
+		List<IfCondition> args = cond.getArgs();
+		for (int i = 0, count = args.size(); i < count; i++) {
+			IfCondition nestedCond = args.get(i);
 			InsnArg res = foundWrappedInsnInCondition(nestedCond, insn);
 			if (res != null) {
 				return res;
@@ -727,7 +759,10 @@ public class BlockUtils {
 
 	private static void addPredecessors(Set<BlockNode> set, BlockNode from, BlockNode until) {
 		set.add(from);
-		for (BlockNode pred : from.getPredecessors()) {
+		List<BlockNode> predecessors = from.getPredecessors();
+		int predecessorsCount = predecessors.size();
+		for (int i = 0; i < predecessorsCount; i++) {
+			BlockNode pred = predecessors.get(i);
 			if (pred != until && !set.contains(pred)) {
 				addPredecessors(set, pred, until);
 			}
@@ -1533,7 +1568,9 @@ public class BlockUtils {
 	 */
 	public static List<InsnNode> collectInsnsWithLimit(List<BlockNode> blocks, int limit) {
 		List<InsnNode> insns = new ArrayList<>(limit);
-		for (BlockNode block : blocks) {
+		int blocksCount = blocks.size();
+		for (int i = 0; i < blocksCount; i++) {
+			BlockNode block = blocks.get(i);
 			List<InsnNode> blockInsns = block.getInstructions();
 			int blockSize = blockInsns.size();
 			if (blockSize == 0) {

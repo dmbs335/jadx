@@ -35,6 +35,7 @@ import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
+import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.instructions.mods.ConstructorInsn;
 import jadx.core.dex.instructions.mods.TernaryInsn;
 import jadx.core.dex.nodes.BlockNode;
@@ -88,7 +89,9 @@ public class PrepareForCodeGen extends AbstractVisitor {
 			return;
 		}
 		demoteExpectedCoroutineBufferDrainWarning(mth);
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int i = 0, count = blocks.size(); i < count; i++) {
+			BlockNode block = blocks.get(i);
 			if (block.contains(AFlag.DONT_GENERATE)) {
 				continue;
 			}
@@ -108,7 +111,10 @@ public class PrepareForCodeGen extends AbstractVisitor {
 	private static void eraseUnboundGenericLocals(MethodNode mth) {
 		Set<ArgType> knownTypeVars = mth.root().getTypeUtils().getKnownTypeVarsAtMethod(mth);
 		Set<CodeVar> visited = new HashSet<>();
-		for (var ssaVar : mth.getSVars()) {
+		List<SSAVar> ssaVars = mth.getSVars();
+		int ssaVarsCount = ssaVars.size();
+		for (int ssaVarIndex = 0; ssaVarIndex < ssaVarsCount; ssaVarIndex++) {
+			SSAVar ssaVar = ssaVars.get(ssaVarIndex);
 			CodeVar codeVar = ssaVar.getCodeVar();
 			if (codeVar == null || !visited.add(codeVar)) {
 				continue;
@@ -1820,12 +1826,24 @@ public class PrepareForCodeGen extends AbstractVisitor {
 			return false;
 		}
 		RegisterArg registerArg = (RegisterArg) arg;
-		return mth.getArgRegs().stream().anyMatch(methodArg -> registerArg.sameCodeVar(methodArg));
+		List<RegisterArg> argRegs = mth.getArgRegs();
+		int argsCount = argRegs.size();
+		for (int i = 0; i < argsCount; i++) {
+			if (registerArg.sameCodeVar(argRegs.get(i))) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private @Nullable ConstructorInsn searchConstructorCall(MethodNode mth) {
-		for (BlockNode block : mth.getBasicBlocks()) {
-			for (InsnNode insn : block.getInstructions()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		int blocksCount = blocks.size();
+		for (int i = 0; i < blocksCount; i++) {
+			List<InsnNode> instructions = blocks.get(i).getInstructions();
+			int instructionsCount = instructions.size();
+			for (int j = 0; j < instructionsCount; j++) {
+				InsnNode insn = instructions.get(j);
 				if (insn.getType() == InsnType.CONSTRUCTOR) {
 					ConstructorInsn ctrInsn = (ConstructorInsn) insn;
 					if (ctrInsn.isSuper() || ctrInsn.isThis()) {

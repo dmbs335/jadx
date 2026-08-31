@@ -1,5 +1,7 @@
 package jadx.core.dex.instructions;
 
+import java.util.List;
+
 import org.jetbrains.annotations.Nullable;
 
 import jadx.api.plugins.input.insns.InsnData;
@@ -28,7 +30,9 @@ public class InvokeNode extends BaseInvokeNode {
 			addReg(r, mth.getDeclClass().getType());
 			k++;
 		}
-		for (ArgType arg : mth.getArgumentsTypes()) {
+		List<ArgType> argTypes = mth.getArgumentsTypes();
+		for (int i = 0, count = argTypes.size(); i < count; i++) {
+			ArgType arg = argTypes.get(i);
 			addReg(isRange ? k : insn.getReg(k), arg);
 			k += arg.getRegCount();
 		}

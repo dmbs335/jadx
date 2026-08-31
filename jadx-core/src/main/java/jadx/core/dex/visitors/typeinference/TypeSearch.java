@@ -59,10 +59,11 @@ public class TypeSearch {
 		mth.getSVars().forEach(this::collectConstraints);
 
 		// quick search for variables without dependencies
-		state.getUnresolvedVars().forEach(this::resolveIndependentVariables);
+		List<TypeSearchVarInfo> vars = state.getUnresolvedVars();
+		vars.forEach(this::resolveIndependentVariables);
+		vars.removeIf(TypeSearchVarInfo::isTypeResolved);
 
 		boolean searchSuccess;
-		List<TypeSearchVarInfo> vars = state.getUnresolvedVars();
 		if (vars.isEmpty()) {
 			searchSuccess = true;
 		} else {
@@ -78,9 +79,11 @@ public class TypeSearch {
 	}
 
 	private boolean applyResolvedVars() {
-		List<TypeSearchVarInfo> resolvedVars = state.getResolvedVars();
 		List<TypeSearchVarInfo> updatedVars = new ArrayList<>();
-		for (TypeSearchVarInfo var : resolvedVars) {
+		for (TypeSearchVarInfo var : state.getAllVars()) {
+			if (!var.isTypeResolved()) {
+				continue;
+			}
 			SSAVar ssaVar = var.getVar();
 			ArgType resolvedType = var.getCurrentType();
 			if (!resolvedType.isTypeKnown()) {
@@ -186,8 +189,9 @@ public class TypeSearch {
 	}
 
 	private boolean fullCheck(List<TypeSearchVarInfo> vars) {
-		for (TypeSearchVarInfo var : vars) {
-			if (!singleCheck(var)) {
+		int varsCount = vars.size();
+		for (int varIndex = 0; varIndex < varsCount; varIndex++) {
+			if (!singleCheck(vars.get(varIndex))) {
 				return false;
 			}
 		}
@@ -198,8 +202,10 @@ public class TypeSearch {
 		if (var.isTypeResolved()) {
 			return true;
 		}
-		for (ITypeConstraint constraint : var.getConstraints()) {
-			if (!constraint.check(state)) {
+		List<ITypeConstraint> constraints = var.getConstraints();
+		int constraintsCount = constraints.size();
+		for (int constraintIndex = 0; constraintIndex < constraintsCount; constraintIndex++) {
+			if (!constraints.get(constraintIndex).check(state)) {
 				return false;
 			}
 		}
@@ -218,10 +224,9 @@ public class TypeSearch {
 			varInfo.markResolved(currentType);
 			return;
 		}
-
+		Set<ITypeBound> bounds = ssaVar.getTypeInfo().getBounds();
 		Set<ArgType> assigns = new LinkedHashSet<>();
 		Set<ArgType> uses = new LinkedHashSet<>();
-		Set<ITypeBound> bounds = ssaVar.getTypeInfo().getBounds();
 		for (ITypeBound bound : bounds) {
 			if (bound.getBound() == BoundEnum.ASSIGN) {
 				assigns.add(bound.getType());
@@ -230,18 +235,30 @@ public class TypeSearch {
 			}
 		}
 
-		Set<ArgType> candidateTypes = new LinkedHashSet<>();
+		List<ArgType> candidateTypes = new ArrayList<>(CANDIDATES_COUNT_LIMIT + 1);
 		addCandidateTypes(bounds, candidateTypes, assigns);
 		addCandidateTypes(bounds, candidateTypes, uses);
 
-		for (ArgType assignType : assigns) {
-			addWiderTypes(bounds, candidateTypes, assignType);
+		if (!isCandidateLimitReached(candidateTypes)) {
+			for (ArgType assignType : assigns) {
+				addWiderTypes(bounds, candidateTypes, assignType);
+				if (isCandidateLimitReached(candidateTypes)) {
+					break;
+				}
+			}
 		}
-		for (ArgType useType : uses) {
-			addNarrowTypes(bounds, candidateTypes, useType);
+		if (!isCandidateLimitReached(candidateTypes)) {
+			for (ArgType useType : uses) {
+				addNarrowTypes(bounds, candidateTypes, useType);
+				if (isCandidateLimitReached(candidateTypes)) {
+					break;
+				}
+			}
 		}
 
-		addUsageTypeCandidates(ssaVar, bounds, candidateTypes);
+		if (!isCandidateLimitReached(candidateTypes)) {
+			addUsageTypeCandidates(ssaVar, bounds, candidateTypes);
+		}
 
 		int size = candidateTypes.size();
 		if (size == 0) {
@@ -250,18 +267,17 @@ public class TypeSearch {
 			varInfo.setCandidateTypes(Collections.emptyList());
 		} else if (size == 1) {
 			varInfo.setTypeResolved(true);
-			varInfo.setCurrentType(candidateTypes.iterator().next());
+			varInfo.setCurrentType(candidateTypes.get(0));
 			varInfo.setCandidateTypes(Collections.emptyList());
 		} else {
 			varInfo.setTypeResolved(false);
 			varInfo.setCurrentType(ArgType.UNKNOWN);
-			List<ArgType> types = new ArrayList<>(candidateTypes);
-			types.sort(typeCompare.getReversedComparator());
-			varInfo.setCandidateTypes(Collections.unmodifiableList(types));
+			candidateTypes.sort(typeCompare.getReversedComparator());
+			varInfo.setCandidateTypes(Collections.unmodifiableList(candidateTypes));
 		}
 	}
 
-	private void addUsageTypeCandidates(SSAVar ssaVar, Set<ITypeBound> bounds, Set<ArgType> candidateTypes) {
+	private void addUsageTypeCandidates(SSAVar ssaVar, Set<ITypeBound> bounds, List<ArgType> candidateTypes) {
 		for (RegisterArg useArg : ssaVar.getUseList()) {
 			InsnNode parentInsn = useArg.getParentInsn();
 			if (parentInsn != null) {
@@ -276,7 +292,7 @@ public class TypeSearch {
 		}
 	}
 
-	private void addCandidateTypes(Set<ITypeBound> bounds, Set<ArgType> collectedTypes, Collection<ArgType> candidateTypes) {
+	private void addCandidateTypes(Set<ITypeBound> bounds, List<ArgType> collectedTypes, Collection<ArgType> candidateTypes) {
 		for (ArgType candidateType : candidateTypes) {
 			if (addCandidateType(bounds, collectedTypes, candidateType)) {
 				return;
@@ -284,19 +300,28 @@ public class TypeSearch {
 		}
 	}
 
-	private boolean addCandidateType(Set<ITypeBound> bounds, Set<ArgType> collectedTypes, ArgType candidateType) {
-		if (candidateType.isTypeKnown()
-				&& !collectedTypes.contains(candidateType)
-				&& typeUpdate.inBounds(bounds, candidateType)) {
-			collectedTypes.add(candidateType);
-			if (collectedTypes.size() > CANDIDATES_COUNT_LIMIT) {
-				return true;
-			}
+	private boolean addCandidateType(Set<ITypeBound> bounds, List<ArgType> collectedTypes, ArgType candidateType) {
+		if (isCandidateLimitReached(collectedTypes)) {
+			return true;
+		}
+		if (!candidateType.isTypeKnown() || collectedTypes.contains(candidateType)) {
+			return false;
+		}
+		if (!typeUpdate.inBounds(bounds, candidateType)) {
+			return false;
+		}
+		collectedTypes.add(candidateType);
+		if (collectedTypes.size() > CANDIDATES_COUNT_LIMIT) {
+			return true;
 		}
 		return false;
 	}
 
-	private void addWiderTypes(Set<ITypeBound> bounds, Set<ArgType> candidateTypes, ArgType type) {
+	private boolean isCandidateLimitReached(List<ArgType> candidateTypes) {
+		return candidateTypes.size() > CANDIDATES_COUNT_LIMIT;
+	}
+
+	private void addWiderTypes(Set<ITypeBound> bounds, List<ArgType> candidateTypes, ArgType type) {
 		if (type.isTypeKnown()) {
 			if (type.isObject()) {
 				Set<String> ancestors = mth.root().getClsp().getSuperTypes(type.getObject());
@@ -307,9 +332,14 @@ public class TypeSearch {
 		}
 	}
 
-	private void addNarrowTypes(Set<ITypeBound> bounds, Set<ArgType> candidateTypes, ArgType type) {
+	private void addNarrowTypes(Set<ITypeBound> bounds, List<ArgType> candidateTypes, ArgType type) {
 		if (type.isTypeKnown()) {
 			if (type.isObject()) {
+				if (type.isWildcard()) {
+					// A wildcard uses Object as its storage type, but is not a concrete class.
+					// Expanding it would scan every Object implementation and invent arbitrary candidates.
+					return;
+				}
 				if (type.equals(ArgType.OBJECT)) {
 					// Avoid expanding the complete implementation set for java.lang.Object.
 					addCandidateType(bounds, candidateTypes, ArgType.OBJECT);
@@ -324,7 +354,7 @@ public class TypeSearch {
 	}
 
 	private void addObjectTypes(
-			Set<ITypeBound> bounds, Set<ArgType> candidateTypes, Collection<String> objectNames) {
+			Set<ITypeBound> bounds, List<ArgType> candidateTypes, Collection<String> objectNames) {
 		for (String objectName : objectNames) {
 			ArgType objectType = mth.root().getClsp().getClsType(objectName);
 			if (objectType == null) {

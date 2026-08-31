@@ -62,8 +62,8 @@ public class BlockSplitter extends AbstractVisitor {
 			return;
 		}
 		mth.initBasicBlocks();
-		Map<Integer, BlockNode> blocksMap = splitBasicBlocks(mth);
-		setupConnectionsFromJumps(mth, blocksMap);
+		BlockNode[] blocksByOffset = splitBasicBlocks(mth);
+		setupConnectionsFromJumps(mth, blocksByOffset);
 		initBlocksInTargetNodes(mth);
 
 		expandMoveMulti(mth);
@@ -76,14 +76,14 @@ public class BlockSplitter extends AbstractVisitor {
 		removeEmptyDetachedBlocks(mth);
 		mth.getBasicBlocks().removeIf(BlockSplitter::removeEmptyBlock);
 
-		addTempConnectionsForExcHandlers(mth, blocksMap);
+		addTempConnectionsForExcHandlers(mth, blocksByOffset);
 		setupExitConnections(mth);
 
 		mth.updateBlockPositions();
 		mth.unloadInsnArr();
 	}
 
-	private static Map<Integer, BlockNode> splitBasicBlocks(MethodNode mth) {
+	private static BlockNode[] splitBasicBlocks(MethodNode mth) {
 		BlockNode enterBlock = startNewBlock(mth, -1);
 		enterBlock.add(AFlag.MTH_ENTER_BLOCK);
 		mth.setEnterBlock(enterBlock);
@@ -92,10 +92,11 @@ public class BlockSplitter extends AbstractVisitor {
 		exitBlock.add(AFlag.MTH_EXIT_BLOCK);
 		mth.setExitBlock(exitBlock);
 
-		Map<Integer, BlockNode> blocksMap = new HashMap<>();
+		InsnNode[] instructions = mth.getInstructions();
+		BlockNode[] blocksByOffset = new BlockNode[instructions.length];
 		BlockNode curBlock = enterBlock;
 		InsnNode prevInsn = null;
-		for (InsnNode insn : mth.getInstructions()) {
+		for (InsnNode insn : instructions) {
 			if (insn == null) {
 				continue;
 			}
@@ -116,15 +117,15 @@ public class BlockSplitter extends AbstractVisitor {
 						|| prevInsn.contains(AFlag.TRY_LEAVE)
 						|| insn.contains(AType.EXC_HANDLER)
 						|| isSplitByJump(prevInsn, insn)
-						|| isDoWhile(blocksMap, curBlock, insn)) {
+						|| isDoWhile(blocksByOffset, curBlock, insn)) {
 					curBlock = connectNewBlock(mth, curBlock, insnOffset);
 				}
 			}
-			blocksMap.put(insnOffset, curBlock);
+			blocksByOffset[insnOffset] = curBlock;
 			curBlock.getInstructions().add(insn);
 			prevInsn = insn;
 		}
-		return blocksMap;
+		return blocksByOffset;
 	}
 
 	/**
@@ -244,13 +245,20 @@ public class BlockSplitter extends AbstractVisitor {
 		}
 	}
 
-	private static void setupConnectionsFromJumps(MethodNode mth, Map<Integer, BlockNode> blocksMap) {
-		for (BlockNode block : mth.getBasicBlocks()) {
-			for (InsnNode insn : block.getInstructions()) {
+	private static void setupConnectionsFromJumps(MethodNode mth, BlockNode[] blocksByOffset) {
+		List<BlockNode> basicBlocks = mth.getBasicBlocks();
+		int blocksCount = basicBlocks.size();
+		for (int blockIndex = 0; blockIndex < blocksCount; blockIndex++) {
+			List<InsnNode> instructions = basicBlocks.get(blockIndex).getInstructions();
+			int instructionsCount = instructions.size();
+			for (int insnIndex = 0; insnIndex < instructionsCount; insnIndex++) {
+				InsnNode insn = instructions.get(insnIndex);
 				List<JumpInfo> jumps = insn.getAll(AType.JUMP);
-				for (JumpInfo jump : jumps) {
-					BlockNode srcBlock = getBlock(jump.getSrc(), blocksMap);
-					BlockNode thisBlock = getBlock(jump.getDest(), blocksMap);
+				int jumpsCount = jumps.size();
+				for (int jumpIndex = 0; jumpIndex < jumpsCount; jumpIndex++) {
+					JumpInfo jump = jumps.get(jumpIndex);
+					BlockNode srcBlock = getBlock(jump.getSrc(), blocksByOffset);
+					BlockNode thisBlock = getBlock(jump.getDest(), blocksByOffset);
 					connect(srcBlock, thisBlock);
 				}
 			}
@@ -262,7 +270,7 @@ public class BlockSplitter extends AbstractVisitor {
 	 * This temporary connection is necessary to build close to a final dominator tree.
 	 * Will be used and removed in {@code jadx.core.dex.visitors.blocks.BlockExceptionHandler}
 	 */
-	private static void addTempConnectionsForExcHandlers(MethodNode mth, Map<Integer, BlockNode> blocksMap) {
+	private static void addTempConnectionsForExcHandlers(MethodNode mth, BlockNode[] blocksByOffset) {
 		if (mth.isNoExceptionHandlers()) {
 			return;
 		}
@@ -273,7 +281,7 @@ public class BlockSplitter extends AbstractVisitor {
 					continue;
 				}
 				for (ExceptionHandler handler : catchAttr.getHandlers()) {
-					BlockNode handlerBlock = getBlock(handler.getHandlerOffset(), blocksMap);
+					BlockNode handlerBlock = getBlock(handler.getHandlerOffset(), blocksByOffset);
 					if (!handlerBlock.contains(AType.TMP_EDGE)) {
 						List<BlockNode> preds = block.getPredecessors();
 						if (preds.isEmpty()) {
@@ -304,13 +312,17 @@ public class BlockSplitter extends AbstractVisitor {
 
 	private static boolean isSplitByJump(InsnNode prevInsn, InsnNode currentInsn) {
 		List<JumpInfo> pJumps = prevInsn.getAll(AType.JUMP);
-		for (JumpInfo jump : pJumps) {
+		int prevJumpsCount = pJumps.size();
+		for (int i = 0; i < prevJumpsCount; i++) {
+			JumpInfo jump = pJumps.get(i);
 			if (jump.getSrc() == prevInsn.getOffset()) {
 				return true;
 			}
 		}
 		List<JumpInfo> cJumps = currentInsn.getAll(AType.JUMP);
-		for (JumpInfo jump : cJumps) {
+		int currentJumpsCount = cJumps.size();
+		for (int i = 0; i < currentJumpsCount; i++) {
+			JumpInfo jump = cJumps.get(i);
 			if (jump.getDest() == currentInsn.getOffset()) {
 				return true;
 			}
@@ -318,18 +330,19 @@ public class BlockSplitter extends AbstractVisitor {
 		return false;
 	}
 
-	private static boolean isDoWhile(Map<Integer, BlockNode> blocksMap, BlockNode curBlock, InsnNode insn) {
+	private static boolean isDoWhile(BlockNode[] blocksByOffset, BlockNode curBlock, InsnNode insn) {
 		// split 'do-while' block (last instruction: 'if', target this block)
 		if (insn.getType() != InsnType.IF) {
 			return false;
 		}
 		IfNode ifs = (IfNode) insn;
-		BlockNode targetBlock = blocksMap.get(ifs.getTarget());
+		int target = ifs.getTarget();
+		BlockNode targetBlock = target >= 0 && target < blocksByOffset.length ? blocksByOffset[target] : null;
 		return targetBlock == curBlock;
 	}
 
-	private static BlockNode getBlock(int offset, Map<Integer, BlockNode> blocksMap) {
-		BlockNode block = blocksMap.get(offset);
+	private static BlockNode getBlock(int offset, BlockNode[] blocksByOffset) {
+		BlockNode block = offset >= 0 && offset < blocksByOffset.length ? blocksByOffset[offset] : null;
 		if (block == null) {
 			throw new JadxRuntimeException("Missing block: " + offset);
 		}

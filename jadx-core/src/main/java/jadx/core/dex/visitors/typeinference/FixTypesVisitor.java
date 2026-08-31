@@ -111,8 +111,11 @@ public final class FixTypesVisitor extends AbstractVisitor {
 	 */
 	private boolean trySplitIncompatibleFieldPut(MethodNode mth) {
 		List<RegisterArg> fieldPutUses = new ArrayList<>();
-		for (BlockNode block : mth.getBasicBlocks()) {
-			for (InsnNode insn : block.getInstructions()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int blockIndex = 0, blocksCount = blocks.size(); blockIndex < blocksCount; blockIndex++) {
+			List<InsnNode> insns = blocks.get(blockIndex).getInstructions();
+			for (int insnIndex = 0, insnsCount = insns.size(); insnIndex < insnsCount; insnIndex++) {
+				InsnNode insn = insns.get(insnIndex);
 				InsnType type = insn.getType();
 				if ((type == InsnType.IPUT || type == InsnType.SPUT) && insn.getArg(0).isRegister()) {
 					fieldPutUses.add((RegisterArg) insn.getArg(0));
@@ -120,7 +123,8 @@ public final class FixTypesVisitor extends AbstractVisitor {
 			}
 		}
 		int added = 0;
-		for (RegisterArg useArg : fieldPutUses) {
+		for (int i = 0, count = fieldPutUses.size(); i < count; i++) {
+			RegisterArg useArg = fieldPutUses.get(i);
 			SSAVar var = useArg.getSVar();
 			if (var == null) {
 				continue;
@@ -498,12 +502,16 @@ public final class FixTypesVisitor extends AbstractVisitor {
 	 */
 	private boolean trySplitSiblingStaticFieldPhi(MethodNode mth) {
 		int insnsAdded = 0;
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int blockIndex = 0, blocksCount = blocks.size(); blockIndex < blocksCount; blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
 			PhiListAttr phiListAttr = block.get(AType.PHI_LIST);
 			if (phiListAttr == null) {
 				continue;
 			}
-			for (PhiInsn phiInsn : phiListAttr.getList()) {
+			List<PhiInsn> phiList = phiListAttr.getList();
+			for (int phiIndex = 0, phiCount = phiList.size(); phiIndex < phiCount; phiIndex++) {
+				PhiInsn phiInsn = phiList.get(phiIndex);
 				if (isSiblingStaticFieldPhi(phiInsn)) {
 					insnsAdded += tryInsertAdditionalInsn(mth, phiInsn);
 				}

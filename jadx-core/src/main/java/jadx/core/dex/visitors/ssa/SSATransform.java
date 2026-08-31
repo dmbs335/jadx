@@ -2,6 +2,7 @@ package jadx.core.dex.visitors.ssa;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Collections;
 import java.util.Deque;
@@ -69,8 +70,9 @@ public class SSATransform extends AbstractVisitor {
 		LiveVarAnalysis la = new LiveVarAnalysis(mth);
 		la.runAnalysis();
 		int regsCount = mth.getRegsCount();
+		PhiPlacementState phiPlacementState = new PhiPlacementState(mth.getBasicBlocks().size());
 		for (int i = 0; i < regsCount; i++) {
-			placePhi(mth, i, la);
+			placePhi(mth, i, la, phiPlacementState);
 		}
 		ExceptionPhiData exceptionPhiData = placeExceptionHandlerPhis(mth, la);
 		renameVariables(mth, exceptionPhiData);
@@ -156,7 +158,10 @@ public class SSATransform extends AbstractVisitor {
 				candidates.add(new ExceptionPhiCandidate(handlerBlock, regNum, sources, existingPhi));
 			}
 		}
-		for (ExceptionPhiCandidate candidate : resolveExceptionPhiCandidates(mth, candidates)) {
+		List<ExceptionPhiCandidate> resolvedCandidates = resolveExceptionPhiCandidates(mth, candidates);
+		int resolvedCount = resolvedCandidates.size();
+		for (int candidateIndex = 0; candidateIndex < resolvedCount; candidateIndex++) {
+			ExceptionPhiCandidate candidate = resolvedCandidates.get(candidateIndex);
 			PhiInsn phiInsn = candidate.getExistingPhi();
 			if (phiInsn == null) {
 				phiInsn = addPhi(mth, candidate.getHandlerBlock(), candidate.getRegNum());
@@ -240,13 +245,12 @@ public class SSATransform extends AbstractVisitor {
 		List<ExceptionPhiCandidate> resolved = new ArrayList<>(candidates);
 		boolean changed;
 		do {
-			BitSet[] availableRegs = collectRenameAvailableRegs(mth, resolved);
+			RenameAvailableRegs availableRegs = collectRenameAvailableRegs(mth, resolved);
 			changed = false;
-			Iterator<ExceptionPhiCandidate> iterator = resolved.iterator();
-			while (iterator.hasNext()) {
-				ExceptionPhiCandidate candidate = iterator.next();
+			for (int candidateIndex = resolved.size() - 1; candidateIndex >= 0; candidateIndex--) {
+				ExceptionPhiCandidate candidate = resolved.get(candidateIndex);
 				if (!isExceptionPhiCandidateResolvable(candidate, availableRegs)) {
-					iterator.remove();
+					resolved.remove(candidateIndex);
 					changed = true;
 				}
 			}
@@ -255,38 +259,57 @@ public class SSATransform extends AbstractVisitor {
 	}
 
 	private static boolean isExceptionPhiCandidateResolvable(
-			ExceptionPhiCandidate candidate, BitSet[] availableRegs) {
-		int regNum = candidate.getRegNum();
-		for (BlockNode source : candidate.getSources()) {
-			BitSet available = availableRegs[source.getId()];
-			if (available == null || !available.get(regNum)) {
+			ExceptionPhiCandidate candidate, RenameAvailableRegs availableRegs) {
+		int candidateIndex = availableRegs.getCandidateIndex(candidate.getRegNum());
+		if (candidateIndex == -1) {
+			return false;
+		}
+		List<BlockNode> sources = candidate.getSources();
+		int sourcesCount = sources.size();
+		for (int i = 0; i < sourcesCount; i++) {
+			if (!availableRegs.isAvailable(sources.get(i).getId(), candidateIndex)) {
 				return false;
 			}
 		}
 		return true;
 	}
 
-	private static BitSet[] collectRenameAvailableRegs(
+	private static RenameAvailableRegs collectRenameAvailableRegs(
 			MethodNode mth, List<ExceptionPhiCandidate> candidates) {
-		BitSet initial = new BitSet(mth.getRegsCount());
+		int[] candidateIndexes = new int[mth.getRegsCount()];
+		Arrays.fill(candidateIndexes, -1);
+		int candidatesCount = candidates.size();
+		int trackedRegsCount = 0;
+		for (int candidateIndex = 0; candidateIndex < candidatesCount; candidateIndex++) {
+			int regNum = candidates.get(candidateIndex).getRegNum();
+			if (candidateIndexes[regNum] == -1) {
+				candidateIndexes[regNum] = trackedRegsCount++;
+			}
+		}
+		if (trackedRegsCount <= Long.SIZE) {
+			return collectCompactRenameAvailableRegs(mth, candidates, candidateIndexes, trackedRegsCount);
+		}
+
+		BitSet initial = new BitSet(trackedRegsCount);
 		RegisterArg thisArg = mth.getThisArg();
 		if (thisArg != null) {
-			initial.set(thisArg.getRegNum());
+			setTrackedReg(initial, candidateIndexes, thisArg.getRegNum());
 		}
 		for (RegisterArg arg : mth.getArgRegs()) {
-			initial.set(arg.getRegNum());
+			setTrackedReg(initial, candidateIndexes, arg.getRegNum());
 		}
 
 		int blocksCount = mth.getBasicBlocks().size();
 		BitSet[] candidateDefs = new BitSet[blocksCount];
-		for (ExceptionPhiCandidate candidate : candidates) {
+		for (int candidateIndex = 0; candidateIndex < candidatesCount; candidateIndex++) {
+			ExceptionPhiCandidate candidate = candidates.get(candidateIndex);
 			int blockId = candidate.getHandlerBlock().getId();
 			BitSet defs = candidateDefs[blockId];
 			if (defs == null) {
 				defs = new BitSet();
 				candidateDefs[blockId] = defs;
 			}
-			defs.set(candidate.getRegNum());
+			defs.set(candidateIndexes[candidate.getRegNum()]);
 		}
 
 		BitSet[] availableRegs = new BitSet[blocksCount];
@@ -311,13 +334,13 @@ public class SSATransform extends AbstractVisitor {
 					for (int argIndex = 0; argIndex < argsCount; argIndex++) {
 						InsnArg arg = insn.getArg(argIndex);
 						if (arg.isRegister()) {
-							state.set(((RegisterArg) arg).getRegNum());
+							setTrackedReg(state, candidateIndexes, ((RegisterArg) arg).getRegNum());
 						}
 					}
 				}
 				RegisterArg result = insn.getResult();
 				if (result != null) {
-					state.set(result.getRegNum());
+					setTrackedReg(state, candidateIndexes, result.getRegNum());
 				}
 			}
 			availableRegs[blockId] = state;
@@ -336,7 +359,84 @@ public class SSATransform extends AbstractVisitor {
 				}
 			}
 		}
-		return availableRegs;
+		return RenameAvailableRegs.expanded(availableRegs, candidateIndexes);
+	}
+
+	private static RenameAvailableRegs collectCompactRenameAvailableRegs(
+			MethodNode mth, List<ExceptionPhiCandidate> candidates, int[] candidateIndexes, int trackedRegsCount) {
+		long initial = 0;
+		RegisterArg thisArg = mth.getThisArg();
+		if (thisArg != null) {
+			initial = setTrackedReg(initial, candidateIndexes, thisArg.getRegNum());
+		}
+		List<RegisterArg> argRegs = mth.getArgRegs();
+		int argRegsCount = argRegs.size();
+		for (int i = 0; i < argRegsCount; i++) {
+			initial = setTrackedReg(initial, candidateIndexes, argRegs.get(i).getRegNum());
+		}
+
+		int blocksCount = mth.getBasicBlocks().size();
+		long[] candidateDefs = new long[blocksCount];
+		int candidatesCount = candidates.size();
+		for (int candidateIndex = 0; candidateIndex < candidatesCount; candidateIndex++) {
+			ExceptionPhiCandidate candidate = candidates.get(candidateIndex);
+			int trackedIndex = candidateIndexes[candidate.getRegNum()];
+			candidateDefs[candidate.getHandlerBlock().getId()] |= 1L << trackedIndex;
+		}
+
+		long[] availableRegs = new long[blocksCount];
+		boolean[] reached = new boolean[blocksCount];
+		ArrayDeque<BlockNode> stack = new ArrayDeque<>();
+		BlockNode enterBlock = mth.getEnterBlock();
+		availableRegs[enterBlock.getId()] = initial;
+		reached[enterBlock.getId()] = true;
+		stack.push(enterBlock);
+		while (!stack.isEmpty()) {
+			BlockNode block = stack.pop();
+			int blockId = block.getId();
+			long state = availableRegs[blockId] | candidateDefs[blockId];
+			List<InsnNode> instructions = block.getInstructions();
+			int instructionsCount = instructions.size();
+			for (int i = 0; i < instructionsCount; i++) {
+				InsnNode insn = instructions.get(i);
+				if (insn.getType() != InsnType.PHI) {
+					int argsCount = insn.getArgsCount();
+					for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+						InsnArg arg = insn.getArg(argIndex);
+						if (arg.isRegister()) {
+							state = setTrackedReg(state, candidateIndexes, ((RegisterArg) arg).getRegNum());
+						}
+					}
+				}
+				RegisterArg result = insn.getResult();
+				if (result != null) {
+					state = setTrackedReg(state, candidateIndexes, result.getRegNum());
+				}
+			}
+			availableRegs[blockId] = state;
+			List<BlockNode> dominatesOn = block.getDominatesOn();
+			int dominatedCount = dominatesOn.size();
+			for (int dominatedIndex = 0; dominatedIndex < dominatedCount; dominatedIndex++) {
+				BlockNode dominated = dominatesOn.get(dominatedIndex);
+				int dominatedId = dominated.getId();
+				availableRegs[dominatedId] = state;
+				reached[dominatedId] = true;
+				stack.push(dominated);
+			}
+		}
+		return RenameAvailableRegs.compact(availableRegs, reached, candidateIndexes, trackedRegsCount);
+	}
+
+	private static void setTrackedReg(BitSet state, int[] candidateIndexes, int regNum) {
+		int candidateIndex = candidateIndexes[regNum];
+		if (candidateIndex != -1) {
+			state.set(candidateIndex);
+		}
+	}
+
+	private static long setTrackedReg(long state, int[] candidateIndexes, int regNum) {
+		int candidateIndex = candidateIndexes[regNum];
+		return candidateIndex == -1 ? state : state | 1L << candidateIndex;
 	}
 
 	private static boolean hasPhiForReg(BlockNode block, int regNum) {
@@ -617,8 +717,13 @@ public class SSATransform extends AbstractVisitor {
 	}
 
 	private static void replaceKotlinSpillingArgs(MethodNode mth) {
-		for (BlockNode block : mth.getBasicBlocks()) {
-			for (InsnNode insn : block.getInstructions()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		int blocksCount = blocks.size();
+		for (int i = 0; i < blocksCount; i++) {
+			List<InsnNode> instructions = blocks.get(i).getInstructions();
+			int instructionsCount = instructions.size();
+			for (int j = 0; j < instructionsCount; j++) {
+				InsnNode insn = instructions.get(j);
 				if (insn.getType() == InsnType.INVOKE
 						&& insn.getArgsCount() == 1
 						&& ((InvokeNode) insn).getCallMth().getRawFullId().equals(KOTLIN_NULL_OUT_SPILLED_VAR)) {
@@ -628,14 +733,19 @@ public class SSATransform extends AbstractVisitor {
 		}
 	}
 
-	private static void placePhi(MethodNode mth, int regNum, LiveVarAnalysis la) {
+	private static void placePhi(MethodNode mth, int regNum, LiveVarAnalysis la, PhiPlacementState state) {
 		List<BlockNode> blocks = mth.getBasicBlocks();
-		int blocksCount = blocks.size();
-		BitSet hasPhi = new BitSet(blocksCount);
-		BitSet processed = new BitSet(blocksCount);
-		Deque<BlockNode> workList = new ArrayDeque<>();
-
 		BitSet assignBlocks = la.getAssignBlocks(regNum);
+		if (assignBlocks.isEmpty()) {
+			return;
+		}
+		BitSet hasPhi = state.hasPhi;
+		BitSet processed = state.processed;
+		ArrayDeque<BlockNode> workList = state.workList;
+		hasPhi.clear();
+		processed.clear();
+		workList.clear();
+
 		for (int id = assignBlocks.nextSetBit(0); id >= 0; id = assignBlocks.nextSetBit(id + 1)) {
 			processed.set(id);
 			workList.add(blocks.get(id));
@@ -655,6 +765,17 @@ public class SSATransform extends AbstractVisitor {
 					}
 				}
 			}
+		}
+	}
+
+	private static final class PhiPlacementState {
+		private final BitSet hasPhi;
+		private final BitSet processed;
+		private final ArrayDeque<BlockNode> workList = new ArrayDeque<>();
+
+		private PhiPlacementState(int blocksCount) {
+			this.hasPhi = new BitSet(blocksCount);
+			this.processed = new BitSet(blocksCount);
 		}
 	}
 
@@ -742,19 +863,27 @@ public class SSATransform extends AbstractVisitor {
 				state.startVar(result);
 			}
 		}
-		for (BlockNode s : block.getSuccessors()) {
+		List<BlockNode> successors = block.getSuccessors();
+		int successorsCount = successors.size();
+		for (int successorIndex = 0; successorIndex < successorsCount; successorIndex++) {
+			BlockNode s = successors.get(successorIndex);
 			PhiListAttr phiList = s.get(AType.PHI_LIST);
 			if (phiList == null) {
 				continue;
 			}
-			for (PhiInsn phiInsn : phiList.getList()) {
+			List<PhiInsn> phiInsns = phiList.getList();
+			int phiInsnsCount = phiInsns.size();
+			for (int phiInsnIndex = 0; phiInsnIndex < phiInsnsCount; phiInsnIndex++) {
+				PhiInsn phiInsn = phiInsns.get(phiInsnIndex);
 				if (!exceptionPhiData.isExceptionPhi(phiInsn)) {
 					bindPhiArg(state, phiInsn);
 				}
 			}
 		}
-		for (PhiInsn phiInsn : exceptionPhiData.getForSource(block)) {
-			bindPhiArg(state, phiInsn);
+		List<PhiInsn> exceptionPhiInsns = exceptionPhiData.getForSource(block);
+		int exceptionPhiInsnsCount = exceptionPhiInsns.size();
+		for (int phiInsnIndex = 0; phiInsnIndex < exceptionPhiInsnsCount; phiInsnIndex++) {
+			bindPhiArg(state, exceptionPhiInsns.get(phiInsnIndex));
 		}
 	}
 
@@ -803,27 +932,81 @@ public class SSATransform extends AbstractVisitor {
 		}
 	}
 
+	private static final class RenameAvailableRegs {
+		private final BitSet[] expandedByBlock;
+		private final long[] compactByBlock;
+		private final boolean[] compactReached;
+		private final int[] candidateIndexes;
+		private final int trackedRegsCount;
+
+		private RenameAvailableRegs(BitSet[] expandedByBlock, long[] compactByBlock, boolean[] compactReached,
+				int[] candidateIndexes, int trackedRegsCount) {
+			this.expandedByBlock = expandedByBlock;
+			this.compactByBlock = compactByBlock;
+			this.compactReached = compactReached;
+			this.candidateIndexes = candidateIndexes;
+			this.trackedRegsCount = trackedRegsCount;
+		}
+
+		private static RenameAvailableRegs expanded(BitSet[] byBlock, int[] candidateIndexes) {
+			return new RenameAvailableRegs(byBlock, null, null, candidateIndexes, 0);
+		}
+
+		private static RenameAvailableRegs compact(
+				long[] byBlock, boolean[] reached, int[] candidateIndexes, int trackedRegsCount) {
+			return new RenameAvailableRegs(null, byBlock, reached, candidateIndexes, trackedRegsCount);
+		}
+
+		private boolean isAvailable(int blockId, int candidateIndex) {
+			if (compactByBlock != null) {
+				return candidateIndex < trackedRegsCount
+						&& compactReached[blockId]
+						&& (compactByBlock[blockId] & 1L << candidateIndex) != 0;
+			}
+			BitSet available = expandedByBlock[blockId];
+			return available != null && available.get(candidateIndex);
+		}
+
+		private int getCandidateIndex(int regNum) {
+			return candidateIndexes[regNum];
+		}
+	}
+
 	private static final class ExceptionPhiData {
-		private final Map<BlockNode, List<PhiInsn>> bySource = new HashMap<>();
-		private final Map<PhiInsn, Integer> expectedArgs = new IdentityHashMap<>();
+		private Map<BlockNode, List<PhiInsn>> bySource;
+		private Map<PhiInsn, Integer> expectedArgs;
 
 		public void add(PhiInsn phiInsn, List<BlockNode> sources) {
-			expectedArgs.put(phiInsn, sources.size());
+			Map<BlockNode, List<PhiInsn>> sourceMap = bySource;
+			Map<PhiInsn, Integer> expectedMap = expectedArgs;
+			if (sourceMap == null) {
+				sourceMap = new HashMap<>();
+				expectedMap = new IdentityHashMap<>();
+				bySource = sourceMap;
+				expectedArgs = expectedMap;
+			}
+			expectedMap.put(phiInsn, sources.size());
 			for (BlockNode source : sources) {
-				bySource.computeIfAbsent(source, k -> new ArrayList<>()).add(phiInsn);
+				sourceMap.computeIfAbsent(source, k -> new ArrayList<>()).add(phiInsn);
 			}
 		}
 
 		public boolean isExceptionPhi(PhiInsn phiInsn) {
-			return expectedArgs.containsKey(phiInsn);
+			Map<PhiInsn, Integer> expectedMap = expectedArgs;
+			return expectedMap != null && expectedMap.containsKey(phiInsn);
 		}
 
 		public List<PhiInsn> getForSource(BlockNode source) {
-			return bySource.getOrDefault(source, List.of());
+			Map<BlockNode, List<PhiInsn>> sourceMap = bySource;
+			return sourceMap == null ? List.of() : sourceMap.getOrDefault(source, List.of());
 		}
 
 		public void checkComplete(MethodNode mth) {
-			for (Map.Entry<PhiInsn, Integer> entry : expectedArgs.entrySet()) {
+			Map<PhiInsn, Integer> expectedMap = expectedArgs;
+			if (expectedMap == null) {
+				return;
+			}
+			for (Map.Entry<PhiInsn, Integer> entry : expectedMap.entrySet()) {
 				PhiInsn phiInsn = entry.getKey();
 				int expected = entry.getValue();
 				if (phiInsn.getArgsCount() != expected) {
@@ -963,7 +1146,10 @@ public class SSATransform extends AbstractVisitor {
 	private static boolean fixUselessPhi(MethodNode mth) {
 		boolean changed = false;
 		List<PhiInsn> insnToRemove = new ArrayList<>();
-		for (SSAVar var : mth.getSVars()) {
+		List<SSAVar> sVars = mth.getSVars();
+		int sVarsCount = sVars.size();
+		for (int i = 0; i < sVarsCount; i++) {
+			SSAVar var = sVars.get(i);
 			// phi result not used
 			if (var.getUseCount() == 0) {
 				InsnNode assignInsn = var.getAssign().getParentInsn();
@@ -973,17 +1159,23 @@ public class SSATransform extends AbstractVisitor {
 				}
 			}
 		}
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		int blocksCount = blocks.size();
+		for (int i = 0; i < blocksCount; i++) {
+			BlockNode block = blocks.get(i);
 			PhiListAttr phiList = block.get(AType.PHI_LIST);
 			if (phiList == null) {
 				continue;
 			}
-			Iterator<PhiInsn> it = phiList.getList().iterator();
-			while (it.hasNext()) {
-				PhiInsn phi = it.next();
+			List<PhiInsn> phis = phiList.getList();
+			int phiIndex = 0;
+			while (phiIndex < phis.size()) {
+				PhiInsn phi = phis.get(phiIndex);
 				if (fixPhiWithSameArgs(mth, block, phi)) {
-					it.remove();
+					phis.remove(phiIndex);
 					changed = true;
+				} else {
+					phiIndex++;
 				}
 			}
 		}
@@ -993,7 +1185,10 @@ public class SSATransform extends AbstractVisitor {
 
 	private static boolean fixPhiWithSameArgs(MethodNode mth, BlockNode block, PhiInsn phi) {
 		if (phi.getArgsCount() == 0) {
-			for (RegisterArg useArg : phi.getResult().getSVar().getUseList()) {
+			List<RegisterArg> useList = phi.getResult().getSVar().getUseList();
+			int useCount = useList.size();
+			for (int i = 0; i < useCount; i++) {
+				RegisterArg useArg = useList.get(i);
 				InsnNode useInsn = useArg.getParentInsn();
 				if (useInsn != null && useInsn.getType() == InsnType.PHI) {
 					phi.removeArg(useArg);
@@ -1010,7 +1205,9 @@ public class SSATransform extends AbstractVisitor {
 		if (sameVar != null) {
 			RegisterArg sameArg = sameVar.getAssign().duplicate();
 			if (inlinePhiInsn(mth, block, phi, sameArg)) {
-				for (InsnArg arg : phi.getArguments()) {
+				int argsCount = phi.getArgsCount();
+				for (int i = 0; i < argsCount; i++) {
+					InsnArg arg = phi.getArg(i);
 					InsnNode moveInsn = ((RegisterArg) arg).getAssignInsn();
 					if (moveInsn != null) {
 						moveInsn.add(AFlag.REMOVE);
@@ -1488,14 +1685,14 @@ public class SSATransform extends AbstractVisitor {
 	}
 
 	private static void removeUnusedInvokeResults(MethodNode mth) {
-		Iterator<SSAVar> it = mth.getSVars().iterator();
-		while (it.hasNext()) {
-			SSAVar ssaVar = it.next();
+		List<SSAVar> sVars = mth.getSVars();
+		for (int i = sVars.size() - 1; i >= 0; i--) {
+			SSAVar ssaVar = sVars.get(i);
 			if (ssaVar.getUseCount() == 0) {
 				InsnNode parentInsn = ssaVar.getAssign().getParentInsn();
 				if (parentInsn != null && parentInsn.getType() == InsnType.INVOKE) {
 					parentInsn.setResult(null);
-					it.remove();
+					sVars.remove(i);
 				}
 			}
 		}

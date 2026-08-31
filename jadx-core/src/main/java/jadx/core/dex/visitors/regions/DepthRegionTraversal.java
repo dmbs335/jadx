@@ -98,7 +98,10 @@ public class DepthRegionTraversal {
 		while (!stack.isEmpty()) {
 			IRegion region = ListUtils.removeLast(stack);
 			count++;
-			for (IContainer subBlock : region.getSubBlocks()) {
+			List<IContainer> subBlocks = region.getSubBlocks();
+			int subBlocksCount = subBlocks.size();
+			for (int subBlockIndex = 0; subBlockIndex < subBlocksCount; subBlockIndex++) {
+				IContainer subBlock = subBlocks.get(subBlockIndex);
 				if (subBlock instanceof IRegion) {
 					stack.add((IRegion) subBlock);
 				}

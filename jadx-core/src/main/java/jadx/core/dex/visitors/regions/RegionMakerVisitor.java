@@ -1,6 +1,8 @@
 package jadx.core.dex.visitors.regions;
 
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.nodes.BlockNode;
+import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.dex.visitors.JadxVisitor;
@@ -39,11 +41,17 @@ public class RegionMakerVisitor extends AbstractVisitor {
 	}
 
 	private static void processForceInlineInsns(MethodNode mth) {
-		boolean needShrink = mth.getBasicBlocks().stream()
-				.flatMap(block -> block.getInstructions().stream())
-				.anyMatch(insn -> insn.contains(AFlag.FORCE_ASSIGN_INLINE));
-		if (needShrink) {
-			CodeShrinkVisitor.shrinkMethod(mth);
+		var blocks = mth.getBasicBlocks();
+		for (int blockIndex = 0, blocksCount = blocks.size(); blockIndex < blocksCount; blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
+			var insns = block.getInstructions();
+			for (int insnIndex = 0, insnsCount = insns.size(); insnIndex < insnsCount; insnIndex++) {
+				InsnNode insn = insns.get(insnIndex);
+				if (insn.contains(AFlag.FORCE_ASSIGN_INLINE)) {
+					CodeShrinkVisitor.shrinkMethod(mth);
+					return;
+				}
+			}
 		}
 	}
 

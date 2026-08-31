@@ -81,7 +81,10 @@ public class ProcessVariables extends AbstractVisitor {
 		int varCount = mth.getSVars().size();
 		int initialSize = varCount <= 2 ? varCount : IDENTITY_MAP_DEFAULT_EXPECTED_SIZE;
 		Set<SSAVar> knownVars = Collections.newSetFromMap(new IdentityHashMap<>(initialSize));
-		knownVars.addAll(mth.getSVars());
+		List<SSAVar> sVars = mth.getSVars();
+		for (int i = 0; i < varCount; i++) {
+			knownVars.add(sVars.get(i));
+		}
 		DepthRegionTraversal.traverse(mth, new AbstractRegionVisitor() {
 			private final List<RegisterArg> args = new ArrayList<>();
 
@@ -241,7 +244,9 @@ public class ProcessVariables extends AbstractVisitor {
 		}
 
 		VarUsage mergedUsage = new VarUsage(null);
-		for (VarUsage varUsage : usageList) {
+		int usageCount = usageList.size();
+		for (int i = 0; i < usageCount; i++) {
+			VarUsage varUsage = usageList.get(i);
 			mergedUsage.getAssigns().addAll(varUsage.getAssigns());
 			mergedUsage.getUses().addAll(varUsage.getUses());
 		}
@@ -260,42 +265,62 @@ public class ProcessVariables extends AbstractVisitor {
 	}
 
 	private List<CodeVar> collectCodeVars(MethodNode mth) {
-		Map<CodeVar, List<SSAVar>> codeVars = new LinkedHashMap<>();
+		List<SSAVar> methodVars = mth.getSVars();
+		int varsCount = methodVars.size();
+		int mapCapacity = Math.max(1, varsCount * 4 / 3 + 1);
+		Map<CodeVar, List<SSAVar>> codeVars = new LinkedHashMap<>(mapCapacity);
 		InitAtDeclareVarsAttr initVars = mth.get(AType.INIT_AT_DECLARE_VARS);
-		for (SSAVar ssaVar : mth.getSVars()) {
+		for (int i = 0; i < varsCount; i++) {
+			SSAVar ssaVar = methodVars.get(i);
 			if (ssaVar.getCodeVar().isThis()) {
 				continue;
 			}
 			CodeVar codeVar = ssaVar.getCodeVar();
-			List<SSAVar> list = codeVars.computeIfAbsent(codeVar, k -> new ArrayList<>());
+			List<SSAVar> list = codeVars.get(codeVar);
+			if (list == null) {
+				list = new ArrayList<>(Math.max(1, codeVar.getSsaVars().size()));
+				codeVars.put(codeVar, list);
+			}
 			list.add(ssaVar);
 		}
 
 		for (Entry<CodeVar, List<SSAVar>> entry : codeVars.entrySet()) {
 			CodeVar codeVar = entry.getKey();
 			List<SSAVar> list = entry.getValue();
-			for (SSAVar ssaVar : list) {
-				CodeVar localCodeVar = ssaVar.getCodeVar();
+			int groupSize = list.size();
+			for (int i = 0; i < groupSize; i++) {
+				CodeVar localCodeVar = list.get(i).getCodeVar();
 				codeVar.mergeFlagsFrom(localCodeVar);
 			}
-			if (list.size() > 1) {
-				for (SSAVar ssaVar : list) {
-					ssaVar.setCodeVar(codeVar);
+			if (groupSize > 1) {
+				for (int i = 0; i < groupSize; i++) {
+					list.get(i).setCodeVar(codeVar);
 				}
 			}
 			codeVar.setSsaVars(list);
-			if (initVars != null && list.stream().anyMatch(s -> initVars.contains(s.getRegNum()))) {
-				codeVar.setInitAtDeclaration(true);
+			if (initVars != null) {
+				for (int i = 0; i < groupSize; i++) {
+					if (initVars.contains(list.get(i).getRegNum())) {
+						codeVar.setInitAtDeclaration(true);
+						break;
+					}
+				}
 			}
 		}
 		return new ArrayList<>(codeVars.keySet());
 	}
 
 	private Map<CodeVar, List<VarUsage>> mergeUsageMaps(List<CodeVar> codeVars, Map<SSAVar, VarUsage> ssaUsageMap) {
-		Map<CodeVar, List<VarUsage>> codeVarUsage = new LinkedHashMap<>(codeVars.size());
-		for (CodeVar codeVar : codeVars) {
-			List<VarUsage> list = new ArrayList<>();
-			for (SSAVar ssaVar : codeVar.getSsaVars()) {
+		int codeVarsCount = codeVars.size();
+		int mapCapacity = Math.max(1, codeVarsCount * 4 / 3 + 1);
+		Map<CodeVar, List<VarUsage>> codeVarUsage = new LinkedHashMap<>(mapCapacity);
+		for (int codeVarIndex = 0; codeVarIndex < codeVarsCount; codeVarIndex++) {
+			CodeVar codeVar = codeVars.get(codeVarIndex);
+			List<SSAVar> ssaVars = codeVar.getSsaVars();
+			int ssaVarsCount = ssaVars.size();
+			List<VarUsage> list = new ArrayList<>(ssaVarsCount);
+			for (int ssaVarIndex = 0; ssaVarIndex < ssaVarsCount; ssaVarIndex++) {
+				SSAVar ssaVar = ssaVars.get(ssaVarIndex);
 				VarUsage usage = ssaUsageMap.get(ssaVar);
 				if (usage != null) {
 					list.add(usage);
@@ -310,8 +335,13 @@ public class ProcessVariables extends AbstractVisitor {
 		if (mergedUsage.getAssigns().isEmpty()) {
 			return false;
 		}
-		for (VarUsage u : list) {
-			for (UsePlace assign : u.getAssigns()) {
+		int usageCount = list.size();
+		for (int usageIndex = 0; usageIndex < usageCount; usageIndex++) {
+			VarUsage u = list.get(usageIndex);
+			List<UsePlace> assigns = u.getAssigns();
+			int assignsCount = assigns.size();
+			for (int assignIndex = 0; assignIndex < assignsCount; assignIndex++) {
+				UsePlace assign = assigns.get(assignIndex);
 				if (canDeclareAt(mergedUsage, assign)) {
 					return checkDeclareAtAssign(u.getVar());
 				}
@@ -324,7 +354,10 @@ public class ProcessVariables extends AbstractVisitor {
 		IRegion region = usePlace.getRegion();
 		// workaround for declare variables used in several loops
 		if (region instanceof LoopRegion) {
-			for (UsePlace use : usage.getAssigns()) {
+			List<UsePlace> assigns = usage.getAssigns();
+			int assignsCount = assigns.size();
+			for (int i = 0; i < assignsCount; i++) {
+				UsePlace use = assigns.get(i);
 				if (!RegionUtils.isRegionContainsRegion(region, use.getRegion())) {
 					return false;
 				}
