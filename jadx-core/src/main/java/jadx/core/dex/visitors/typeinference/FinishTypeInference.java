@@ -4953,7 +4953,10 @@ public final class FinishTypeInference extends AbstractVisitor {
 			TypeCompare typeCompare,
 			Function<InsnNode, Boolean> isHandlerInsn) {
 		int repaired = 0;
-		for (Map.Entry<CodeVar, List<SSAVar>> entry : new ArrayList<>(groups.entrySet())) {
+		List<Map.Entry<CodeVar, List<SSAVar>>> groupEntries = new ArrayList<>(groups.entrySet());
+		int entriesCount = groupEntries.size();
+		for (int entryIndex = 0; entryIndex < entriesCount; entryIndex++) {
+			Map.Entry<CodeVar, List<SSAVar>> entry = groupEntries.get(entryIndex);
 			CodeVar codeVar = entry.getKey();
 			ArgType currentType = codeVar.getType();
 			boolean primitiveLifetime = currentType != null
@@ -4965,7 +4968,9 @@ public final class FinishTypeInference extends AbstractVisitor {
 			List<SSAVar> group = entry.getValue();
 			SSAVar terminalVar = null;
 			ArgType cleanupType = null;
-			for (SSAVar var : group) {
+			int groupSize = group.size();
+			for (int groupIndex = 0; groupIndex < groupSize; groupIndex++) {
+				SSAVar var = group.get(groupIndex);
 				InsnNode assignInsn = var.getAssignInsn();
 				if (!(assignInsn instanceof PhiInsn)) {
 					continue;
@@ -5033,8 +5038,9 @@ public final class FinishTypeInference extends AbstractVisitor {
 			} else {
 				CodeVar cleanupCodeVar = new CodeVar();
 				cleanupCodeVar.setType(cleanupType);
-				for (SSAVar var : cleanupVars) {
-					var.setCodeVar(cleanupCodeVar);
+				int cleanupVarsCount = cleanupVars.size();
+				for (int cleanupIndex = 0; cleanupIndex < cleanupVarsCount; cleanupIndex++) {
+					cleanupVars.get(cleanupIndex).setCodeVar(cleanupCodeVar);
 				}
 				cleanupCodeVar.setSsaVars(cleanupVars);
 				codeVar.setSsaVars(remaining);
@@ -5063,7 +5069,9 @@ public final class FinishTypeInference extends AbstractVisitor {
 	private static ArgType getCloseCleanupReceiverType(SSAVar var) {
 		ArgType closeType = null;
 		boolean hasNullCheck = false;
-		for (RegisterArg use : var.getUseList()) {
+		List<RegisterArg> useList = var.getUseList();
+		for (int i = 0, count = useList.size(); i < count; i++) {
+			RegisterArg use = useList.get(i);
 			InsnNode useInsn = use.getParentInsn();
 			if (useInsn instanceof IfNode && isZeroComparison(use)) {
 				hasNullCheck = true;
@@ -7248,35 +7256,44 @@ public final class FinishTypeInference extends AbstractVisitor {
 	}
 
 	private static ArgType selectSinglePrimitiveType(List<SSAVar> vars) {
-		Set<ArgType> candidates = new LinkedHashSet<>();
+		ArgType candidate = null;
 		for (SSAVar var : vars) {
 			ArgType type = var.getTypeInfo().getType();
 			if (type.isTypeKnown()) {
 				if (!type.isPrimitive()) {
 					return null;
 				}
-				candidates.add(type);
+				if (candidate != null && !candidate.equals(type)) {
+					return null;
+				}
+				candidate = type;
 				continue;
 			}
 			PrimitiveType[] possibleTypes = type.getPossibleTypes();
 			if (possibleTypes.length == 1
 					&& possibleTypes[0] != PrimitiveType.OBJECT
 					&& possibleTypes[0] != PrimitiveType.ARRAY) {
-				candidates.add(ArgType.unknown(possibleTypes[0]).selectFirst());
+				ArgType possibleType = ArgType.unknown(possibleTypes[0]).selectFirst();
+				if (candidate != null && !candidate.equals(possibleType)) {
+					return null;
+				}
+				candidate = possibleType;
 			}
 			for (ITypeBound bound : var.getTypeInfo().getBounds()) {
 				ArgType boundType = bound.getType();
 				if (boundType.isTypeKnown()
 						&& boundType.isPrimitive()
 						&& bound.getBound() == BoundEnum.USE) {
-					candidates.add(boundType);
+					if (candidate != null && !candidate.equals(boundType)) {
+						return null;
+					}
+					candidate = boundType;
 				}
 			}
 		}
-		if (candidates.size() != 1) {
+		if (candidate == null) {
 			return null;
 		}
-		ArgType candidate = candidates.iterator().next();
 		PrimitiveType primitiveType = candidate.getPrimitiveType();
 		for (SSAVar var : vars) {
 			ArgType type = var.getTypeInfo().getType();
@@ -7298,23 +7315,33 @@ public final class FinishTypeInference extends AbstractVisitor {
 	 * a query-arguments array later reused for a Cursor.
 	 */
 	static ArgType selectSingleArrayType(List<SSAVar> vars) {
-		Set<ArgType> candidates = new LinkedHashSet<>();
+		ArgType candidate = null;
 		for (SSAVar var : vars) {
-			List<ArgType> types = new ArrayList<>();
-			types.add(var.getTypeInfo().getType());
-			types.add(var.getImmutableType());
-			var.getTypeInfo().getBounds().forEach(bound -> types.add(bound.getType()));
-			for (ArgType type : types) {
-				if (type == null || !type.isTypeKnown()) {
-					continue;
-				}
-				if (!type.isArray()) {
+			ArgType type = var.getTypeInfo().getType();
+			if (type != null && type.isTypeKnown()) {
+				if (!type.isArray() || candidate != null && !candidate.equals(type)) {
 					return null;
 				}
-				candidates.add(type);
+				candidate = type;
+			}
+			type = var.getImmutableType();
+			if (type != null && type.isTypeKnown()) {
+				if (!type.isArray() || candidate != null && !candidate.equals(type)) {
+					return null;
+				}
+				candidate = type;
+			}
+			for (ITypeBound bound : var.getTypeInfo().getBounds()) {
+				type = bound.getType();
+				if (type != null && type.isTypeKnown()) {
+					if (!type.isArray() || candidate != null && !candidate.equals(type)) {
+						return null;
+					}
+					candidate = type;
+				}
 			}
 		}
-		return candidates.size() == 1 ? candidates.iterator().next() : null;
+		return candidate;
 	}
 
 	private static boolean contains(PrimitiveType[] types, PrimitiveType expected) {
@@ -7327,8 +7354,7 @@ public final class FinishTypeInference extends AbstractVisitor {
 	}
 
 	static ArgType selectMoveSourceType(List<SSAVar> vars, CodeVar codeVar) {
-		Set<ArgType> sourceTypes = new LinkedHashSet<>();
-		boolean hasExternalMove = false;
+		ArgType candidate = null;
 		for (SSAVar var : vars) {
 			InsnNode assignInsn = var.getAssignInsn();
 			if (assignInsn == null || assignInsn.getType() == InsnType.PHI) {
@@ -7355,10 +7381,12 @@ public final class FinishTypeInference extends AbstractVisitor {
 			if (sourceType == null || !sourceType.isTypeKnown()) {
 				continue;
 			}
-			hasExternalMove = true;
-			sourceTypes.add(sourceType);
+			if (candidate != null && !candidate.equals(sourceType)) {
+				return null;
+			}
+			candidate = sourceType;
 		}
-		return hasExternalMove && sourceTypes.size() == 1 ? sourceTypes.iterator().next() : null;
+		return candidate;
 	}
 
 	private static boolean isOnlyUsedByObjectCasts(List<SSAVar> vars) {
@@ -7389,7 +7417,7 @@ public final class FinishTypeInference extends AbstractVisitor {
 	}
 
 	static ArgType selectMoveTargetType(List<SSAVar> vars, CodeVar codeVar) {
-		Set<ArgType> targetTypes = new LinkedHashSet<>();
+		ArgType candidate = null;
 		boolean hasUse = false;
 		for (SSAVar var : vars) {
 			for (RegisterArg use : var.getUseList()) {
@@ -7414,10 +7442,13 @@ public final class FinishTypeInference extends AbstractVisitor {
 				if (targetType == null || !targetType.isTypeKnown() || !targetType.isObject()) {
 					return null;
 				}
-				targetTypes.add(targetType);
+				if (candidate != null && !candidate.equals(targetType)) {
+					return null;
+				}
+				candidate = targetType;
 			}
 		}
-		return hasUse && targetTypes.size() == 1 ? targetTypes.iterator().next() : null;
+		return hasUse ? candidate : null;
 	}
 
 	/**
@@ -7432,7 +7463,7 @@ public final class FinishTypeInference extends AbstractVisitor {
 		if (vars.size() < 3 || codeVar.isThis()) {
 			return null;
 		}
-		Set<ArgType> concreteTypes = new LinkedHashSet<>();
+		ArgType candidate = null;
 		boolean broadInput = false;
 		for (SSAVar var : vars) {
 			InsnNode assignInsn = var.getAssignInsn();
@@ -7452,15 +7483,18 @@ public final class FinishTypeInference extends AbstractVisitor {
 			if (ArgType.OBJECT.equals(sourceType)) {
 				broadInput = true;
 			} else if (isConcreteReferenceType(sourceType) && sourceType.isObject()) {
-				concreteTypes.add(eraseGenericObjectType(sourceType));
+				ArgType concreteType = eraseGenericObjectType(sourceType);
+				if (candidate != null && !candidate.equals(concreteType)) {
+					return null;
+				}
+				candidate = concreteType;
 			} else {
 				return null;
 			}
 		}
-		if (!broadInput || concreteTypes.size() != 1) {
+		if (!broadInput || candidate == null) {
 			return null;
 		}
-		ArgType candidate = concreteTypes.iterator().next();
 		for (SSAVar var : vars) {
 			InsnNode assignInsn = var.getAssignInsn();
 			if (assignInsn != null && assignInsn.getType() == InsnType.MOVE) {

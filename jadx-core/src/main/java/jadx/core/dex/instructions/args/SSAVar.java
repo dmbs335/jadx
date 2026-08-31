@@ -136,7 +136,7 @@ public class SSAVar implements Comparable<SSAVar> {
 	}
 
 	public void removeUse(RegisterArg arg) {
-		useList.removeIf(registerArg -> registerArg == arg);
+		removeIdentity(useList, arg);
 	}
 
 	public void addUsedInPhi(PhiInsn phiInsn) {
@@ -148,10 +148,31 @@ public class SSAVar implements Comparable<SSAVar> {
 
 	public void removeUsedInPhi(PhiInsn phiInsn) {
 		if (usedInPhi != null) {
-			usedInPhi.removeIf(insn -> insn == phiInsn);
+			removeIdentity(usedInPhi, phiInsn);
 			if (usedInPhi.isEmpty()) {
 				usedInPhi = null;
 			}
+		}
+	}
+
+	/**
+	 * Remove all identity matches in one compaction pass. Repeated {@link List#remove(int)} calls
+	 * shift the backing array for every match and turn large SSA use lists into quadratic work.
+	 */
+	private static <T> void removeIdentity(List<T> list, T value) {
+		int size = list.size();
+		int write = 0;
+		for (int read = 0; read < size; read++) {
+			T item = list.get(read);
+			if (item != value) {
+				if (write != read) {
+					list.set(write, item);
+				}
+				write++;
+			}
+		}
+		for (int i = size - 1; i >= write; i--) {
+			list.remove(i);
 		}
 	}
 

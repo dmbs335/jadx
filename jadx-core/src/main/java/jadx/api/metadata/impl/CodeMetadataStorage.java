@@ -27,7 +27,7 @@ public class CodeMetadataStorage implements ICodeMetadata {
 			navMap = (ReverseAnnotationMap) map;
 		} else {
 			navMap = newAnnotationMap();
-			navMap.putAll(map);
+			map.forEach(navMap::put);
 		}
 		return new CodeMetadataStorage(lines, navMap);
 	}

@@ -1127,9 +1127,12 @@ public class BlockUtils {
 		// attempt 1: look for a block dominated by every other block
 		// don't do this if clean, since dominators always consider all successors
 		if (!clean) {
-			for (BlockNode bottomCandidate : blocks) {
+			int blocksCount = blocks.size();
+			for (int i = 0; i < blocksCount; i++) {
+				BlockNode bottomCandidate = blocks.get(i);
 				boolean bottom = true;
-				for (BlockNode from : blocks) {
+				for (int j = 0; j < blocksCount; j++) {
+					BlockNode from = blocks.get(j);
 					if (bottomCandidate != from && !bottomCandidate.isDominator(from)) {
 						bottom = false;
 						break;
@@ -1142,9 +1145,12 @@ public class BlockUtils {
 		}
 
 		// attempt 2: look for a block with a path from every other block
-		for (BlockNode bottomCandidate : blocks) {
+		int blocksCount = blocks.size();
+		for (int i = 0; i < blocksCount; i++) {
+			BlockNode bottomCandidate = blocks.get(i);
 			boolean bottom = true;
-			for (BlockNode from : blocks) {
+			for (int j = 0; j < blocksCount; j++) {
+				BlockNode from = blocks.get(j);
 				if (clean) {
 					if (bottomCandidate != from && !isPathExists(from, bottomCandidate)) {
 						bottom = false;

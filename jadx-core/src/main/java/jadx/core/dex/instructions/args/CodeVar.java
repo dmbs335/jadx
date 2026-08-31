@@ -53,11 +53,23 @@ public class CodeVar {
 
 	public void addSsaVar(SSAVar ssaVar) {
 		if (ssaVars.isEmpty()) {
-			ssaVars = new ArrayList<>(3);
+			ssaVars = Collections.singletonList(ssaVar);
+			return;
 		}
-		if (!ssaVars.contains(ssaVar)) {
-			ssaVars.add(ssaVar);
+		if (ssaVars.contains(ssaVar)) {
+			return;
 		}
+		if (!(ssaVars instanceof ArrayList)) {
+			List<SSAVar> list = new ArrayList<>(Math.max(3, ssaVars.size() + 1));
+			if (ssaVars.size() == 1) {
+				// Avoid addAll's temporary array and iterator for the common compact form.
+				list.add(ssaVars.get(0));
+			} else {
+				list.addAll(ssaVars);
+			}
+			ssaVars = list;
+		}
+		ssaVars.add(ssaVar);
 	}
 
 	public void setSsaVars(List<SSAVar> ssaVars) {

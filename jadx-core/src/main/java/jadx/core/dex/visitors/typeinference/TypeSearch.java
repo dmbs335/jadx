@@ -432,7 +432,9 @@ public class TypeSearch {
 			@Override
 			public boolean check(TypeSearchState state) {
 				ArgType resType = state.getArgType(insn.getResult());
-				for (InsnArg insnArg : insn.getArguments()) {
+				int argsCount = insn.getArgsCount();
+				for (int i = 0; i < argsCount; i++) {
+					InsnArg insnArg = insn.getArg(i);
 					ArgType argType = state.getArgType(insnArg);
 					if (!argType.equals(resType)) {
 						return false;

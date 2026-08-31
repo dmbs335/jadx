@@ -237,7 +237,10 @@ public final class FixTypesVisitor extends AbstractVisitor {
 	 * Check if all types resolved
 	 */
 	private static boolean checkTypes(MethodNode mth) {
-		for (SSAVar var : mth.getSVars()) {
+		List<SSAVar> sVars = mth.getSVars();
+		int count = sVars.size();
+		for (int i = 0; i < count; i++) {
+			SSAVar var = sVars.get(i);
 			ArgType type = var.getTypeInfo().getType();
 			if (!type.isTypeKnown()) {
 				return false;
@@ -250,7 +253,10 @@ public final class FixTypesVisitor extends AbstractVisitor {
 		try {
 			TypeSearch typeSearch = new TypeSearch(mth);
 			typeSearch.run();
-			for (SSAVar var : mth.getSVars()) {
+			List<SSAVar> sVars = mth.getSVars();
+			int count = sVars.size();
+			for (int i = 0; i < count; i++) {
+				SSAVar var = sVars.get(i);
 				if (!var.getTypeInfo().getType().isTypeKnown()) {
 					return false;
 				}

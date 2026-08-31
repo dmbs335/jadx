@@ -484,19 +484,23 @@ public final class TypeUpdate {
 		TypeCompareEnum cmp = comparator.compareTypes(candidateType, changeArg.getType());
 		boolean correctType = cmp.isEqual() || (assignChanged ? cmp.isWider() : cmp.isNarrow());
 
-		return queueTypeUpdate(updateInfo, changeArg, candidateType, result -> {
-			if (result == SAME && !correctType) {
-				if (Consts.DEBUG_TYPE_INFERENCE) {
-					LOG.debug("Move insn types mismatch: {} -> {}, change arg: {}, insn: {}",
-							candidateType, changeArg.getType(), changeArg, insn);
-				}
-				return REJECT;
+		return queueTypeUpdate(updateInfo, changeArg, candidateType,
+				updateInfo.acquireMoveUpdateCallback(this, insn, changeArg, candidateType, correctType));
+	}
+
+	TypeUpdateResult processMoveResult(TypeUpdateResult result, InsnNode insn,
+			InsnArg changeArg, ArgType candidateType, boolean correctType) {
+		if (result == SAME && !correctType) {
+			if (Consts.DEBUG_TYPE_INFERENCE) {
+				LOG.debug("Move insn types mismatch: {} -> {}, change arg: {}, insn: {}",
+						candidateType, changeArg.getType(), changeArg, insn);
 			}
-			if (result == REJECT && correctType) {
-				return CHANGED;
-			}
-			return result;
-		});
+			return REJECT;
+		}
+		if (result == REJECT && correctType) {
+			return CHANGED;
+		}
+		return result;
 	}
 
 	/**
@@ -512,7 +516,7 @@ public final class TypeUpdate {
 		}
 		// update args with same type
 		var updateCallback = updateInfo.acquireArgsListUpdateCallback(this, insn.getArgList(), candidateType, false);
-		updateCallback.setArgsFilter(a -> a != arg);
+		updateCallback.setSkipArg(arg);
 		return updateCallback.runFirstQueue();
 	}
 
@@ -530,7 +534,7 @@ public final class TypeUpdate {
 	 */
 	private TypeUpdateResult suggestAllSameListener(TypeUpdateInfo updateInfo, InsnNode insn, InsnArg arg, ArgType candidateType) {
 		var updateCallback = updateInfo.acquireArgsListUpdateCallback(this, insn.getArgList(), candidateType, false);
-		updateCallback.setArgsFilter(a -> a != arg);
+		updateCallback.setSkipArg(arg);
 		updateCallback.setIgnoreReject(true);
 		if (!isAssign(insn, arg)) {
 			RegisterArg resultArg = insn.getResult();

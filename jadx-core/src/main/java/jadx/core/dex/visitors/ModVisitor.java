@@ -467,9 +467,15 @@ public class ModVisitor extends AbstractVisitor {
 	 * Remove unnecessary instructions
 	 */
 	private static void removeStep(MethodNode mth, InsnRemover remover) {
-		for (BlockNode block : mth.getBasicBlocks()) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		int blocksCount = blocks.size();
+		for (int blockIndex = 0; blockIndex < blocksCount; blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
 			remover.setBlock(block);
-			for (InsnNode insn : block.getInstructions()) {
+			List<InsnNode> instructions = block.getInstructions();
+			int instructionsCount = instructions.size();
+			for (int insnIndex = 0; insnIndex < instructionsCount; insnIndex++) {
+				InsnNode insn = instructions.get(insnIndex);
 				switch (insn.getType()) {
 					case NOP:
 					case GOTO:
@@ -492,8 +498,14 @@ public class ModVisitor extends AbstractVisitor {
 		boolean changed;
 		do {
 			changed = false;
-			for (BlockNode block : mth.getBasicBlocks()) {
-				for (InsnNode insn : block.getInstructions()) {
+			List<BlockNode> blocks = mth.getBasicBlocks();
+			int blocksCount = blocks.size();
+			for (int blockIndex = 0; blockIndex < blocksCount; blockIndex++) {
+				BlockNode block = blocks.get(blockIndex);
+				List<InsnNode> instructions = block.getInstructions();
+				int instructionsCount = instructions.size();
+				for (int insnIndex = 0; insnIndex < instructionsCount; insnIndex++) {
+					InsnNode insn = instructions.get(insnIndex);
 					if (insn.getType() == InsnType.MOVE
 							&& insn.isAttrStorageEmpty()
 							&& isResultArgNotUsed(insn)) {

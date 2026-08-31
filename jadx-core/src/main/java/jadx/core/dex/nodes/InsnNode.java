@@ -516,7 +516,9 @@ public class InsnNode extends LineAttrNode {
 			}
 			ssaVar.setAssign(resArg);
 		}
-		for (InsnArg arg : getArguments()) {
+		int argsCount = getArgsCount();
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg arg = getArg(i);
 			if (arg instanceof RegisterArg) {
 				RegisterArg reg = (RegisterArg) arg;
 				SSAVar ssaVar = reg.getSVar();

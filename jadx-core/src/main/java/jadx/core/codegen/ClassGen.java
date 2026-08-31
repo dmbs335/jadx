@@ -852,7 +852,9 @@ public class ClassGen {
 		}
 		ClassNode classNode = root.resolveClass(useCls);
 		if (classNode != null) {
-			for (ClassNode inner : classNode.getInnerClasses()) {
+			List<ClassNode> innerClasses = classNode.getInnerClasses();
+			for (int i = 0, count = innerClasses.size(); i < count; i++) {
+				ClassNode inner = innerClasses.get(i);
 				if (inner.getShortName().equals(shortName)
 						&& !inner.getFullName().equals(searchCls.getAliasFullName())) {
 					return true;

@@ -22,6 +22,7 @@ public class ClspClass {
 	private final int accFlags;
 	private ArgType[] parents;
 	private Map<String, ClspMethod> methodsMap = Collections.emptyMap();
+	private volatile ClspMethod[] methodsArray;
 	private List<ArgType> typeParameters = Collections.emptyList();
 
 	private final ClspClassSource source;
@@ -69,6 +70,25 @@ public class ClspClass {
 		return methodsMap;
 	}
 
+	/**
+	 * Return a read-only array view used by hot classpath scans. The backing method map is immutable
+	 * after classpath loading, so materializing this view once avoids allocating a values iterator on
+	 * every overload lookup.
+	 */
+	public ClspMethod[] getMethodsArray() {
+		ClspMethod[] result = methodsArray;
+		if (result == null) {
+			synchronized (this) {
+				result = methodsArray;
+				if (result == null) {
+					result = methodsMap.values().toArray(new ClspMethod[methodsMap.size()]);
+					methodsArray = result;
+				}
+			}
+		}
+		return result;
+	}
+
 	public List<ClspMethod> getSortedMethodsList() {
 		List<ClspMethod> list = new ArrayList<>(methodsMap.size());
 		list.addAll(methodsMap.values());
@@ -78,6 +98,7 @@ public class ClspClass {
 
 	public void setMethodsMap(Map<String, ClspMethod> methodsMap) {
 		this.methodsMap = Objects.requireNonNull(methodsMap);
+		this.methodsArray = null;
 	}
 
 	public void setMethods(List<ClspMethod> methods) {

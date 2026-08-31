@@ -110,19 +110,25 @@ public class InsnRemover {
 
 	public static void unbindInsns(@Nullable MethodNode mth, List<InsnNode> insns) {
 		// remove all usage first so on result unbind we can remove unused ssa vars
-		insns.forEach(insn -> unbindAllArgs(mth, insn));
-		insns.forEach(insn -> {
+		int count = insns.size();
+		for (int i = 0; i < count; i++) {
+			unbindAllArgs(mth, insns.get(i));
+		}
+		for (int i = 0; i < count; i++) {
+			InsnNode insn = insns.get(i);
 			unbindResult(mth, insn);
 			insn.add(AFlag.DONT_GENERATE);
-		});
+		}
 	}
 
 	public static void unbindAllArgs(@Nullable MethodNode mth, InsnNode insn) {
-		for (InsnArg arg : insn.getArguments()) {
-			unbindArgUsage(mth, arg);
+		int argsCount = insn.getArgsCount();
+		for (int i = 0; i < argsCount; i++) {
+			unbindArgUsage(mth, insn.getArg(i));
 		}
 		if (insn.getType() == InsnType.PHI) {
-			for (InsnArg arg : insn.getArguments()) {
+			for (int i = 0; i < argsCount; i++) {
+				InsnArg arg = insn.getArg(i);
 				if (arg instanceof RegisterArg) {
 					((RegisterArg) arg).getSVar().updateUsedInPhiList();
 				}
@@ -201,7 +207,9 @@ public class InsnRemover {
 		if (toRemove == null || toRemove.isEmpty()) {
 			return;
 		}
-		for (InsnNode rem : toRemove) {
+		int removeCount = toRemove.size();
+		for (int removeIndex = 0; removeIndex < removeCount; removeIndex++) {
+			InsnNode rem = toRemove.get(removeIndex);
 			int insnsCount = insns.size();
 			boolean found = false;
 			for (int i = 0; i < insnsCount; i++) {

@@ -99,10 +99,14 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 	}
 
 	public static String makeShortId(String name, List<ArgType> argTypes, @Nullable ArgType retType) {
-		StringBuilder sb = new StringBuilder();
+		int argsCount = argTypes.size();
+		// Most signatures exceed StringBuilder's default 16-character buffer. Reserve a modest
+		// per-type estimate to avoid the first one or two backing-array copies without retaining
+		// excessively large temporary buffers for unusually long object names.
+		int capacity = name.length() + 3 + (argsCount << 3) + (retType == null ? 0 : 8);
+		StringBuilder sb = new StringBuilder(capacity);
 		sb.append(name);
 		sb.append('(');
-		int argsCount = argTypes.size();
 		for (int i = 0; i < argsCount; i++) {
 			TypeGen.appendSignature(sb, argTypes.get(i));
 		}
@@ -211,9 +215,11 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 
 	@Override
 	public int compareTo(MethodInfo other) {
-		int clsCmp = declClass.compareTo(other.declClass);
-		if (clsCmp != 0) {
-			return clsCmp;
+		if (declClass != other.declClass) {
+			int clsCmp = declClass.compareTo(other.declClass);
+			if (clsCmp != 0) {
+				return clsCmp;
+			}
 		}
 		return shortId.compareTo(other.shortId);
 	}

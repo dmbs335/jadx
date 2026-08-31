@@ -2,7 +2,6 @@ package jadx.api.impl;
 
 import java.util.Collections;
 import java.util.Map;
-import java.util.TreeMap;
 
 import org.jetbrains.annotations.ApiStatus;
 
@@ -12,15 +11,14 @@ import jadx.api.JadxArgs;
 import jadx.api.metadata.ICodeAnnotation;
 import jadx.api.metadata.ICodeNodeRef;
 import jadx.api.metadata.annotations.NodeDeclareRef;
-import jadx.api.metadata.impl.CodeMetadataStorage;
 import jadx.core.utils.StringUtils;
 
 public class AnnotatedCodeWriter extends SimpleCodeWriter implements ICodeWriter {
 
 	private int line = 1;
 	private int offset;
-	private Map<Integer, ICodeAnnotation> annotations = Collections.emptyMap();
-	private Map<Integer, Integer> lineMap = Collections.emptyMap();
+	private CodePositionMap<ICodeAnnotation> annotations;
+	private CodePositionMap<Integer> lineMap;
 
 	public AnnotatedCodeWriter(JadxArgs args) {
 		super(args);
@@ -66,13 +64,11 @@ public class AnnotatedCodeWriter extends SimpleCodeWriter implements ICodeWriter
 		AnnotatedCodeWriter code = (AnnotatedCodeWriter) cw;
 		line--;
 		int startPos = getLength();
-		for (Map.Entry<Integer, ICodeAnnotation> entry : code.annotations.entrySet()) {
-			int pos = entry.getKey();
-			int newPos = startPos + pos;
-			attachAnnotation(entry.getValue(), newPos);
+		if (code.annotations != null) {
+			initAnnotations().putAllShifted(code.annotations, startPos);
 		}
-		for (Map.Entry<Integer, Integer> entry : code.lineMap.entrySet()) {
-			attachSourceLine(line + entry.getKey(), entry.getValue());
+		if (code.lineMap != null) {
+			initLineMap().putAllShifted(code.lineMap, line);
 		}
 		line += code.line;
 		offset = code.offset;
@@ -129,10 +125,7 @@ public class AnnotatedCodeWriter extends SimpleCodeWriter implements ICodeWriter
 	}
 
 	private void attachAnnotation(ICodeAnnotation obj, int pos) {
-		if (annotations.isEmpty()) {
-			annotations = CodeMetadataStorage.newAnnotationMap();
-		}
-		annotations.put(pos, obj);
+		initAnnotations().putValue(pos, obj);
 	}
 
 	@Override
@@ -144,26 +137,39 @@ public class AnnotatedCodeWriter extends SimpleCodeWriter implements ICodeWriter
 	}
 
 	private void attachSourceLine(int decompiledLine, int sourceLine) {
-		if (lineMap.isEmpty()) {
-			lineMap = new TreeMap<>();
-		}
-		lineMap.put(decompiledLine, sourceLine);
+		initLineMap().putValue(decompiledLine, sourceLine);
 	}
 
 	@Override
 	public ICodeInfo finish() {
 		String code = buf.toString();
 		buf = null;
-		return new AnnotatedCodeInfo(code, lineMap, annotations);
+		return new AnnotatedCodeInfo(code, getRawLineMapping(), getRawAnnotations());
 	}
 
 	@Override
 	public Map<Integer, ICodeAnnotation> getRawAnnotations() {
-		return annotations;
+		return annotations == null ? Collections.emptyMap() : annotations;
 	}
 
 	@ApiStatus.Internal
 	public Map<Integer, Integer> getRawLineMapping() {
+		return lineMap == null ? Collections.emptyMap() : lineMap;
+	}
+
+	private CodePositionMap<ICodeAnnotation> initAnnotations() {
+		if (annotations == null) {
+			// Annotation buffers are temporary and can grow large. Wider growth reduces repeated
+			// backing-array copies before the final navigable metadata index is built.
+			annotations = new CodePositionMap<>(2);
+		}
+		return annotations;
+	}
+
+	private CodePositionMap<Integer> initLineMap() {
+		if (lineMap == null) {
+			lineMap = new CodePositionMap<>();
+		}
 		return lineMap;
 	}
 }

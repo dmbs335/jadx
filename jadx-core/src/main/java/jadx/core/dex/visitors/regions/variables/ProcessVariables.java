@@ -90,7 +90,9 @@ public class ProcessVariables extends AbstractVisitor {
 
 			@Override
 			public void processBlock(MethodNode mth, IBlock container) {
-				for (InsnNode insn : container.getInstructions()) {
+				List<InsnNode> insns = container.getInstructions();
+				for (int i = 0, count = insns.size(); i < count; i++) {
+					InsnNode insn = insns.get(i);
 					if (!insn.contains(AFlag.DONT_GENERATE) && !insn.contains(AFlag.REMOVE)) {
 						initOrphanCodeVars(insn);
 					}
@@ -116,8 +118,9 @@ public class ProcessVariables extends AbstractVisitor {
 						if (remove) {
 							insn.setResult(null);
 							mth.removeSVar(ssaVar);
-							for (RegisterArg arg : ssaVar.getUseList()) {
-								arg.resetSSAVar();
+							List<RegisterArg> useList = ssaVar.getUseList();
+							for (int j = 0, useCount = useList.size(); j < useCount; j++) {
+								useList.get(j).resetSSAVar();
 							}
 						}
 					}
@@ -130,8 +133,8 @@ public class ProcessVariables extends AbstractVisitor {
 				});
 				args.clear();
 				insn.getRegisterArgs(args);
-				for (RegisterArg arg : args) {
-					initOrphanSsaVar(knownVars, arg);
+				for (int i = 0, count = args.size(); i < count; i++) {
+					initOrphanSsaVar(knownVars, args.get(i));
 				}
 			}
 
@@ -212,25 +215,27 @@ public class ProcessVariables extends AbstractVisitor {
 
 	private void checkCodeVars(MethodNode mth, List<CodeVar> codeVars) {
 		int unknownTypesCount = 0;
-		for (CodeVar codeVar : codeVars) {
+		for (int i = 0, count = codeVars.size(); i < count; i++) {
+			CodeVar codeVar = codeVars.get(i);
 			ArgType codeVarType = codeVar.getType();
 			if (codeVarType == null) {
 				codeVar.setType(ArgType.UNKNOWN);
 				unknownTypesCount++;
 			} else {
-				codeVar.getSsaVars()
-						.forEach(ssaVar -> {
-							ArgType ssaType = ssaVar.getImmutableType();
-							if (ssaType != null && ssaType.isTypeKnown()) {
-								TypeCompare comparator = mth.root().getTypeUpdate().getTypeCompare();
-								TypeCompareEnum result = comparator.compareTypes(ssaType, codeVarType);
-								if (result == TypeCompareEnum.CONFLICT || result.isNarrow()) {
-									mth.addWarn("Incorrect type for immutable var: ssa=" + ssaType
-											+ ", code=" + codeVarType
-											+ ", for " + ssaVar.getDetailedVarInfo(mth));
-								}
-							}
-						});
+				List<SSAVar> ssaVars = codeVar.getSsaVars();
+				for (int j = 0, ssaCount = ssaVars.size(); j < ssaCount; j++) {
+					SSAVar ssaVar = ssaVars.get(j);
+					ArgType ssaType = ssaVar.getImmutableType();
+					if (ssaType != null && ssaType.isTypeKnown()) {
+						TypeCompare comparator = mth.root().getTypeUpdate().getTypeCompare();
+						TypeCompareEnum result = comparator.compareTypes(ssaType, codeVarType);
+						if (result == TypeCompareEnum.CONFLICT || result.isNarrow()) {
+							mth.addWarn("Incorrect type for immutable var: ssa=" + ssaType
+									+ ", code=" + codeVarType
+									+ ", for " + ssaVar.getDetailedVarInfo(mth));
+						}
+					}
+				}
 			}
 		}
 		if (unknownTypesCount != 0) {

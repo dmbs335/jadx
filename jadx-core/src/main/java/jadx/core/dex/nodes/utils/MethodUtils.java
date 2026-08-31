@@ -144,7 +144,9 @@ public class MethodUtils {
 				// class info not available
 				return false;
 			}
-			for (ClspMethod clspMth : clsDetails.getMethodsMap().values()) {
+			ClspMethod[] methods = clsDetails.getMethodsArray();
+			for (int methodIndex = 0; methodIndex < methods.length; methodIndex++) {
+				ClspMethod clspMth = methods[methodIndex];
 				if (mthInfo.isOverloadedBy(clspMth.getMethodInfo())) {
 					if (collectedMths == null) {
 						return true;

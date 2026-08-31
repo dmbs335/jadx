@@ -378,9 +378,11 @@ public class BlockSplitter extends AbstractVisitor {
 	}
 
 	private static void removeJumpAttr(MethodNode mth) {
-		for (BlockNode block : mth.getBasicBlocks()) {
-			for (InsnNode insn : block.getInstructions()) {
-				insn.remove(AType.JUMP);
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int i = 0, blocksCount = blocks.size(); i < blocksCount; i++) {
+			List<InsnNode> insns = blocks.get(i).getInstructions();
+			for (int j = 0, insnsCount = insns.size(); j < insnsCount; j++) {
+				insns.get(j).remove(AType.JUMP);
 			}
 		}
 	}

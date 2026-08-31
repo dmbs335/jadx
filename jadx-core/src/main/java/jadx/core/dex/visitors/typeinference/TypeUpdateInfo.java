@@ -3,15 +3,14 @@ package jadx.core.dex.visitors.typeinference;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.IdentityHashMap;
 import java.util.List;
-import java.util.Map;
 
 import org.jetbrains.annotations.Nullable;
 
 import jadx.api.JadxArgs;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
+import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.utils.ListUtils;
 import jadx.core.utils.Utils;
@@ -26,12 +25,13 @@ public class TypeUpdateInfo {
 	private InsnArg @Nullable [] updateArgs;
 	private ArgType @Nullable [] updateTypes;
 	private int updateCount;
-	private @Nullable Map<InsnArg, ArgType> updateMap;
-	private @Nullable Map<InsnArg, ArgType> cachedUpdateMap;
+	private @Nullable IdentityIntMap<InsnArg> updateMap;
+	private @Nullable IdentityIntMap<InsnArg> cachedUpdateMap;
 	private @Nullable List<TypeUpdateRequest> queue;
 	private @Nullable List<TypeUpdateRequest> callbackQueue;
 	private @Nullable TypeUpdateRequest requestPool;
 	private @Nullable ArgsListUpdateCallback<?> argsListCallbackPool;
+	private @Nullable MoveUpdateCallback moveCallbackPool;
 	private int updatesLimitCount;
 	private int updateSeq = 0;
 	private @Nullable TypeUpdateInfo nextFree;
@@ -56,7 +56,7 @@ public class TypeUpdateInfo {
 		}
 		updateCount = 0;
 		updateSeq = 0;
-		Map<InsnArg, ArgType> map = updateMap;
+		IdentityIntMap<InsnArg> map = updateMap;
 		if (map != null) {
 			map.clear();
 			cachedUpdateMap = map;
@@ -146,6 +146,22 @@ public class TypeUpdateInfo {
 		argsListCallbackPool = callback;
 	}
 
+	MoveUpdateCallback acquireMoveUpdateCallback(TypeUpdate typeUpdate, InsnNode insn,
+			InsnArg changeArg, ArgType candidateType, boolean correctType) {
+		MoveUpdateCallback callback = moveCallbackPool;
+		if (callback == null) {
+			return new MoveUpdateCallback(typeUpdate, this, insn, changeArg, candidateType, correctType);
+		}
+		moveCallbackPool = callback.getNextFree();
+		callback.init(typeUpdate, this, insn, changeArg, candidateType, correctType);
+		return callback;
+	}
+
+	void releaseMoveUpdateCallback(MoveUpdateCallback callback) {
+		callback.recycle(moveCallbackPool);
+		moveCallbackPool = callback;
+	}
+
 	public @Nullable TypeUpdateRequest pollNextRequest() {
 		List<TypeUpdateRequest> requests = queue;
 		return requests == null ? null : ListUtils.removeLast(requests);
@@ -157,32 +173,25 @@ public class TypeUpdateInfo {
 	}
 
 	public void requestUpdate(InsnArg arg, ArgType changeType) {
-		Map<InsnArg, ArgType> map = updateMap;
-		if (map == null) {
-			int updateIndex = getUpdateIndex(arg);
-			if (updateIndex != -1) {
-				ArgType[] types = updateTypes;
-				throwUpdateOverride(arg, changeType, types[updateIndex]);
-			}
-			if (updateCount == LIST_UPDATES_LIMIT) {
-				map = promoteToMap();
-			}
-		} else {
-			ArgType prevType = map.put(arg, changeType);
-			if (prevType != null) {
-				throwUpdateOverride(arg, changeType, prevType);
-			}
+		int updateIndex = getUpdateIndex(arg);
+		if (updateIndex != -1) {
+			ArgType[] types = updateTypes;
+			throwUpdateOverride(arg, changeType, types[updateIndex]);
+		}
+		IdentityIntMap<InsnArg> map = updateMap;
+		if (map == null && updateCount == LIST_UPDATES_LIMIT) {
+			map = promoteToMap();
 		}
 		ensureUpdateCapacity();
 		InsnArg[] args = updateArgs;
 		ArgType[] types = updateTypes;
 		args[updateCount] = arg;
 		types[updateCount] = changeType;
+		if (map != null) {
+			map.put(arg, updateCount);
+		}
 		updateSeq++;
 		updateCount++;
-		if (map != null && updateCount == LIST_UPDATES_LIMIT + 1) {
-			map.put(arg, changeType);
-		}
 		checkUpdatesLimit();
 	}
 
@@ -192,17 +201,16 @@ public class TypeUpdateInfo {
 				+ ", insn: " + arg.getParentInsn());
 	}
 
-	private Map<InsnArg, ArgType> promoteToMap() {
-		Map<InsnArg, ArgType> map = cachedUpdateMap;
+	private IdentityIntMap<InsnArg> promoteToMap() {
+		IdentityIntMap<InsnArg> map = cachedUpdateMap;
 		if (map == null) {
-			map = new IdentityHashMap<>();
+			map = new IdentityIntMap<>();
 		} else {
 			cachedUpdateMap = null;
 		}
 		InsnArg[] args = updateArgs;
-		ArgType[] types = updateTypes;
 		for (int i = 0; i < updateCount; i++) {
-			map.put(args[i], types[i]);
+			map.put(args[i], i);
 		}
 		updateMap = map;
 		return map;
@@ -240,7 +248,7 @@ public class TypeUpdateInfo {
 		}
 		InsnArg[] args = updateArgs;
 		ArgType[] types = updateTypes;
-		Map<InsnArg, ArgType> map = updateMap;
+		IdentityIntMap<InsnArg> map = updateMap;
 		for (int i = updateCount - 1; i >= updateIndex; i--) {
 			if (map != null) {
 				map.remove(args[i]);
@@ -260,8 +268,8 @@ public class TypeUpdateInfo {
 	}
 
 	public boolean isProcessed(InsnArg arg) {
-		Map<InsnArg, ArgType> map = updateMap;
-		return map != null ? map.containsKey(arg) : getUpdateIndex(arg) != -1;
+		IdentityIntMap<InsnArg> map = updateMap;
+		return map != null ? map.get(arg) != -1 : getUpdateIndex(arg) != -1;
 	}
 
 	public boolean hasUpdateWithType(InsnArg arg, ArgType type) {
@@ -296,15 +304,20 @@ public class TypeUpdateInfo {
 	}
 
 	private @Nullable ArgType getUpdateType(InsnArg arg) {
-		Map<InsnArg, ArgType> map = updateMap;
+		IdentityIntMap<InsnArg> map = updateMap;
 		if (map != null) {
-			return map.get(arg);
+			int updateIndex = map.get(arg);
+			return updateIndex == -1 ? null : updateTypes[updateIndex];
 		}
 		int updateIndex = getUpdateIndex(arg);
 		return updateIndex == -1 ? null : updateTypes[updateIndex];
 	}
 
 	private int getUpdateIndex(InsnArg arg) {
+		IdentityIntMap<InsnArg> map = updateMap;
+		if (map != null) {
+			return map.get(arg);
+		}
 		InsnArg[] args = updateArgs;
 		if (args != null) {
 			for (int i = updateCount - 1; i >= 0; i--) {

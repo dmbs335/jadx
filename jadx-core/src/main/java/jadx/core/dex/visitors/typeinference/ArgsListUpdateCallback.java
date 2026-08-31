@@ -1,7 +1,6 @@
 package jadx.core.dex.visitors.typeinference;
 
 import java.util.List;
-import java.util.function.Predicate;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -24,7 +23,7 @@ public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCal
 	private ArgType candidateType;
 	private boolean direct;
 
-	private @Nullable Predicate<T> argsFilter;
+	private @Nullable InsnArg skipArg;
 	private @Nullable ITypeUpdateCallback finalResultCallback;
 	private @Nullable SSAVar rollbackSsaVarOnReject;
 	private boolean ignoreReject = false;
@@ -48,7 +47,7 @@ public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCal
 		this.candidateType = candidateType;
 		this.direct = direct;
 		this.argsIndex = 0;
-		this.argsFilter = null;
+		this.skipArg = null;
 		this.finalResultCallback = null;
 		this.rollbackSsaVarOnReject = null;
 		this.ignoreReject = false;
@@ -123,8 +122,8 @@ public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCal
 		this.rollbackSsaVarOnReject = rollbackSsaVarOnReject;
 	}
 
-	public void setArgsFilter(@Nullable Predicate<T> argsFilter) {
-		this.argsFilter = argsFilter;
+	public void setSkipArg(@Nullable InsnArg skipArg) {
+		this.skipArg = skipArg;
 	}
 
 	public void setIgnoreReject(boolean ignoreReject) {
@@ -157,7 +156,7 @@ public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCal
 		updateInfo = null;
 		args = null;
 		candidateType = null;
-		argsFilter = null;
+		skipArg = null;
 		finalResultCallback = null;
 		rollbackSsaVarOnReject = null;
 		this.nextFree = nextFree;
@@ -169,11 +168,11 @@ public class ArgsListUpdateCallback<T extends InsnArg> implements ITypeUpdateCal
 	}
 
 	private @Nullable T getNextArg() {
-		Predicate<T> filter = argsFilter;
+		InsnArg skip = skipArg;
 		int argsCount = args.size();
 		while (argsIndex < argsCount) {
 			T next = args.get(argsIndex++);
-			if (filter == null || filter.test(next)) {
+			if (next != skip) {
 				return next;
 			}
 		}
