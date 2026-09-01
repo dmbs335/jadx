@@ -220,8 +220,28 @@ public class RootNode extends AttrNode {
 		} else {
 			classes.sort(classNameComparator);
 		}
+		int nextMethodOrder = 0;
 		for (int i = 0; i < classes.size(); i++) {
-			classes.get(i).setRawNameOrder(i);
+			ClassNode cls = classes.get(i);
+			cls.setRawNameOrder(i);
+			List<MethodNode> methods = cls.getMethods();
+			int methodsCount = methods.size();
+			if (methodsCount == 1) {
+				methods.get(0).setRawOrder(nextMethodOrder++);
+			} else if (methodsCount > 1) {
+				MethodNode[] sortedMethods = methods.toArray(new MethodNode[0]);
+				Arrays.sort(sortedMethods, Comparator.comparing(mth -> mth.getMethodInfo().getShortId()));
+				String previousShortId = null;
+				for (MethodNode method : sortedMethods) {
+					String shortId = method.getMethodInfo().getShortId();
+					if (previousShortId != null && !previousShortId.equals(shortId)) {
+						nextMethodOrder++;
+					}
+					method.setRawOrder(nextMethodOrder);
+					previousShortId = shortId;
+				}
+				nextMethodOrder++;
+			}
 		}
 
 		if (args.isMoveInnerClasses()) {

@@ -60,6 +60,7 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 
 	private final ICodeReader codeReader;
 	private final int insnsCount;
+	private int rawOrder = -1;
 
 	private boolean noCode;
 	private int regsCount;
@@ -941,6 +942,9 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 
 	@Override
 	public int compareTo(@NotNull MethodNode o) {
+		if (rawOrder >= 0 && o.rawOrder >= 0) {
+			return Integer.compare(rawOrder, o.rawOrder);
+		}
 		if (parentClass != o.parentClass) {
 			int clsCmp = parentClass.compareTo(o.parentClass);
 			if (clsCmp != 0) {
@@ -948,6 +952,10 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 			}
 		}
 		return mthInfo.getShortId().compareTo(o.mthInfo.getShortId());
+	}
+
+	void setRawOrder(int rawOrder) {
+		this.rawOrder = rawOrder;
 	}
 
 	@Override
