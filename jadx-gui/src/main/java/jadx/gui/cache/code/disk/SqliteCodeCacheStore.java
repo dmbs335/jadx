@@ -12,6 +12,9 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.zip.Deflater;
 import java.util.zip.DeflaterOutputStream;
 import java.util.zip.InflaterInputStream;
@@ -22,10 +25,11 @@ final class SqliteCodeCacheStore implements AutoCloseable {
 	private static final int MAX_BUNDLE_SIZE = 256 * 1024 * 1024;
 	private final Path dbFile;
 	private Connection connection;
-	private PreparedStatement readStatement;
 	private PreparedStatement containsStatement;
 	private PreparedStatement writeStatement;
 	private PreparedStatement deleteStatement;
+	private final Map<Thread, ReadSession> readSessions = new ConcurrentHashMap<>();
+	private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock();
 
 	SqliteCodeCacheStore(Path dbFile) {
 		this.dbFile = dbFile;
@@ -47,7 +51,6 @@ final class SqliteCodeCacheStore implements AutoCloseable {
 						+ "raw_size INTEGER NOT NULL, "
 						+ "bundle BLOB NOT NULL) WITHOUT ROWID");
 			}
-			readStatement = connection.prepareStatement("SELECT raw_size, bundle FROM code_entries WHERE cls_id = ?");
 			containsStatement = connection.prepareStatement("SELECT 1 FROM code_entries WHERE cls_id = ?");
 			writeStatement = connection.prepareStatement(
 					"INSERT INTO code_entries(cls_id, raw_size, bundle) VALUES(?, ?, ?) "
@@ -80,12 +83,41 @@ final class SqliteCodeCacheStore implements AutoCloseable {
 		return ids;
 	}
 
-	synchronized byte[] read(int clsId) throws SQLException {
-		ensureOpen();
-		readStatement.setInt(1, clsId);
-		try (ResultSet result = readStatement.executeQuery()) {
-			return result.next() ? decompress(result.getBytes(2), result.getInt(1)) : null;
+	byte[] read(int clsId) throws SQLException {
+		lifecycleLock.readLock().lock();
+		try {
+			ReadSession session = getReadSession();
+			session.statement.setInt(1, clsId);
+			byte[] compressed;
+			int rawSize;
+			try (ResultSet result = session.statement.executeQuery()) {
+				if (!result.next()) {
+					return null;
+				}
+				rawSize = result.getInt(1);
+				compressed = result.getBytes(2);
+			}
+			return decompress(compressed, rawSize);
+		} finally {
+			lifecycleLock.readLock().unlock();
 		}
+	}
+
+	private ReadSession getReadSession() throws SQLException {
+		Thread thread = Thread.currentThread();
+		ReadSession session = readSessions.get(thread);
+		if (session != null && !session.connection.isClosed()) {
+			return session;
+		}
+		synchronized (this) {
+			ensureOpen();
+			session = readSessions.get(thread);
+			if (session == null || session.connection.isClosed()) {
+				session = new ReadSession(dbFile);
+				readSessions.put(thread, session);
+			}
+		}
+		return session;
 	}
 
 	synchronized boolean contains(int clsId) throws SQLException {
@@ -96,13 +128,26 @@ final class SqliteCodeCacheStore implements AutoCloseable {
 		}
 	}
 
-	synchronized void write(int clsId, CodeMetadataAdapter.CacheBundle bundle) throws SQLException {
+	static PreparedBundle prepareWrite(CodeMetadataAdapter.CacheBundle bundle) throws SQLException {
+		return new PreparedBundle(bundle.getSize(), compress(bundle.getData(), bundle.getSize()));
+	}
+
+	synchronized void write(int clsId, PreparedBundle bundle) throws SQLException {
 		ensureOpen();
-		byte[] compressed = compress(bundle.getData(), bundle.getSize());
 		writeStatement.setInt(1, clsId);
-		writeStatement.setInt(2, bundle.getSize());
-		writeStatement.setBytes(3, compressed);
+		writeStatement.setInt(2, bundle.rawSize);
+		writeStatement.setBytes(3, bundle.compressed);
 		writeStatement.executeUpdate();
+	}
+
+	static final class PreparedBundle {
+		private final int rawSize;
+		private final byte[] compressed;
+
+		private PreparedBundle(int rawSize, byte[] compressed) {
+			this.rawSize = rawSize;
+			this.compressed = compressed;
+		}
 	}
 
 	private static byte[] compress(byte[] bundle, int bundleSize) throws SQLException {
@@ -147,22 +192,78 @@ final class SqliteCodeCacheStore implements AutoCloseable {
 	}
 
 	@Override
-	public synchronized void close() throws IOException {
-		if (connection == null) {
-			return;
-		}
+	public void close() throws IOException {
+		lifecycleLock.writeLock().lock();
 		try {
-			// Closing the connection also closes every prepared statement. Doing this as one JDBC
-			// operation avoids leaking the connection if an individual statement close fails.
-			connection.close();
-		} catch (SQLException e) {
-			throw new IOException("Failed to close SQLite code cache", e);
+			synchronized (this) {
+				if (connection == null) {
+					return;
+				}
+				try {
+					IOException readCloseError = null;
+					for (ReadSession session : readSessions.values()) {
+						try {
+							session.close();
+						} catch (IOException e) {
+							if (readCloseError == null) {
+								readCloseError = e;
+							} else {
+								readCloseError.addSuppressed(e);
+							}
+						}
+					}
+					readSessions.clear();
+					// Closing the connection also closes every prepared statement. Doing this as one JDBC
+					// operation avoids leaking the connection if an individual statement close fails.
+					connection.close();
+					if (readCloseError != null) {
+						throw readCloseError;
+					}
+				} catch (SQLException e) {
+					throw new IOException("Failed to close SQLite code cache", e);
+				} finally {
+					connection = null;
+					containsStatement = null;
+					writeStatement = null;
+					deleteStatement = null;
+				}
+			}
 		} finally {
-			connection = null;
-			readStatement = null;
-			containsStatement = null;
-			writeStatement = null;
-			deleteStatement = null;
+			lifecycleLock.writeLock().unlock();
+		}
+	}
+
+	private static final class ReadSession implements AutoCloseable {
+		private final Connection connection;
+		private final PreparedStatement statement;
+
+		private ReadSession(Path dbFile) throws SQLException {
+			Connection openedConnection = DriverManager.getConnection("jdbc:sqlite:" + dbFile.toAbsolutePath());
+			try {
+				try (Statement pragma = openedConnection.createStatement()) {
+					pragma.execute("PRAGMA query_only=ON");
+					pragma.execute("PRAGMA busy_timeout=10000");
+				}
+				statement = openedConnection.prepareStatement(
+						"SELECT raw_size, bundle FROM code_entries WHERE cls_id = ?");
+				connection = openedConnection;
+			} catch (SQLException e) {
+				try {
+					openedConnection.close();
+				} catch (SQLException closeError) {
+					e.addSuppressed(closeError);
+				}
+				throw e;
+			}
+		}
+
+		@Override
+		public void close() throws IOException {
+			try {
+				connection.close();
+			} catch (SQLException e) {
+				throw new IOException("Failed to close SQLite code cache read session", e);
+			}
 		}
 	}
 }

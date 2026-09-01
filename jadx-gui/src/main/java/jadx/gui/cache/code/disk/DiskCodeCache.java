@@ -173,12 +173,13 @@ public class DiskCodeCache implements ICodeCache {
 		try {
 			int clsId = clsData.getClsId();
 			CodeMetadataAdapter.CacheBundle bundle = codeMetadataAdapter.writeBundle(codeInfo);
+			SqliteCodeCacheStore.PreparedBundle preparedBundle = SqliteCodeCacheStore.prepareWrite(bundle);
 			boolean published = withProcessLock(() -> {
 				synchronized (clsData) {
 					if (!clsData.isCurrentWrite(write.generation) || !checkCodeVersion()) {
 						return false;
 					}
-					store.write(clsId, bundle);
+					store.write(clsId, preparedBundle);
 					clsData.finishWrite(write.generation);
 					return true;
 				}
