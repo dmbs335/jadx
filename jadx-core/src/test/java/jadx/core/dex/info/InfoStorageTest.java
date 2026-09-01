@@ -54,4 +54,23 @@ class InfoStorageTest {
 
 		assertThat(method.getRawFullId()).isEqualTo("sample.Outer$Inner.call()V");
 	}
+
+	@Test
+	void testMethodsByCompositeInputId() {
+		RootNode root = new RootNode(new JadxArgs());
+		ClassInfo declClass = ClassInfo.fromType(root, ArgType.object("sample.Test"));
+		MethodInfo first = MethodInfo.fromDetails(root, declClass, "first", List.of(), ArgType.VOID);
+		MethodInfo second = MethodInfo.fromDetails(root, declClass, "second", List.of(), ArgType.VOID);
+		InfoStorage storage = root.getInfoStorage();
+
+		int firstId = 0x0001_0020;
+		int secondId = 0xFFFF_FFFE;
+		storage.putByUniqId(firstId, first);
+		storage.putByUniqId(secondId, second);
+
+		assertThat(storage.getByUniqId(firstId)).isSameAs(first);
+		assertThat(storage.getByUniqId(secondId)).isSameAs(second);
+		assertThat(storage.getByUniqId(0x0001_001F)).isNull();
+		assertThat(storage.getByUniqId(0x7FFF_FFFE)).isNull();
+	}
 }

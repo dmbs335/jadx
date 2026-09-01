@@ -1,5 +1,6 @@
 package jadx.core.dex.info;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -17,13 +18,14 @@ public class InfoStorage {
 	// use only one MethodInfo instance
 	private Map<MethodInfo, MethodInfo> uniqueMethods = new HashMap<>();
 	// can contain same method with different ids (from different files)
-	private Map<Integer, MethodInfo> methods = new HashMap<>();
+	private MethodInfo[][] methodsBySource = new MethodInfo[0][];
+	private final Object methodsBySourceLock = new Object();
 
 	private final Map<String, PackageInfo> packages = new HashMap<>();
 
 	public void prepare(int classesCount, int methodsCount, int fieldsCount, int typesCount) {
 		if (!classes.isEmpty() || !types.isEmpty() || !classesByInputName.isEmpty()
-				|| !fields.isEmpty() || !uniqueMethods.isEmpty() || !methods.isEmpty()) {
+				|| !fields.isEmpty() || !uniqueMethods.isEmpty() || methodsBySource.length != 0) {
 			return;
 		}
 		classes = newMap(typesCount);
@@ -31,7 +33,6 @@ public class InfoStorage {
 		classesByInputName = newMap(classesCount);
 		fields = newMap(fieldsCount);
 		uniqueMethods = newMap(methodsCount);
-		methods = newMap(methodsCount);
 	}
 
 	private static <K, V> Map<K, V> newMap(int expectedSize) {
@@ -69,15 +70,42 @@ public class InfoStorage {
 	}
 
 	public MethodInfo getByUniqId(int id) {
-		synchronized (methods) {
-			return methods.get(id);
+		int source = id >>> 16;
+		int index = id & 0xFFFF;
+		synchronized (methodsBySourceLock) {
+			if (source >= methodsBySource.length) {
+				return null;
+			}
+			MethodInfo[] methods = methodsBySource[source];
+			return methods == null || index >= methods.length ? null : methods[index];
 		}
 	}
 
 	public void putByUniqId(int id, MethodInfo mth) {
-		synchronized (methods) {
-			methods.put(id, mth);
+		int source = id >>> 16;
+		int index = id & 0xFFFF;
+		synchronized (methodsBySourceLock) {
+			if (source >= methodsBySource.length) {
+				methodsBySource = Arrays.copyOf(methodsBySource, growSize(methodsBySource.length, source + 1, 0x10000));
+			}
+			MethodInfo[] methods = methodsBySource[source];
+			if (methods == null) {
+				methods = new MethodInfo[growSize(0, index + 1, 0x10000)];
+				methodsBySource[source] = methods;
+			} else if (index >= methods.length) {
+				methods = Arrays.copyOf(methods, growSize(methods.length, index + 1, 0x10000));
+				methodsBySource[source] = methods;
+			}
+			methods[index] = mth;
 		}
+	}
+
+	private static int growSize(int current, int required, int limit) {
+		int grown = Math.max(16, current);
+		while (grown < required) {
+			grown = Math.min(grown << 1, limit);
+		}
+		return grown;
 	}
 
 	public MethodInfo putMethod(MethodInfo newMth) {
