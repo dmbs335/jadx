@@ -216,7 +216,7 @@ public class ClspGraph {
 		for (Map.Entry<String, ClspClass> entry : nameMap.entrySet()) {
 			ClspClass cls = entry.getValue();
 			tmpSet.clear();
-			addSuperTypes(cls, tmpSet);
+			addSuperTypes(cls, tmpSet, map);
 			Set<String> result;
 			int size = tmpSet.size();
 			switch (size) {
@@ -245,16 +245,22 @@ public class ClspGraph {
 		superTypesCache = map;
 	}
 
-	private void addSuperTypes(ClspClass cls, Set<String> result) {
+	private void addSuperTypes(ClspClass cls, Set<String> result, Map<String, Set<String>> completed) {
 		for (ArgType parentType : cls.getParents()) {
 			if (parentType == null) {
 				continue;
 			}
 			ClspClass parentCls = getClspClass(parentType);
 			if (parentCls != null) {
-				boolean isNew = result.add(parentCls.getName());
+				String parentName = parentCls.getName();
+				boolean isNew = result.add(parentName);
 				if (isNew) {
-					addSuperTypes(parentCls, result);
+					Set<String> cached = completed.get(parentName);
+					if (cached == null) {
+						addSuperTypes(parentCls, result, completed);
+					} else {
+						result.addAll(cached);
+					}
 				}
 			} else {
 				// parent type is unknown
