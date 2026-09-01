@@ -85,6 +85,25 @@ public class UseSet<K, V> {
 		}
 	}
 
+	public void visitSortedParallel(BiConsumer<K, List<V>> consumer) {
+		useMap.entrySet().parallelStream().forEach(entry -> consumer.accept(entry.getKey(), asSortedList(entry)));
+	}
+
+	private List<V> asSortedList(Map.Entry<K, Object> entry) {
+		Object stored = entry.getValue();
+		if (stored instanceof SortedValues) {
+			return asSortedValues(stored).values;
+		}
+		if (!(stored instanceof MultiValueSet)) {
+			return Collections.singletonList(unmaskNull(stored));
+		}
+		List<V> values = new ArrayList<>(asMultiValueSet(stored));
+		values.sort(UseSet::compareValues);
+		values = Collections.unmodifiableList(values);
+		entry.setValue(new SortedValues<>(values));
+		return values;
+	}
+
 	private List<V> asSortedList(K key, Object stored) {
 		if (stored instanceof SortedValues) {
 			return asSortedValues(stored).values;

@@ -1,6 +1,8 @@
 package jadx.core.dex.visitors.usage;
 
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.junit.jupiter.api.Test;
 
@@ -60,5 +62,26 @@ class UseSetTest {
 
 		useSet.add("key", 0);
 		assertThat(useSet.getSortedList("key")).containsExactly(0, 1, 2, 3);
+	}
+
+	@Test
+	void parallelVisitSortsAndCachesEveryEntry() {
+		UseSet<Integer, Integer> useSet = new UseSet<>();
+		for (int key = 0; key < 1_000; key++) {
+			int value = key + 10_000;
+			useSet.add(key, value + 2);
+			useSet.add(key, value);
+			useSet.add(key, value + 1);
+		}
+
+		Map<Integer, java.util.List<Integer>> visited = new ConcurrentHashMap<>();
+		useSet.visitSortedParallel(visited::put);
+
+		assertThat(visited).hasSize(1_000);
+		visited.forEach((key, values) -> {
+			int value = key + 10_000;
+			assertThat(values).containsExactly(value, value + 1, value + 2);
+			assertThat(useSet.getSortedList(key)).isSameAs(values);
+		});
 	}
 }
