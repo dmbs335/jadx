@@ -1,6 +1,7 @@
 package jadx.core.dex.nodes;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -71,6 +72,7 @@ import jadx.core.xmlgen.entry.ValuesParser;
 
 public class RootNode extends AttrNode {
 	private static final Logger LOG = LoggerFactory.getLogger(RootNode.class);
+	private static final int PARALLEL_CLASS_SORT_THRESHOLD = 1 << 14;
 
 	private final JadxArgs args;
 	private final ErrorsCounter errorsCounter = new ErrorsCounter();
@@ -200,8 +202,17 @@ public class RootNode extends AttrNode {
 		int insnsCount = classes.stream().flatMap(c -> c.getMethods().stream()).mapToInt(MethodNode::getInsnsCount).sum();
 		LOG.info("Loaded classes: {}, methods: {}, instructions: {}", classes.size(), mthCount, insnsCount);
 
-		// sort classes by name, expect top classes before inner
-		classes.sort(Comparator.comparing(ClassNode::getRawName));
+		// Sort classes by name, expect top classes before inner.
+		Comparator<ClassNode> classNameComparator = Comparator.comparing(ClassNode::getRawName);
+		if (args.getThreadsCount() > 1 && classes.size() >= PARALLEL_CLASS_SORT_THRESHOLD) {
+			ClassNode[] sortedClasses = classes.toArray(new ClassNode[0]);
+			Arrays.parallelSort(sortedClasses, classNameComparator);
+			for (int i = 0; i < sortedClasses.length; i++) {
+				classes.set(i, sortedClasses[i]);
+			}
+		} else {
+			classes.sort(classNameComparator);
+		}
 
 		if (args.isMoveInnerClasses()) {
 			// detect and move inner classes
