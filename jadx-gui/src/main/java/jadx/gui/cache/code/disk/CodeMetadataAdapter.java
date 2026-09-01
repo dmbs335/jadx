@@ -35,17 +35,35 @@ public class CodeMetadataAdapter {
 		codeAnnotationAdapter = new CodeAnnotationAdapter(root);
 	}
 
-	public byte[] writeBundle(ICodeInfo codeInfo) {
+	public CacheBundle writeBundle(ICodeInfo codeInfo) {
 		byte[] code = codeInfo.getCodeStr().getBytes(StandardCharsets.UTF_8);
 		ICodeMetadata metadata = codeInfo.getCodeMetadata();
 		int initialCapacity = estimateBundleSize(code.length, metadata);
-		try (ByteArrayOutputStream bytes = new FastByteArrayOutputStream(initialCapacity);
+		try (FastByteArrayOutputStream bytes = new FastByteArrayOutputStream(initialCapacity);
 				DataOutputStream out = new DataOutputStream(bytes)) {
 			writeBundle(out, code, metadata);
 			out.flush();
-			return bytes.toByteArray();
+			return bytes.toCacheBundle();
 		} catch (Exception e) {
 			throw new RuntimeException("Failed to write code cache bundle", e);
+		}
+	}
+
+	static final class CacheBundle {
+		private final byte[] data;
+		private final int size;
+
+		private CacheBundle(byte[] data, int size) {
+			this.data = data;
+			this.size = size;
+		}
+
+		byte[] getData() {
+			return data;
+		}
+
+		int getSize() {
+			return size;
 		}
 	}
 
@@ -186,7 +204,12 @@ public class CodeMetadataAdapter {
 
 		@Override
 		public void write(int value) {
-			ensureCapacity(count + 1L);
+			if (count == buf.length) {
+				if (count == MAX_ARRAY_SIZE) {
+					throw new OutOfMemoryError("Required array size too large");
+				}
+				grow(count + 1);
+			}
 			buf[count++] = (byte) value;
 		}
 
@@ -196,22 +219,26 @@ public class CodeMetadataAdapter {
 			if (length == 0) {
 				return;
 			}
-			ensureCapacity((long) count + length);
+			long minCapacity = (long) count + length;
+			if (minCapacity > buf.length) {
+				if (minCapacity > MAX_ARRAY_SIZE) {
+					throw new OutOfMemoryError("Required array size too large");
+				}
+				grow((int) minCapacity);
+			}
 			System.arraycopy(bytes, offset, buf, count, length);
 			count += length;
 		}
 
-		private void ensureCapacity(long minCapacity) {
-			if (minCapacity <= buf.length) {
-				return;
-			}
-			if (minCapacity > MAX_ARRAY_SIZE) {
-				throw new OutOfMemoryError("Required array size too large");
-			}
+		private void grow(int minCapacity) {
 			int oldCapacity = buf.length;
 			int grownCapacity = oldCapacity <= MAX_ARRAY_SIZE / 2 ? oldCapacity * 2 : MAX_ARRAY_SIZE;
-			int newCapacity = Math.max((int) minCapacity, grownCapacity);
+			int newCapacity = Math.max(minCapacity, grownCapacity);
 			buf = Arrays.copyOf(buf, newCapacity);
+		}
+
+		private CacheBundle toCacheBundle() {
+			return new CacheBundle(buf, count);
 		}
 	}
 }

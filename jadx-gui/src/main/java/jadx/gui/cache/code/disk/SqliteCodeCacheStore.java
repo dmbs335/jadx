@@ -96,20 +96,20 @@ final class SqliteCodeCacheStore implements AutoCloseable {
 		}
 	}
 
-	synchronized void write(int clsId, byte[] bundle) throws SQLException {
+	synchronized void write(int clsId, CodeMetadataAdapter.CacheBundle bundle) throws SQLException {
 		ensureOpen();
-		byte[] compressed = compress(bundle);
+		byte[] compressed = compress(bundle.getData(), bundle.getSize());
 		writeStatement.setInt(1, clsId);
-		writeStatement.setInt(2, bundle.length);
+		writeStatement.setInt(2, bundle.getSize());
 		writeStatement.setBytes(3, compressed);
 		writeStatement.executeUpdate();
 	}
 
-	private static byte[] compress(byte[] bundle) throws SQLException {
-		try (ByteArrayOutputStream bytes = new ByteArrayOutputStream(Math.max(64, bundle.length / 2));
+	private static byte[] compress(byte[] bundle, int bundleSize) throws SQLException {
+		try (ByteArrayOutputStream bytes = new ByteArrayOutputStream(Math.max(64, bundleSize / 2));
 				DeflaterOutputStream out = new DeflaterOutputStream(
 						bytes, new Deflater(Deflater.BEST_SPEED), 8192)) {
-			out.write(bundle);
+			out.write(bundle, 0, bundleSize);
 			out.finish();
 			return bytes.toByteArray();
 		} catch (IOException e) {

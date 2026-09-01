@@ -172,7 +172,7 @@ public class DiskCodeCache implements ICodeCache {
 	private void writeEntry(String clsFullName, CacheData clsData, WriteRequest write, ICodeInfo codeInfo) {
 		try {
 			int clsId = clsData.getClsId();
-			byte[] bundle = codeMetadataAdapter.writeBundle(codeInfo);
+			CodeMetadataAdapter.CacheBundle bundle = codeMetadataAdapter.writeBundle(codeInfo);
 			boolean published = withProcessLock(() -> {
 				synchronized (clsData) {
 					if (!clsData.isCurrentWrite(write.generation) || !checkCodeVersion()) {
