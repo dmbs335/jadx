@@ -6,12 +6,12 @@ import java.util.function.BiFunction;
 
 import org.jetbrains.annotations.Nullable;
 
+import jadx.api.impl.CodePositionMap;
 import jadx.api.metadata.ICodeAnnotation;
 import jadx.api.metadata.ICodeAnnotation.AnnType;
 import jadx.api.metadata.ICodeMetadata;
 import jadx.api.metadata.ICodeNodeRef;
 import jadx.api.metadata.annotations.NodeDeclareRef;
-import jadx.api.impl.CodePositionMap;
 import jadx.core.utils.Utils;
 
 public class CodeMetadataStorage implements ICodeMetadata {
