@@ -198,8 +198,15 @@ public class RootNode extends AttrNode {
 		classes = new ArrayList<>(clsMap.values());
 
 		// print stats for loaded classes
-		int mthCount = classes.stream().mapToInt(c -> c.getMethods().size()).sum();
-		int insnsCount = classes.stream().flatMap(c -> c.getMethods().stream()).mapToInt(MethodNode::getInsnsCount).sum();
+		int mthCount = 0;
+		int insnsCount = 0;
+		for (int clsIndex = 0; clsIndex < classes.size(); clsIndex++) {
+			List<MethodNode> methods = classes.get(clsIndex).getMethods();
+			mthCount += methods.size();
+			for (int mthIndex = 0; mthIndex < methods.size(); mthIndex++) {
+				insnsCount += methods.get(mthIndex).getInsnsCount();
+			}
+		}
 		LOG.info("Loaded classes: {}, methods: {}, instructions: {}", classes.size(), mthCount, insnsCount);
 
 		// Sort classes by name, expect top classes before inner.
