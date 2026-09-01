@@ -16,7 +16,7 @@ import org.jetbrains.annotations.Nullable;
  * almost all cases, so the common path is an append to primitive keys instead of a tree node
  * allocation. Rare out-of-order line annotations are inserted at their sorted position.
  */
-final class CodePositionMap<V> extends AbstractMap<Integer, V> {
+public final class CodePositionMap<V> extends AbstractMap<Integer, V> {
 	private static final int INITIAL_CAPACITY = 4;
 
 	private int[] keys = new int[INITIAL_CAPACITY];
@@ -30,6 +30,30 @@ final class CodePositionMap<V> extends AbstractMap<Integer, V> {
 
 	CodePositionMap(int growthShift) {
 		this.growthShift = growthShift;
+	}
+
+	public static <V> CodePositionMap<V> copyOf(Map<Integer, ? extends V> source) {
+		if (source instanceof CodePositionMap) {
+			@SuppressWarnings("unchecked")
+			CodePositionMap<V> positionMap = (CodePositionMap<V>) source;
+			positionMap.trimToSize();
+			return positionMap;
+		}
+		int size = source.size();
+		CodePositionMap<V> result = new CodePositionMap<>(1);
+		result.keys = new int[size];
+		result.values = new Object[size];
+		int index = 0;
+		for (Map.Entry<Integer, ? extends V> entry : source.entrySet()) {
+			result.keys[index] = entry.getKey();
+			result.values[index] = entry.getValue();
+			index++;
+		}
+		result.size = index;
+		if (index > 1) {
+			result.sortPairs(0, index - 1);
+		}
+		return result;
 	}
 
 	@Override
@@ -114,6 +138,7 @@ final class CodePositionMap<V> extends AbstractMap<Integer, V> {
 			public Iterator<Map.Entry<Integer, V>> iterator() {
 				return new Iterator<>() {
 					private int index;
+					private int lastReturned = -1;
 
 					@Override
 					public boolean hasNext() {
@@ -126,7 +151,18 @@ final class CodePositionMap<V> extends AbstractMap<Integer, V> {
 							throw new NoSuchElementException();
 						}
 						int current = index++;
+						lastReturned = current;
 						return new SimpleImmutableEntry<>(keys[current], valueAt(current));
+					}
+
+					@Override
+					public void remove() {
+						if (lastReturned < 0) {
+							throw new IllegalStateException();
+						}
+						removeAt(lastReturned);
+						index = lastReturned;
+						lastReturned = -1;
 					}
 				};
 			}
@@ -142,6 +178,25 @@ final class CodePositionMap<V> extends AbstractMap<Integer, V> {
 		return Arrays.binarySearch(keys, 0, size, key);
 	}
 
+	public int floorIndex(int key) {
+		int index = find(key);
+		return index >= 0 ? index : -index - 2;
+	}
+
+	public int lowerIndex(int key) {
+		int index = find(key);
+		return index >= 0 ? index - 1 : -index - 2;
+	}
+
+	public int ceilingIndex(int key) {
+		int index = find(key);
+		return index >= 0 ? index : -index - 1;
+	}
+
+	public int keyAt(int index) {
+		return keys[index];
+	}
+
 	private void ensureCapacity(int required) {
 		if (required <= keys.length) {
 			return;
@@ -152,7 +207,54 @@ final class CodePositionMap<V> extends AbstractMap<Integer, V> {
 	}
 
 	@SuppressWarnings("unchecked")
-	private V valueAt(int index) {
+	public V valueAt(int index) {
 		return (V) values[index];
+	}
+
+	private void trimToSize() {
+		if (keys.length != size) {
+			keys = Arrays.copyOf(keys, size);
+			values = Arrays.copyOf(values, size);
+		}
+	}
+
+	private void removeAt(int index) {
+		int moveCount = size - index - 1;
+		if (moveCount != 0) {
+			System.arraycopy(keys, index + 1, keys, index, moveCount);
+			System.arraycopy(values, index + 1, values, index, moveCount);
+		}
+		size--;
+		values[size] = null;
+	}
+
+	private void sortPairs(int left, int right) {
+		int i = left;
+		int j = right;
+		int pivot = keys[(left + right) >>> 1];
+		while (i <= j) {
+			while (keys[i] < pivot) {
+				i++;
+			}
+			while (keys[j] > pivot) {
+				j--;
+			}
+			if (i <= j) {
+				int key = keys[i];
+				keys[i] = keys[j];
+				keys[j] = key;
+				Object value = values[i];
+				values[i] = values[j];
+				values[j] = value;
+				i++;
+				j--;
+			}
+		}
+		if (left < j) {
+			sortPairs(left, j);
+		}
+		if (i < right) {
+			sortPairs(i, right);
+		}
 	}
 }

@@ -4,7 +4,6 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.NavigableMap;
 
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -54,9 +53,8 @@ public class InsnOffsetSmaliSyncer implements IToJavaSyncStrategy {
 		LOG.debug("lineInfo key {}, lineInfo value {}, caretLineNumber {}", lineInfo.getKey(), lineInfo.getValue(),
 				from.getCaretLineNumber());
 		ICodeMetadata toMetadata = to.getCodeMetadata();
-		NavigableMap<Integer, ICodeAnnotation> codeAreaAnnotationMap =
-				(NavigableMap<Integer, ICodeAnnotation>) toMetadata.getAsMap();
-		Iterator<NavigableMap.Entry<Integer, ICodeAnnotation>> methodDecl =
+		Map<Integer, ICodeAnnotation> codeAreaAnnotationMap = toMetadata.getAsMap();
+		Iterator<Map.Entry<Integer, ICodeAnnotation>> methodDecl =
 				findMethodDeclAnnotation(codeAreaAnnotationMap, lineInfo.getKey());
 		if (methodDecl == null) {
 			LOG.warn("{} - No NodeDeclareRef exists for {}", LOG.getName(), lineInfo.getKey());
@@ -65,11 +63,11 @@ public class InsnOffsetSmaliSyncer implements IToJavaSyncStrategy {
 		// Looking through the annotations in order from the Method declaration to its end
 		// compare every adjacent pair of instruction offsets where the second is greater than the first.
 		// Highlight if the smali offset falls between the second and the first.
-		Iterator<NavigableMap.Entry<Integer, ICodeAnnotation>> it = methodDecl;
-		NavigableMap.Entry<Integer, ICodeAnnotation> prev = null;
+		Iterator<Map.Entry<Integer, ICodeAnnotation>> it = methodDecl;
+		Map.Entry<Integer, ICodeAnnotation> prev = null;
 		List<CodeMetadataRange> offsetBoundariesToHighlight = new ArrayList<>();
 		while (it.hasNext()) {
-			NavigableMap.Entry<Integer, ICodeAnnotation> entry = it.next();
+			Map.Entry<Integer, ICodeAnnotation> entry = it.next();
 			if (entry.getValue().getAnnType() == ICodeAnnotation.AnnType.END) {
 				break;
 			}
@@ -113,13 +111,12 @@ public class InsnOffsetSmaliSyncer implements IToJavaSyncStrategy {
 	 * @return iterator to the entry in the annotation map
 	 */
 	@Nullable
-	private static Iterator<NavigableMap.Entry<Integer, ICodeAnnotation>> findMethodDeclAnnotation(
-			NavigableMap<Integer, ICodeAnnotation> map,
+	private static Iterator<Map.Entry<Integer, ICodeAnnotation>> findMethodDeclAnnotation(
+			Map<Integer, ICodeAnnotation> map,
 			String smaliLineMthFullID) {
-		// Ensure we use NavigableMap here to get ordering guarantee from iterator call
-		Iterator<NavigableMap.Entry<Integer, ICodeAnnotation>> it = map.descendingMap().entrySet().iterator();
+		Iterator<Map.Entry<Integer, ICodeAnnotation>> it = map.entrySet().iterator();
 		while (it.hasNext()) {
-			NavigableMap.Entry<Integer, ICodeAnnotation> entry = it.next();
+			Map.Entry<Integer, ICodeAnnotation> entry = it.next();
 			if (entry.getValue() instanceof NodeDeclareRef) {
 				NodeDeclareRef nodeDeclareRef = (NodeDeclareRef) entry.getValue();
 				if (nodeDeclareRef.getNode() instanceof MethodNode) {

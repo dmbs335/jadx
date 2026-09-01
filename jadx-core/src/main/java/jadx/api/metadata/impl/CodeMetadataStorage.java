@@ -1,10 +1,7 @@
 package jadx.api.metadata.impl;
 
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.Map;
-import java.util.NavigableMap;
-import java.util.TreeMap;
 import java.util.function.BiFunction;
 
 import org.jetbrains.annotations.Nullable;
@@ -14,6 +11,7 @@ import jadx.api.metadata.ICodeAnnotation.AnnType;
 import jadx.api.metadata.ICodeMetadata;
 import jadx.api.metadata.ICodeNodeRef;
 import jadx.api.metadata.annotations.NodeDeclareRef;
+import jadx.api.impl.CodePositionMap;
 import jadx.core.utils.Utils;
 
 public class CodeMetadataStorage implements ICodeMetadata {
@@ -22,22 +20,11 @@ public class CodeMetadataStorage implements ICodeMetadata {
 		if (map.isEmpty() && lines.isEmpty()) {
 			return ICodeMetadata.EMPTY;
 		}
-		NavigableMap<Integer, ICodeAnnotation> navMap;
-		if (map instanceof ReverseAnnotationMap) {
-			navMap = (ReverseAnnotationMap) map;
-		} else {
-			navMap = newAnnotationMap();
-			map.forEach(navMap::put);
-		}
-		return new CodeMetadataStorage(lines, navMap);
-	}
-
-	public static NavigableMap<Integer, ICodeAnnotation> newAnnotationMap() {
-		return new ReverseAnnotationMap();
+		return new CodeMetadataStorage(lines, CodePositionMap.copyOf(map));
 	}
 
 	public static ICodeMetadata empty() {
-		return new CodeMetadataStorage(Collections.emptyMap(), Collections.emptyNavigableMap());
+		return new CodeMetadataStorage(Collections.emptyMap(), CodePositionMap.copyOf(Collections.emptyMap()));
 	}
 
 	// <decomp file line number> -> <dex debug line number>
@@ -45,35 +32,28 @@ public class CodeMetadataStorage implements ICodeMetadata {
 
 	// <character index into the file> -> <code annotation>
 	// the key is what is returned by AbstractCodeArea#getCaretPos() when clicking in a code panel.
-	private final NavigableMap<Integer, ICodeAnnotation> navMap;
+	private final CodePositionMap<ICodeAnnotation> positionMap;
 
-	private static final class ReverseAnnotationMap extends TreeMap<Integer, ICodeAnnotation> {
-		private static final long serialVersionUID = 2874416599039750427L;
-
-		private ReverseAnnotationMap() {
-			super(Comparator.comparingInt(Integer::intValue).reversed());
-		}
-	}
-
-	private CodeMetadataStorage(Map<Integer, Integer> lines, NavigableMap<Integer, ICodeAnnotation> navMap) {
+	private CodeMetadataStorage(Map<Integer, Integer> lines, CodePositionMap<ICodeAnnotation> positionMap) {
 		this.lines = lines;
-		this.navMap = navMap;
+		this.positionMap = positionMap;
 	}
 
 	@Override
 	public ICodeAnnotation getAt(int position) {
-		return navMap.get(position);
+		return positionMap.get(position);
 	}
 
 	@Override
 	public @Nullable ICodeAnnotation getClosestUp(int position) {
-		Map.Entry<Integer, ICodeAnnotation> entryBefore = navMap.higherEntry(position);
-		return entryBefore != null ? entryBefore.getValue() : null;
+		int index = positionMap.lowerIndex(position);
+		return index >= 0 ? positionMap.valueAt(index) : null;
 	}
 
 	@Override
 	public @Nullable ICodeAnnotation searchUp(int position, AnnType annType) {
-		for (ICodeAnnotation v : navMap.tailMap(position, true).values()) {
+		for (int i = positionMap.floorIndex(position); i >= 0; i--) {
+			ICodeAnnotation v = positionMap.valueAt(i);
 			if (v.getAnnType() == annType) {
 				return v;
 			}
@@ -83,7 +63,8 @@ public class CodeMetadataStorage implements ICodeMetadata {
 
 	@Override
 	public @Nullable ICodeAnnotation searchUp(int position, int limitPos, AnnType annType) {
-		for (ICodeAnnotation v : navMap.subMap(position, true, limitPos, true).values()) {
+		for (int i = positionMap.floorIndex(position); i >= 0 && positionMap.keyAt(i) >= limitPos; i--) {
+			ICodeAnnotation v = positionMap.valueAt(i);
 			if (v.getAnnType() == annType) {
 				return v;
 			}
@@ -93,8 +74,8 @@ public class CodeMetadataStorage implements ICodeMetadata {
 
 	@Override
 	public <T> @Nullable T searchUp(int startPos, BiFunction<Integer, ICodeAnnotation, T> visitor) {
-		for (Map.Entry<Integer, ICodeAnnotation> entry : navMap.tailMap(startPos, true).entrySet()) {
-			T value = visitor.apply(entry.getKey(), entry.getValue());
+		for (int i = positionMap.floorIndex(startPos); i >= 0; i--) {
+			T value = visitor.apply(positionMap.keyAt(i), positionMap.valueAt(i));
 			if (value != null) {
 				return value;
 			}
@@ -104,9 +85,8 @@ public class CodeMetadataStorage implements ICodeMetadata {
 
 	@Override
 	public <T> @Nullable T searchDown(int startPos, BiFunction<Integer, ICodeAnnotation, T> visitor) {
-		NavigableMap<Integer, ICodeAnnotation> map = navMap.headMap(startPos, true).descendingMap();
-		for (Map.Entry<Integer, ICodeAnnotation> entry : map.entrySet()) {
-			T value = visitor.apply(entry.getKey(), entry.getValue());
+		for (int i = positionMap.ceilingIndex(startPos); i < positionMap.size(); i++) {
+			T value = visitor.apply(positionMap.keyAt(i), positionMap.valueAt(i));
 			if (value != null) {
 				return value;
 			}
@@ -117,7 +97,8 @@ public class CodeMetadataStorage implements ICodeMetadata {
 	@Override
 	public ICodeNodeRef getNodeAt(int position) {
 		int nesting = 0;
-		for (ICodeAnnotation ann : navMap.tailMap(position, true).values()) {
+		for (int i = positionMap.floorIndex(position); i >= 0; i--) {
+			ICodeAnnotation ann = positionMap.valueAt(i);
 			switch (ann.getAnnType()) {
 				case END:
 					nesting++;
@@ -140,7 +121,8 @@ public class CodeMetadataStorage implements ICodeMetadata {
 
 	@Override
 	public ICodeNodeRef getNodeBelow(int position) {
-		for (ICodeAnnotation ann : navMap.headMap(position, true).descendingMap().values()) {
+		for (int i = positionMap.ceilingIndex(position); i < positionMap.size(); i++) {
+			ICodeAnnotation ann = positionMap.valueAt(i);
 			if (ann.getAnnType() == AnnType.DECLARATION) {
 				ICodeNodeRef node = ((NodeDeclareRef) ann).getNode();
 				AnnType nodeType = node.getAnnType();
@@ -153,8 +135,8 @@ public class CodeMetadataStorage implements ICodeMetadata {
 	}
 
 	@Override
-	public NavigableMap<Integer, ICodeAnnotation> getAsMap() {
-		return navMap;
+	public Map<Integer, ICodeAnnotation> getAsMap() {
+		return positionMap;
 	}
 
 	@Override
@@ -165,6 +147,6 @@ public class CodeMetadataStorage implements ICodeMetadata {
 	@Override
 	public String toString() {
 		return "CodeMetadata{\nlines=" + lines
-				+ "\nannotations=\n " + Utils.listToString(navMap.descendingMap().entrySet(), "\n ") + "\n}";
+				+ "\nannotations=\n " + Utils.listToString(positionMap.entrySet(), "\n ") + "\n}";
 	}
 }
