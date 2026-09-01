@@ -229,10 +229,24 @@ public class RootNode extends AttrNode {
 			if (methodsCount == 1) {
 				methods.get(0).setRawOrder(nextMethodOrder++);
 			} else if (methodsCount > 1) {
-				MethodNode[] sortedMethods = methods.toArray(new MethodNode[0]);
-				Arrays.sort(sortedMethods, Comparator.comparing(mth -> mth.getMethodInfo().getShortId()));
+				boolean alreadySorted = true;
 				String previousShortId = null;
-				for (MethodNode method : sortedMethods) {
+				for (int methodIndex = 0; methodIndex < methodsCount; methodIndex++) {
+					String shortId = methods.get(methodIndex).getMethodInfo().getShortId();
+					if (previousShortId != null && previousShortId.compareTo(shortId) > 0) {
+						alreadySorted = false;
+						break;
+					}
+					previousShortId = shortId;
+				}
+				MethodNode[] orderedMethods = null;
+				if (!alreadySorted) {
+					orderedMethods = methods.toArray(new MethodNode[0]);
+					Arrays.sort(orderedMethods, Comparator.comparing(mth -> mth.getMethodInfo().getShortId()));
+				}
+				previousShortId = null;
+				for (int methodIndex = 0; methodIndex < methodsCount; methodIndex++) {
+					MethodNode method = alreadySorted ? methods.get(methodIndex) : orderedMethods[methodIndex];
 					String shortId = method.getMethodInfo().getShortId();
 					if (previousShortId != null && !previousShortId.equals(shortId)) {
 						nextMethodOrder++;
