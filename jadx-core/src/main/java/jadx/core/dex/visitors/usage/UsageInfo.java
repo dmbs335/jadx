@@ -4,6 +4,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import jadx.api.usage.IUsageInfoData;
 import jadx.api.usage.IUsageInfoVisitor;
@@ -17,6 +21,7 @@ import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.ICodeNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
+import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 import static jadx.core.utils.Utils.notEmpty;
@@ -42,14 +47,36 @@ public class UsageInfo implements IUsageInfoData {
 
 	@Override
 	public void apply() {
-		clsDeps.visitSorted(ClassNode::setDependencies);
-		clsUsage.visitSorted(ClassNode::setUseIn);
-		clsUseInMth.visitSorted(ClassNode::setUseInMth);
-		fieldUsage.visitSorted(FieldNode::setUseIn);
-		mthUsage.visitSorted(MethodNode::setUseInDirect);
-		mthUses.visitSorted(MethodNode::setUsed);
-		unresolvedMthUsage.visitSorted(MethodNode::setUnresolvedUsed);
+		List<Runnable> tasks = List.of(
+				() -> clsDeps.visitSorted(ClassNode::setDependencies),
+				() -> clsUsage.visitSorted(ClassNode::setUseIn),
+				() -> clsUseInMth.visitSorted(ClassNode::setUseInMth),
+				() -> fieldUsage.visitSorted(FieldNode::setUseIn),
+				() -> mthUsage.visitSorted(MethodNode::setUseInDirect),
+				() -> mthUses.visitSorted(MethodNode::setUsed),
+				() -> unresolvedMthUsage.visitSorted(MethodNode::setUnresolvedUsed));
+		applyTasks(tasks);
 		selfCalls.forEach(MethodNode::setCallsSelf);
+	}
+
+	private void applyTasks(List<Runnable> tasks) {
+		int threads = Math.min(tasks.size(), root.getArgs().getThreadsCount());
+		if (threads <= 1) {
+			tasks.forEach(Runnable::run);
+			return;
+		}
+		ExecutorService executor = Executors.newFixedThreadPool(
+				threads, Utils.simpleThreadFactory("usage-apply"));
+		try {
+			CompletableFuture<?>[] futures = tasks.stream()
+					.map(task -> CompletableFuture.runAsync(task, executor))
+					.toArray(CompletableFuture[]::new);
+			CompletableFuture.allOf(futures).join();
+		} catch (CompletionException e) {
+			throw new JadxRuntimeException("Failed to apply usage data", e.getCause());
+		} finally {
+			executor.shutdown();
+		}
 	}
 
 	@Override
