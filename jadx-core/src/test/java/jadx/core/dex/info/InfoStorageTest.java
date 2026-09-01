@@ -43,4 +43,15 @@ class InfoStorageTest {
 		assertThatThrownBy(() -> method.getArgumentsTypes().add(ArgType.LONG))
 				.isInstanceOf(UnsupportedOperationException.class);
 	}
+
+	@Test
+	void testRawMethodIdKeepsInputClassNameAfterInnerClassUpdates() {
+		RootNode root = new RootNode(new JadxArgs());
+		ClassInfo declClass = ClassInfo.fromType(root, ArgType.object("sample.Outer$Inner"));
+		MethodInfo method = MethodInfo.fromDetails(root, declClass, "call", List.of(), ArgType.VOID);
+
+		declClass.notInner(root);
+
+		assertThat(method.getRawFullId()).isEqualTo("sample.Outer$Inner.call()V");
+	}
 }

@@ -21,7 +21,6 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 	private final List<ArgType> argTypes;
 	private final ClassInfo declClass;
 	private final String shortId;
-	private final String rawFullId;
 	private final int hash;
 	private final int overloadKeyHash;
 
@@ -34,7 +33,6 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 		this.argTypes = Utils.lockList(Objects.requireNonNull(args));
 		this.retType = retType;
 		this.shortId = makeShortId(name, argTypes, retType);
-		this.rawFullId = declClass.makeRawFullName() + '.' + shortId;
 		this.hash = calcHashCode();
 		this.overloadKeyHash = 31 * name.hashCode() + argTypes.size();
 	}
@@ -141,7 +139,7 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 	}
 
 	public String getRawFullId() {
-		return rawFullId;
+		return declClass.getRawName() + '.' + shortId;
 	}
 
 	/**

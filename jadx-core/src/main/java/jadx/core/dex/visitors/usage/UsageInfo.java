@@ -180,7 +180,8 @@ public class UsageInfo implements IUsageInfoData {
 	 * Add method usage: {@code useMth} occurrence found in {@code mth} code
 	 */
 	public void unresolvedMethodUse(MethodNode mth, MethodInfo useMth) {
-		if (useMth.getRawFullId().equals("java.lang.Object.<init>()V")) {
+		if (useMth.getDeclClass().getRawName().equals("java.lang.Object")
+				&& useMth.getShortId().equals("<init>()V")) {
 			// ignore default object constructor (called in every constructor)
 			return;
 		}
