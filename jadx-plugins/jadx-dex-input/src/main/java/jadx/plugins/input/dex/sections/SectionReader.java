@@ -24,11 +24,13 @@ import static jadx.plugins.input.dex.sections.DexConsts.NO_INDEX;
 
 public class SectionReader {
 	private final DexReader dexReader;
+	private final byte[] data;
 	private int offset;
 	private int position;
 
 	public SectionReader(DexReader dexReader, int off) {
 		this.dexReader = dexReader;
+		this.data = dexReader == null ? null : dexReader.getBuf().array();
 		this.offset = off;
 		this.position = off;
 	}
@@ -100,7 +102,7 @@ public class SectionReader {
 	}
 
 	public byte readByte() {
-		return dexReader.getBuf().get(position++);
+		return data[position++];
 	}
 
 	public int readUByte() {
@@ -119,7 +121,7 @@ public class SectionReader {
 
 	public byte[] readByteArray(int len) {
 		byte[] arr = new byte[len];
-		System.arraycopy(dexReader.getBuf().array(), position, arr, 0, len);
+		System.arraycopy(data, position, arr, 0, len);
 		position += len;
 		return arr;
 	}
