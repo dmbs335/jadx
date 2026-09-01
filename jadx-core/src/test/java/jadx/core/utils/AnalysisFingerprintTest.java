@@ -1,5 +1,6 @@
 package jadx.core.utils;
 
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import jadx.api.JadxArgs;
 import jadx.api.JadxDecompiler;
+import jadx.api.JavaClass;
 import jadx.core.utils.files.FileUtils;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -115,6 +117,47 @@ class AnalysisFingerprintTest {
 			decompiler.reloadPasses();
 
 			assertThat(decompiler.getAnalysisFingerprint()).isNotEqualTo(before);
+		}
+	}
+
+	@Test
+	void passReloadRestoresOriginalClassData() throws Exception {
+		Path input = tempDir.resolve("reload-fixture.jar");
+		writeClassArchive(input, PassReloadFixture.class);
+		try (JadxArgs args = new JadxArgs();
+				JadxDecompiler decompiler = new JadxDecompiler(args)) {
+			args.getInputFiles().add(input.toFile());
+			decompiler.load();
+			JavaClass fixture = decompiler.getClasses().stream()
+					.filter(cls -> cls.getRawName().equals(PassReloadFixture.class.getName()))
+					.findFirst()
+					.orElseThrow();
+			String before = fixture.getCode();
+
+			decompiler.reloadPasses();
+			String after = fixture.getCode();
+
+			assertThat(before).contains("@Deprecated");
+			assertThat(after).contains("@Deprecated");
+		}
+	}
+
+	@Test
+	void passReloadResetsGeneratedAliases() throws Exception {
+		Path input = tempDir.resolve("obfuscated-fixture.jar");
+		writeClassArchive(input, a.class);
+		try (JadxArgs args = new JadxArgs();
+				JadxDecompiler decompiler = new JadxDecompiler(args)) {
+			args.getInputFiles().add(input.toFile());
+			args.setDeobfuscationOn(true);
+			decompiler.load();
+			JavaClass fixture = decompiler.getClasses().stream().findFirst().orElseThrow();
+			String before = fixture.getCode();
+
+			decompiler.reloadPasses();
+			String after = fixture.getCode();
+
+			assertThat(after).isEqualTo(before);
 		}
 	}
 
@@ -278,6 +321,17 @@ class AnalysisFingerprintTest {
 		}
 	}
 
+	private static void writeClassArchive(Path archive, Class<?> cls) throws Exception {
+		String entryName = cls.getName().replace('.', '/') + ".class";
+		try (InputStream input = cls.getClassLoader().getResourceAsStream(entryName);
+				ZipOutputStream output = new ZipOutputStream(Files.newOutputStream(archive))) {
+			assertThat(input).isNotNull();
+			output.putNextEntry(new ZipEntry(entryName));
+			input.transferTo(output);
+			output.closeEntry();
+		}
+	}
+
 	private static int indexOf(byte[] bytes, byte[] target) {
 		for (int i = 0; i <= bytes.length - target.length; i++) {
 			boolean match = true;
@@ -293,4 +347,14 @@ class AnalysisFingerprintTest {
 		}
 		return -1;
 	}
+}
+
+@Deprecated
+class PassReloadFixture {
+	@Deprecated
+	int value;
+}
+
+class a {
+	int a;
 }

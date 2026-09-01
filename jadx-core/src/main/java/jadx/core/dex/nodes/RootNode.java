@@ -38,6 +38,7 @@ import jadx.api.plugins.pass.types.JadxPreparePass;
 import jadx.core.Jadx;
 import jadx.core.ProcessClass;
 import jadx.core.clsp.ClspGraph;
+import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.AttrNode;
 import jadx.core.dex.attributes.AttributeStorage;
 import jadx.core.dex.info.ClassInfo;
@@ -501,12 +502,28 @@ public class RootNode extends AttrNode {
 	}
 
 	public void restartVisitors() {
+		codeDataUpdateListeners.clear();
+		resetAliases();
+		args.getAliasProvider().initIndexes(0, 0, 0, 0);
+		constValues.reset();
 		for (ClassNode cls : classes) {
-			cls.unload();
-			cls.clearAttributes();
+			if (cls.isInner()) {
+				continue;
+			}
 			cls.unloadFromCache();
+			cls.deepUnload();
 		}
 		runPreDecompileStage();
+	}
+
+	private void resetAliases() {
+		packages.forEach(PackageNode::removeAlias);
+		for (ClassNode cls : classes) {
+			cls.getClassInfo().removeAlias();
+			cls.remove(AType.RENAME_REASON);
+			cls.getFields().forEach(field -> field.getFieldInfo().removeAlias());
+			cls.getMethods().forEach(method -> method.getMethodInfo().removeAlias());
+		}
 	}
 
 	public List<ClassNode> getClasses() {

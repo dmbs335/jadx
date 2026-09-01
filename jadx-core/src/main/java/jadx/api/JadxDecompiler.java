@@ -150,16 +150,15 @@ public final class JadxDecompiler implements Closeable {
 	}
 
 	/**
-	 * Reload passes and plugins without processing classes and inputs
+	 * Reload passes without replacing input and resource plugin instances.
+	 * Input loaders can retain plugin-owned files for the lifetime of the loaded classes,
+	 * so unloading their plugin here would invalidate active inputs.
 	 */
 	public void reloadPasses() {
 		LOG.info("reloading (passes only) ...");
-		customPasses.clear();
 		root.resetPasses();
 		events.reset();
-		unloadPlugins();
 
-		loadPlugins();
 		root.mergePasses(customPasses);
 		root.restartVisitors();
 		root.initPasses();

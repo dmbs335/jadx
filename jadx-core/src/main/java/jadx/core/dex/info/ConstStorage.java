@@ -101,6 +101,14 @@ public class ConstStorage {
 				}
 			}
 		}
+
+		void clear() {
+			values.clear();
+			duplicates.clear();
+			if (valuesByClass != null) {
+				valuesByClass.clear();
+			}
+		}
 	}
 
 	private final boolean replaceEnabled;
@@ -128,6 +136,11 @@ public class ConstStorage {
 	public void removeForClass(ClassNode cls) {
 		classes.remove(cls);
 		globalValues.removeForCls(cls);
+	}
+
+	public void reset() {
+		globalValues.clear();
+		classes.clear();
 	}
 
 	private ValueStorage getClsValues(ClassNode cls) {
