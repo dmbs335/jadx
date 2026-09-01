@@ -941,7 +941,13 @@ public class MethodNode extends NotificationAttrNode implements IMethodDetails, 
 
 	@Override
 	public int compareTo(@NotNull MethodNode o) {
-		return mthInfo.compareTo(o.mthInfo);
+		if (parentClass != o.parentClass) {
+			int clsCmp = parentClass.compareTo(o.parentClass);
+			if (clsCmp != 0) {
+				return clsCmp;
+			}
+		}
+		return mthInfo.getShortId().compareTo(o.mthInfo.getShortId());
 	}
 
 	@Override

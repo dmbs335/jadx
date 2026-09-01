@@ -220,6 +220,9 @@ public class RootNode extends AttrNode {
 		} else {
 			classes.sort(classNameComparator);
 		}
+		for (int i = 0; i < classes.size(); i++) {
+			classes.get(i).setRawNameOrder(i);
+		}
 
 		if (args.isMoveInnerClasses()) {
 			// detect and move inner classes

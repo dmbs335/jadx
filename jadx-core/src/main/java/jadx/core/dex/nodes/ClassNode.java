@@ -123,6 +123,8 @@ public class ClassNode extends NotificationAttrNode
 	private Map<String, MethodNode> mthByShortId = Collections.emptyMap();
 
 	private JavaClass javaNode;
+	// Lexicographic raw-name rank assigned after the root class list is finalized.
+	private int rawNameOrder = -1;
 
 	public ClassNode(RootNode root, IClassData cls) {
 		this.root = root;
@@ -1218,7 +1220,14 @@ public class ClassNode extends NotificationAttrNode
 
 	@Override
 	public int compareTo(@NotNull ClassNode o) {
+		if (rawNameOrder >= 0 && o.rawNameOrder >= 0) {
+			return Integer.compare(rawNameOrder, o.rawNameOrder);
+		}
 		return this.clsInfo.compareTo(o.clsInfo);
+	}
+
+	void setRawNameOrder(int rawNameOrder) {
+		this.rawNameOrder = rawNameOrder;
 	}
 
 	@Override
