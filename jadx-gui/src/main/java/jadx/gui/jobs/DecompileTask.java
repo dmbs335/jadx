@@ -82,7 +82,10 @@ public class DecompileTask extends CancelableBackgroundTask {
 					}
 					try {
 						if (!codeCache.contains(cls.getRawName())) {
-							cls.decompile();
+							// contains() is an in-memory check for the GUI disk cache. Avoid a second
+							// cache lookup and avoid building JavaClass API member wrappers that this
+							// background task never consumes.
+							cls.getClassNode().decompileWithoutCacheLookup();
 						}
 					} catch (Throwable e) {
 						LOG.error("Failed to decompile class: {}", cls, e);

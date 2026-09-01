@@ -377,6 +377,13 @@ public class ClassNode extends NotificationAttrNode
 		return decompile(true);
 	}
 
+	/**
+	 * Generate and cache code after the caller has already established that the cache has no entry.
+	 */
+	public ICodeInfo decompileWithoutCacheLookup() {
+		return decompile(false);
+	}
+
 	private static final Object DECOMPILE_WITH_MODE_SYNC = new Object();
 
 	/**
