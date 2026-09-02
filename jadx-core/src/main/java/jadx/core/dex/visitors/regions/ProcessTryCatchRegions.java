@@ -6,6 +6,8 @@ import java.util.List;
 
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IBranchRegion;
 import jadx.core.dex.nodes.IContainer;
@@ -14,6 +16,7 @@ import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.AbstractRegion;
 import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.TryCatchRegion;
+import jadx.core.dex.regions.conditions.IfRegion;
 import jadx.core.dex.regions.loops.LoopRegion;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.trycatch.TryCatchBlockAttr;
@@ -106,12 +109,21 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		}
 
 		Region tryRegion = new Region(replaceRegion);
+		boolean splitProtectedTail = isResourceSuppressionTry(tb);
+		if (splitProtectedTail) {
+			splitTrailingUnprotectedRegions(replaceRegion, tb);
+		}
 		List<IContainer> subBlocks = replaceRegion.getSubBlocks();
+		int lastProtectedIndex = splitProtectedTail ? getLastProtectedContainerIndex(subBlocks, tb) : -1;
 		// traverse the enclosing region for blocks that have a path from the dominator but don't have a
 		// path from any of the exception handlers i.e. they are not before the end of the try block so
 		// should be inside the try block.
-		for (IContainer cont : subBlocks) {
+		for (int index = 0; index < subBlocks.size(); index++) {
+			IContainer cont = subBlocks.get(index);
 			if (cont == dominator || RegionUtils.hasPathThroughBlock(dominator, cont)) {
+				if (lastProtectedIndex != -1 && index > lastProtectedIndex) {
+					break;
+				}
 				boolean containsTryBlock = tb.getBlocks().stream()
 						.anyMatch(block -> RegionUtils.isRegionContainsBlock(cont, block));
 				if (!containsTryBlock && cont != dominator && isHandlerPath(tb, cont)) {
@@ -144,6 +156,129 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			}
 		}
 		return true;
+	}
+
+	public static boolean isResourceSuppressionTry(TryCatchBlockAttr tb) {
+		for (ExceptionHandler handler : tb.getHandlers()) {
+			for (BlockNode block : handler.getBlocks()) {
+				for (var insn : block.getInstructions()) {
+					Boolean found = insn.visitInsns(innerInsn -> {
+						if (innerInsn.getType() != InsnType.INVOKE) {
+							return null;
+						}
+						InvokeNode invoke = (InvokeNode) innerInsn;
+						return invoke.getCallMth().getName().equals("addSuppressed")
+								&& invoke.getCallMth().getDeclClass().getFullName().equals("java.lang.Throwable")
+										? Boolean.TRUE
+										: null;
+					});
+					if (found != null) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	public static boolean containsResourceSuppressionTry(TryCatchBlockAttr tb) {
+		if (isResourceSuppressionTry(tb)) {
+			return true;
+		}
+		for (TryCatchBlockAttr innerTryBlock : tb.getInnerTryBlocks()) {
+			if (containsResourceSuppressionTry(innerTryBlock)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Region making can group the end of a protected range and its normal continuation into one
+	 * sequential container. Split only such plain sequential regions; branch semantics remain
+	 * untouched and the continuation can then stay outside the generated try statement.
+	 */
+	private static void splitTrailingUnprotectedRegions(IRegion parent, TryCatchBlockAttr tb) {
+		List<IContainer> children = new ArrayList<>(parent.getSubBlocks());
+		for (IContainer child : children) {
+			if (child instanceof IRegion) {
+				splitTrailingUnprotectedRegions((IRegion) child, tb);
+			}
+			if (parent instanceof Region && child instanceof IfRegion
+					&& splitTerminalUnprotectedBranch((Region) parent, (IfRegion) child, tb)) {
+				continue;
+			}
+			if (!(parent instanceof Region) || !(child instanceof Region)) {
+				continue;
+			}
+			Region childRegion = (Region) child;
+			List<IContainer> childBlocks = childRegion.getSubBlocks();
+			int lastProtectedIndex = getLastProtectedContainerIndex(childBlocks, tb);
+			if (lastProtectedIndex == -1 || lastProtectedIndex == childBlocks.size() - 1) {
+				continue;
+			}
+			Region trailingRegion = new Region(parent);
+			List<IContainer> trailingBlocks = new ArrayList<>(
+					childBlocks.subList(lastProtectedIndex + 1, childBlocks.size()));
+			childBlocks.subList(lastProtectedIndex + 1, childBlocks.size()).clear();
+			for (IContainer trailingBlock : trailingBlocks) {
+				trailingRegion.add(trailingBlock);
+			}
+			List<IContainer> parentBlocks = parent.getSubBlocks();
+			int childIndex = parentBlocks.indexOf(child);
+			parentBlocks.add(childIndex + 1, trailingRegion);
+		}
+	}
+
+	private static boolean splitTerminalUnprotectedBranch(
+			Region parent, IfRegion ifRegion, TryCatchBlockAttr tb) {
+		IContainer thenRegion = ifRegion.getThenRegion();
+		IContainer elseRegion = ifRegion.getElseRegion();
+		if (thenRegion == null || elseRegion == null) {
+			return false;
+		}
+		boolean thenProtected = containsProtectedBlock(thenRegion, tb);
+		boolean elseProtected = containsProtectedBlock(elseRegion, tb);
+		if (thenProtected == elseProtected) {
+			return false;
+		}
+		IContainer protectedRegion = thenProtected ? thenRegion : elseRegion;
+		if (!RegionUtils.hasExitBlock(protectedRegion)) {
+			return false;
+		}
+		if (!thenProtected) {
+			ifRegion.invert();
+		}
+		IContainer continuation = ifRegion.getElseRegion();
+		ifRegion.setElseRegion(null);
+		List<IContainer> parentBlocks = parent.getSubBlocks();
+		int ifIndex = parentBlocks.indexOf(ifRegion);
+		parentBlocks.add(ifIndex + 1, continuation);
+		if (continuation instanceof IRegion) {
+			((IRegion) continuation).setParent(parent);
+		}
+		return true;
+	}
+
+	private static boolean containsProtectedBlock(IContainer container, TryCatchBlockAttr tb) {
+		for (BlockNode block : tb.getBlocks()) {
+			if (RegionUtils.isRegionContainsBlock(container, block)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static int getLastProtectedContainerIndex(List<IContainer> containers, TryCatchBlockAttr tb) {
+		for (int index = containers.size() - 1; index >= 0; index--) {
+			IContainer container = containers.get(index);
+			for (BlockNode block : tb.getBlocks()) {
+				if (RegionUtils.isRegionContainsBlock(container, block)) {
+					return index;
+				}
+			}
+		}
+		return -1;
 	}
 
 	private static boolean isHandlerPath(TryCatchBlockAttr tb, IContainer container) {

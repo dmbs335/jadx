@@ -17,6 +17,8 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.InitAtDeclareVarsAttr;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
+import jadx.core.dex.instructions.ArithNode;
+import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.InsnType;
@@ -87,12 +89,10 @@ public class SSATransform extends AbstractVisitor {
 
 	/**
 	 * Exception handlers are connected to a common synthetic top splitter instead of every protected
-	 * block. This keeps the region CFG manageable, but a value restored independently in coroutine
-	 * resume branches no longer dominates the handler and normal SSA placement cannot see it.
-	 *
-	 * Recover only values which are unchanged inside every protected block. In that case the value at
-	 * the end of a block is also the value visible to every throwing instruction in that block, so it
-	 * is safe to use the protected blocks as the exceptional PHI inputs.
+	 * block, so normal dominance-frontier placement cannot model values arriving on exception edges.
+	 * Coroutine recovery keeps its proven block-end binding. General try/catch recovery instead binds
+	 * each input immediately before the protected instruction can throw, preserving Java's rule that
+	 * the result of a failed instruction was never assigned.
 	 */
 	private static ExceptionPhiData placeExceptionHandlerPhis(MethodNode mth, LiveVarAnalysis la) {
 		ExceptionPhiData data = new ExceptionPhiData();
@@ -111,6 +111,10 @@ public class SSATransform extends AbstractVisitor {
 			if (sources.isEmpty() || hasDuplicateBlocks(sources)) {
 				continue;
 			}
+			List<BlockNode> throwSources = collectThrowSources(mth, handler, sources);
+			if (throwSources.isEmpty()) {
+				continue;
+			}
 			int regsCount = mth.getRegsCount();
 			BitSet assignedInSources = collectAssignedRegs(sources, regsCount);
 			BitSet assignedInProtectedRange = null;
@@ -121,8 +125,9 @@ public class SSATransform extends AbstractVisitor {
 				boolean recoverCoroutineHandlerPhi = CoroutineMethodUtils.isStateMachine(mth)
 						&& (existingPhi != null || definitionDominatesHandler);
 				boolean recoverPreTryHandlerState = definitionDominatesHandler
-						&& hasNewerDefinitionForProtectedSources(mth, la, handler, handlerBlock, sources, regNum)
-						&& hasStableExceptionEndState(mth, handler, sources, regNum);
+						&& hasNewerDefinitionAtProtectedThrow(
+								mth, la, handler, handlerBlock, throwSources, regNum)
+						&& hasStableExceptionEntryState(mth, handler, throwSources, regNum);
 				if (!la.isLive(handlerBlock, regNum)
 						|| existingPhi != null
 								&& !recoverCoroutineHandlerPhi && !recoverPreTryHandlerState
@@ -155,7 +160,12 @@ public class SSATransform extends AbstractVisitor {
 						recoverCoroutineHandlerPhi)) {
 					continue;
 				}
-				candidates.add(new ExceptionPhiCandidate(handlerBlock, regNum, sources, existingPhi));
+				List<BlockNode> candidateSources = recoverPreTryHandlerState ? throwSources : sources;
+				ExceptionPhiBindMode bindMode = recoverPreTryHandlerState
+						? ExceptionPhiBindMode.BEFORE_THROW
+						: ExceptionPhiBindMode.BLOCK_END;
+				candidates.add(new ExceptionPhiCandidate(
+						handlerBlock, regNum, candidateSources, existingPhi, handler, bindMode));
 			}
 		}
 		List<ExceptionPhiCandidate> resolvedCandidates = resolveExceptionPhiCandidates(mth, candidates);
@@ -167,63 +177,82 @@ public class SSATransform extends AbstractVisitor {
 				phiInsn = addPhi(mth, candidate.getHandlerBlock(), candidate.getRegNum());
 				candidate.getHandlerBlock().getInstructions().add(0, phiInsn);
 			}
-			data.add(phiInsn, candidate.getSources());
+			data.add(mth, phiInsn, candidate);
 		}
 		return data;
 	}
 
-	/**
-	 * Exception splitters can dominate a handler before the actual try entry. For every protected
-	 * throw source, require a newer register definition which either dominates that source but not
-	 * the synthetic handler edge, or executes in the source before its first throwing instruction.
-	 */
-	private static boolean hasNewerDefinitionForProtectedSources(
-			MethodNode mth, LiveVarAnalysis la, ExceptionHandler handler,
-			BlockNode handlerBlock, List<BlockNode> sources, int regNum) {
-		BitSet assignBlocks = la.getAssignBlocks(regNum);
-		boolean throwPointFound = false;
+	private static List<BlockNode> collectThrowSources(
+			MethodNode mth, ExceptionHandler handler, List<BlockNode> sources) {
+		List<BlockNode> throwSources = new ArrayList<>();
 		for (BlockNode source : sources) {
-			boolean assignedBeforeThrow = false;
-			boolean sourceCanThrow = false;
-			for (InsnNode insn : source.getInstructions()) {
-				RegisterArg result = insn.getResult();
-				if (result != null && result.getRegNum() == regNum) {
-					assignedBeforeThrow = true;
-				}
-				if (isProtectedByHandler(mth, handler, insn) && insn.canThrowException()) {
-					sourceCanThrow = true;
-					break;
-				}
-			}
-			if (!sourceCanThrow) {
-				continue;
-			}
-			throwPointFound = true;
-			BitSet newerDoms = (BitSet) source.getDoms().clone();
-			newerDoms.and(assignBlocks);
-			newerDoms.andNot(handlerBlock.getDoms());
-			if (!assignedBeforeThrow && newerDoms.isEmpty()) {
-				return false;
+			if (findFirstProtectedThrowInsn(mth, handler, source) != null) {
+				throwSources.add(source);
 			}
 		}
-		return throwPointFound;
+		return throwSources;
+	}
+
+	private static InsnNode findFirstProtectedThrowInsn(
+			MethodNode mth, ExceptionHandler handler, BlockNode source) {
+		for (InsnNode insn : source.getInstructions()) {
+			if (canTransferToHandler(insn) && isProtectedByHandler(mth, handler, insn)) {
+				return insn;
+			}
+		}
+		return null;
 	}
 
 	/**
-	 * Binding an exception PHI to a protected block's end state is safe only if that register is
-	 * not assigned by or after an instruction which can transfer control to this handler.
+	 * Exception splitters can dominate a handler before the actual try entry. Require at least one
+	 * exceptional input whose value is newer than the value dominating that synthetic handler edge.
 	 */
-	private static boolean hasStableExceptionEndState(
-			MethodNode mth, ExceptionHandler handler, List<BlockNode> sources, int regNum) {
+	private static boolean hasNewerDefinitionAtProtectedThrow(
+			MethodNode mth, LiveVarAnalysis la, ExceptionHandler handler,
+			BlockNode handlerBlock, List<BlockNode> sources, int regNum) {
+		BitSet assignBlocks = la.getAssignBlocks(regNum);
 		for (BlockNode source : sources) {
-			boolean throwPointSeen = false;
 			for (InsnNode insn : source.getInstructions()) {
-				if (isProtectedByHandler(mth, handler, insn) && insn.canThrowException()) {
-					throwPointSeen = true;
+				if (canTransferToHandler(insn) && isProtectedByHandler(mth, handler, insn)) {
+					break;
 				}
 				RegisterArg result = insn.getResult();
-				if (throwPointSeen && result != null && result.getRegNum() == regNum) {
-					return false;
+				if (result != null && result.getRegNum() == regNum) {
+					return true;
+				}
+			}
+			BitSet newerDoms = (BitSet) source.getDoms().clone();
+			newerDoms.and(assignBlocks);
+			newerDoms.andNot(handlerBlock.getDoms());
+			if (!newerDoms.isEmpty()) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A block can represent several exception edges, but {@link PhiInsn} accepts one input per source
+	 * block. Binding all edges to the first throwing instruction is safe only while the register value
+	 * does not change between protected throw points. A result produced by a throwing instruction is
+	 * deliberately considered after that edge: it is visible only if the instruction completed.
+	 */
+	private static boolean hasStableExceptionEntryState(
+			MethodNode mth, ExceptionHandler handler, List<BlockNode> sources, int regNum) {
+		for (BlockNode source : sources) {
+			boolean firstThrowSeen = false;
+			boolean changedAfterThrow = false;
+			for (InsnNode insn : source.getInstructions()) {
+				if (isProtectedByHandler(mth, handler, insn) && canTransferToHandler(insn)) {
+					if (firstThrowSeen && changedAfterThrow) {
+						return false;
+					}
+					firstThrowSeen = true;
+					changedAfterThrow = false;
+				}
+				RegisterArg result = insn.getResult();
+				if (firstThrowSeen && result != null && result.getRegNum() == regNum) {
+					changedAfterThrow = true;
 				}
 			}
 		}
@@ -660,6 +689,22 @@ public class SSATransform extends AbstractVisitor {
 		return catchAttr != null && catchAttr.getHandlers().contains(handler);
 	}
 
+	/**
+	 * {@link InsnNode#canThrowException()} is intentionally conservative for region construction.
+	 * Exception-edge SSA needs the narrower runtime semantics: ordinary integer/bit arithmetic cannot
+	 * transfer control to a handler, while division and remainder still can.
+	 */
+	private static boolean canTransferToHandler(InsnNode insn) {
+		if (!insn.canThrowException()) {
+			return false;
+		}
+		if (insn.getType() == InsnType.ARITH) {
+			ArithOp op = ((ArithNode) insn).getOp();
+			return op == ArithOp.DIV || op == ArithOp.REM;
+		}
+		return true;
+	}
+
 	private static boolean startsWithLiteralAssign(BlockNode block, int regNum) {
 		for (InsnNode insn : block.getInstructions()) {
 			if (insn.getType() == InsnType.PHI) {
@@ -838,6 +883,11 @@ public class SSATransform extends AbstractVisitor {
 		int insnsCount = insns.size();
 		for (int insnIndex = 0; insnIndex < insnsCount; insnIndex++) {
 			InsnNode insn = insns.get(insnIndex);
+			List<PhiInsn> throwPhiInsns = exceptionPhiData.getBeforeInsn(insn);
+			int throwPhiInsnsCount = throwPhiInsns.size();
+			for (int phiInsnIndex = 0; phiInsnIndex < throwPhiInsnsCount; phiInsnIndex++) {
+				bindPhiArg(state, throwPhiInsns.get(phiInsnIndex));
+			}
 			if (insn.getType() != InsnType.PHI) {
 				int argsCount = insn.getArgsCount();
 				for (int argIndex = 0; argIndex < argsCount; argIndex++) {
@@ -880,7 +930,7 @@ public class SSATransform extends AbstractVisitor {
 				}
 			}
 		}
-		List<PhiInsn> exceptionPhiInsns = exceptionPhiData.getForSource(block);
+		List<PhiInsn> exceptionPhiInsns = exceptionPhiData.getAtBlockEnd(block);
 		int exceptionPhiInsnsCount = exceptionPhiInsns.size();
 		for (int phiInsnIndex = 0; phiInsnIndex < exceptionPhiInsnsCount; phiInsnIndex++) {
 			bindPhiArg(state, exceptionPhiInsns.get(phiInsnIndex));
@@ -973,21 +1023,39 @@ public class SSATransform extends AbstractVisitor {
 	}
 
 	private static final class ExceptionPhiData {
-		private Map<BlockNode, List<PhiInsn>> bySource;
+		private Map<BlockNode, List<PhiInsn>> atBlockEnd;
+		private Map<InsnNode, List<PhiInsn>> beforeInsn;
 		private Map<PhiInsn, Integer> expectedArgs;
 
-		public void add(PhiInsn phiInsn, List<BlockNode> sources) {
-			Map<BlockNode, List<PhiInsn>> sourceMap = bySource;
+		public void add(MethodNode mth, PhiInsn phiInsn, ExceptionPhiCandidate candidate) {
+			Map<BlockNode, List<PhiInsn>> sourceMap = atBlockEnd;
+			Map<InsnNode, List<PhiInsn>> insnMap = beforeInsn;
 			Map<PhiInsn, Integer> expectedMap = expectedArgs;
-			if (sourceMap == null) {
-				sourceMap = new HashMap<>();
+			if (expectedMap == null) {
 				expectedMap = new IdentityHashMap<>();
-				bySource = sourceMap;
 				expectedArgs = expectedMap;
 			}
+			List<BlockNode> sources = candidate.getSources();
 			expectedMap.put(phiInsn, sources.size());
-			for (BlockNode source : sources) {
-				sourceMap.computeIfAbsent(source, k -> new ArrayList<>()).add(phiInsn);
+			if (candidate.getBindMode() == ExceptionPhiBindMode.BEFORE_THROW) {
+				if (insnMap == null) {
+					insnMap = new IdentityHashMap<>();
+					beforeInsn = insnMap;
+				}
+				for (BlockNode source : sources) {
+					InsnNode throwInsn = findFirstProtectedThrowInsn(mth, candidate.getHandler(), source);
+					if (throwInsn != null) {
+						insnMap.computeIfAbsent(throwInsn, k -> new ArrayList<>()).add(phiInsn);
+					}
+				}
+			} else {
+				if (sourceMap == null) {
+					sourceMap = new HashMap<>();
+					atBlockEnd = sourceMap;
+				}
+				for (BlockNode source : sources) {
+					sourceMap.computeIfAbsent(source, k -> new ArrayList<>()).add(phiInsn);
+				}
 			}
 		}
 
@@ -996,9 +1064,14 @@ public class SSATransform extends AbstractVisitor {
 			return expectedMap != null && expectedMap.containsKey(phiInsn);
 		}
 
-		public List<PhiInsn> getForSource(BlockNode source) {
-			Map<BlockNode, List<PhiInsn>> sourceMap = bySource;
+		public List<PhiInsn> getAtBlockEnd(BlockNode source) {
+			Map<BlockNode, List<PhiInsn>> sourceMap = atBlockEnd;
 			return sourceMap == null ? List.of() : sourceMap.getOrDefault(source, List.of());
+		}
+
+		public List<PhiInsn> getBeforeInsn(InsnNode insn) {
+			Map<InsnNode, List<PhiInsn>> insnMap = beforeInsn;
+			return insnMap == null ? List.of() : insnMap.getOrDefault(insn, List.of());
 		}
 
 		public void checkComplete(MethodNode mth) {
@@ -1030,12 +1103,17 @@ public class SSATransform extends AbstractVisitor {
 		private final int regNum;
 		private final List<BlockNode> sources;
 		private final PhiInsn existingPhi;
+		private final ExceptionHandler handler;
+		private final ExceptionPhiBindMode bindMode;
 
-		private ExceptionPhiCandidate(BlockNode handlerBlock, int regNum, List<BlockNode> sources, PhiInsn existingPhi) {
+		private ExceptionPhiCandidate(BlockNode handlerBlock, int regNum, List<BlockNode> sources,
+				PhiInsn existingPhi, ExceptionHandler handler, ExceptionPhiBindMode bindMode) {
 			this.handlerBlock = handlerBlock;
 			this.regNum = regNum;
 			this.sources = sources;
 			this.existingPhi = existingPhi;
+			this.handler = handler;
+			this.bindMode = bindMode;
 		}
 
 		public BlockNode getHandlerBlock() {
@@ -1053,6 +1131,19 @@ public class SSATransform extends AbstractVisitor {
 		public PhiInsn getExistingPhi() {
 			return existingPhi;
 		}
+
+		public ExceptionHandler getHandler() {
+			return handler;
+		}
+
+		public ExceptionPhiBindMode getBindMode() {
+			return bindMode;
+		}
+	}
+
+	private enum ExceptionPhiBindMode {
+		BLOCK_END,
+		BEFORE_THROW
 	}
 
 	private static void bindPhiArg(RenameState state, PhiInsn phiInsn) {

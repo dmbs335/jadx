@@ -115,6 +115,15 @@ public class RegionMaker {
 	}
 
 	public Region makeMthRegion() {
+		// Exception edges are represented by synthetic splitter successors. Handler entries belong
+		// exclusively to their handler regions and must not also be traversed as normal method flow.
+		// Otherwise the same blocks can be emitted once in the try body and again in its catch branch.
+		for (var handler : mth.getExceptionHandlers()) {
+			BlockNode handlerBlock = handler.getHandlerBlock();
+			if (handlerBlock != null) {
+				stack.addExit(handlerBlock);
+			}
+		}
 		Region region = makeRegion(mth.getEnterBlock());
 		restoreLinearSyntheticMoveBlocks(region);
 		if (unsafeDuplicatedBlocksCount != 0) {

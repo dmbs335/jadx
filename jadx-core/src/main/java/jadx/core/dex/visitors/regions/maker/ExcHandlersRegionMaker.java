@@ -26,6 +26,7 @@ import jadx.core.dex.regions.Region;
 import jadx.core.dex.trycatch.ExcHandlerAttr;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.trycatch.TryCatchBlockAttr;
+import jadx.core.dex.visitors.regions.ProcessTryCatchRegions;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.RegionUtils;
 
@@ -96,25 +97,65 @@ public class ExcHandlersRegionMaker {
 	 * Search handlers successor blocks aren't included in any region.
 	 */
 	private @Nullable IRegion processHandlersOutBlocks(List<TryCatchBlockAttr> tcs) {
-		Set<IBlock> allRegionBlocks = new HashSet<>();
-		RegionUtils.getAllRegionBlocks(mth.getRegion(), allRegionBlocks);
+		Set<IBlock> mainRegionBlocks = new HashSet<>();
+		RegionUtils.getAllRegionBlocks(mth.getRegion(), mainRegionBlocks);
+		Set<IBlock> allRegionBlocks = new HashSet<>(mainRegionBlocks);
 
 		Set<IBlock> successorBlocks = new HashSet<>();
+		Set<IBlock> resourceSuccessorBlocks = new HashSet<>();
 		for (TryCatchBlockAttr tc : tcs) {
+			Set<IBlock> trySuccessorBlocks = new HashSet<>();
 			for (ExceptionHandler handler : tc.getHandlers()) {
 				IContainer region = handler.getHandlerRegion();
 				if (region != null) {
 					IBlock lastBlock = RegionUtils.getLastBlock(region);
 					if (lastBlock instanceof BlockNode) {
-						successorBlocks.addAll(((BlockNode) lastBlock).getSuccessors());
+						trySuccessorBlocks.addAll(((BlockNode) lastBlock).getSuccessors());
 					} else {
-						collectHandlerBoundarySuccessors(region, successorBlocks);
+						collectHandlerBoundarySuccessors(region, trySuccessorBlocks);
 					}
 					RegionUtils.getAllRegionBlocks(region, allRegionBlocks);
 				}
 			}
+			successorBlocks.addAll(trySuccessorBlocks);
+			if (ProcessTryCatchRegions.containsResourceSuppressionTry(tc)) {
+				resourceSuccessorBlocks.addAll(trySuccessorBlocks);
+			}
 		}
-		successorBlocks.removeAll(allRegionBlocks);
+		if (!resourceSuccessorBlocks.isEmpty()) {
+			Set<IBlock> handlerOutBlocks = new HashSet<>();
+			Set<IBlock> regularSuccessorBlocks = new HashSet<>(successorBlocks);
+			regularSuccessorBlocks.removeAll(resourceSuccessorBlocks);
+			regularSuccessorBlocks.removeAll(allRegionBlocks);
+			handlerOutBlocks.addAll(regularSuccessorBlocks);
+			for (IBlock successor : resourceSuccessorBlocks) {
+				if (successor instanceof BlockNode) {
+					BlockNode successorBlock = (BlockNode) successor;
+					BlockNode terminalReturn = findTerminalReturnTail(successorBlock);
+					if (terminalReturn != null) {
+						if (!allRegionBlocks.contains(terminalReturn)
+								|| mainRegionBlocks.contains(terminalReturn)
+										&& detachFromPlainRegion(mth.getRegion(), terminalReturn)) {
+							// Empty connector blocks can make several handlers reach the same return. Use the
+							// terminal block as their canonical shared continuation and emit it exactly once.
+							handlerOutBlocks.add(terminalReturn);
+						}
+						continue;
+					}
+				}
+				if (!allRegionBlocks.contains(successor)
+						|| mainRegionBlocks.contains(successor)
+								&& detachFromPlainRegion(mth.getRegion(), successor)) {
+					// A non-terminal handler successor can already be present in the main region when it is
+					// the shared finally/continuation path. Move it after the try/catch instead of either
+					// duplicating it or leaving the handlers without their common tail.
+					handlerOutBlocks.add(successor);
+				}
+			}
+			successorBlocks = handlerOutBlocks;
+		} else {
+			successorBlocks.removeAll(allRegionBlocks);
+		}
 		if (successorBlocks.isEmpty()) {
 			return null;
 		}
@@ -128,6 +169,39 @@ public class ExcHandlersRegionMaker {
 			}
 		}
 		return excOutRegion;
+	}
+
+	private static @Nullable BlockNode findTerminalReturnTail(BlockNode start) {
+		Set<BlockNode> visited = new HashSet<>();
+		BlockNode block = start;
+		while (visited.add(block)) {
+			List<InsnNode> generatedInsns = block.getInstructions().stream()
+					.filter(insn -> !insn.contains(AFlag.DONT_GENERATE))
+					.toList();
+			if (!generatedInsns.isEmpty()) {
+				return generatedInsns.size() == 1 && generatedInsns.get(0).getType() == InsnType.RETURN
+						? block
+						: null;
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return null;
+			}
+			block = successors.get(0);
+		}
+		return null;
+	}
+
+	private static boolean detachFromPlainRegion(IRegion region, IBlock target) {
+		if (region instanceof Region && region.getSubBlocks().remove(target)) {
+			return true;
+		}
+		for (IContainer container : region.getSubBlocks()) {
+			if (container instanceof IRegion && detachFromPlainRegion((IRegion) container, target)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
