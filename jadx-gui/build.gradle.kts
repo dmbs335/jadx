@@ -204,7 +204,11 @@ launch4j {
 	downloadUrl.set("https://www.oracle.com/java/technologies/downloads/#jdk21-windows")
 	supportUrl.set("https://github.com/skylot/jadx")
 
-	bundledJrePath.set(if (project.hasProperty("bundleJRE")) "%EXEDIR%/jre" else "%JAVA_HOME%")
+	// Search an explicitly configured JDK, PATH and the Windows registry for the
+	// regular bundle. Launch4j 3.50 stops after the configured path when only
+	// JAVA_HOME is specified, which made the EXE silently unusable on otherwise
+	// valid Java installations without JAVA_HOME.
+	bundledJrePath.set(if (project.hasProperty("bundleJRE")) "%EXEDIR%/jre" else "%JAVA_HOME%;%PATH%")
 	classpath.set(
 		tasks
 			.getByName("shadowJar")
@@ -227,11 +231,22 @@ runtime {
 	addOptions("--strip-debug", "--no-header-files", "--no-man-pages")
 	addModules(
 		"java.desktop",
+		"java.logging",
+		"java.management",
 		"java.naming",
+		"java.prefs",
+		"java.scripting",
+		"java.sql",
 		"java.xml",
 		// needed for "https" protocol to download plugins and updates
 		"jdk.crypto.cryptoki",
+		"jdk.crypto.ec",
 		"jdk.accessibility",
+		"jdk.charsets",
+		"jdk.localedata",
+		"jdk.management",
+		"jdk.unsupported",
+		"jdk.zipfs",
 	)
 	jpackage {
 		val os = DefaultNativePlatform.getCurrentOperatingSystem()
@@ -281,7 +296,7 @@ runtime {
 }
 
 val copyDistWin =
-	tasks.register<Copy>("copyDistWin") {
+	tasks.register<Sync>("copyDistWin") {
 		description = "Copy files for Windows bundle"
 
 		val libTask = tasks.getByName("shadowJar")
@@ -295,12 +310,19 @@ val copyDistWin =
 		from(exeTask.outputs) {
 			include("*.exe")
 		}
+		from("$projectDir/dist/windows") {
+			include("jadx*.bat")
+			into("bin")
+		}
+		from("$rootDir") {
+			include("README.md", "NOTICE", "LICENSE")
+		}
 		into(layout.buildDirectory.dir("jadx-gui-win"))
 		duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 	}
 
 val copyDistWinWithJre =
-	tasks.register<Copy>("copyDistWinWithJre") {
+	tasks.register<Sync>("copyDistWinWithJre") {
 		description = "Copy files for Windows with JRE bundle"
 
 		val jreTask = tasks.runtime.get()
@@ -319,6 +341,13 @@ val copyDistWinWithJre =
 		dependsOn(exeTask)
 		from(exeTask.outputs) {
 			include("*.exe")
+		}
+		from("$projectDir/dist/windows") {
+			include("jadx*.bat")
+			into("bin")
+		}
+		from("$rootDir") {
+			include("README.md", "NOTICE", "LICENSE")
 		}
 		into(layout.buildDirectory.dir("jadx-gui-with-jre-win"))
 		duplicatesStrategy = DuplicatesStrategy.EXCLUDE

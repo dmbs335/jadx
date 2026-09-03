@@ -49,6 +49,7 @@ After download unpack zip file go to `bin` directory and run:
 On Windows run `.bat` files with double-click\
 **Note:** ensure you have installed Java 11 or later 64-bit version.
 For Windows, you can download it from [oracle.com](https://www.oracle.com/java/technologies/downloads/#jdk17-windows) (select x64 Installer).
+Alternatively, use the `with-jre-win` package, which includes a compatible runtime for both `jadx-gui.exe` and the launchers in `bin`.
 
 ### Install
 - Arch Linux

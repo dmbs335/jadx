@@ -151,7 +151,7 @@ val copyArtifacts =
 	tasks.register<Sync>("copyArtifacts") {
 		val jarCliPattern = "jadx-cli-(.*)-all.jar".toPattern()
 		from(tasks.getByPath(":jadx-cli:installShadowDist")) {
-			exclude("**/*.jar")
+			exclude("**/*.jar", "**/*.bat")
 			filter { line ->
 				jarCliPattern
 					.matcher(line)
@@ -162,8 +162,12 @@ val copyArtifacts =
 		}
 		val jarGuiPattern = "jadx-gui-(.*)-all.jar".toPattern()
 		from(tasks.getByPath(":jadx-gui:installShadowDist")) {
-			exclude("**/*.jar")
+			exclude("**/*.jar", "**/*.bat")
 			filter { line -> jarGuiPattern.matcher(line).replaceAll("jadx-$1-all.jar") }
+		}
+		from("$rootDir/jadx-gui/dist/windows") {
+			include("jadx*.bat")
+			into("bin")
 		}
 		from(tasks.getByPath(":jadx-gui:installShadowDist")) {
 			include("**/*.jar")
