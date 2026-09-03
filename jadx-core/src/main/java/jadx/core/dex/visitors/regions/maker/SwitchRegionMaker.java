@@ -127,13 +127,37 @@ public final class SwitchRegionMaker {
 		if (out == null
 				|| defaultCase == null
 				|| defaultCase == out
-				|| !defaultCase.contains(AFlag.TRY_ENTER)
-				|| !defaultCase.contains(AFlag.TRY_LEAVE)
 				|| defaultCase.getInstructions().isEmpty()
 				|| !BlockUtils.isPathExists(defaultCase, out)) {
 			return out;
 		}
-		return hasResourceSuppressionHandler(defaultCase) ? defaultCase : out;
+		if (defaultCase.contains(AFlag.TRY_LEAVE)
+				&& leavesExceptionScope(defaultCase, out)) {
+			return defaultCase;
+		}
+		return defaultCase.contains(AFlag.TRY_ENTER)
+				&& defaultCase.contains(AFlag.TRY_LEAVE)
+				&& hasResourceSuppressionHandler(defaultCase)
+						? defaultCase
+						: out;
+	}
+
+	private static boolean leavesExceptionScope(BlockNode from, BlockNode to) {
+		Set<ExceptionHandler> fromHandlers = collectBlockHandlers(from);
+		if (fromHandlers.isEmpty()) {
+			return false;
+		}
+		Set<ExceptionHandler> toHandlers = collectBlockHandlers(to);
+		return !fromHandlers.equals(toHandlers);
+	}
+
+	private static Set<ExceptionHandler> collectBlockHandlers(BlockNode block) {
+		Set<ExceptionHandler> handlers = new HashSet<>();
+		addHandlers(handlers, block.get(AType.EXC_CATCH));
+		for (InsnNode insn : block.getInstructions()) {
+			addHandlers(handlers, insn.get(AType.EXC_CATCH));
+		}
+		return handlers;
 	}
 
 	private static boolean hasResourceSuppressionHandler(MethodNode mth, IContainer container) {
@@ -206,7 +230,48 @@ public final class SwitchRegionMaker {
 		boolean resourceCleanupSwitch = hasResourceSuppressionHandler(mth, sw);
 		for (SwitchRegion.CaseInfo caseInfo : sw.getCases()) {
 			insertBreaksForCase(mth, sw, caseInfo.getContainer(), resourceCleanupSwitch);
+			removeRedundantSyntheticContinues(mth, caseInfo.getContainer());
 		}
+	}
+
+	private static void removeRedundantSyntheticContinues(MethodNode mth, IContainer caseContainer) {
+		BlockSet caseBlocks = new BlockSet(mth);
+		RegionUtils.visitBlockNodes(mth, caseContainer, caseBlocks::add);
+		RegionUtils.visitBlockNodes(mth, caseContainer, block -> {
+			InsnNode continueInsn = BlockUtils.getLastInsn(block);
+			if (continueInsn == null
+					|| continueInsn.getType() != InsnType.CONTINUE
+					|| !continueInsn.contains(AFlag.SYNTHETIC)) {
+				return;
+			}
+			List<LoopInfo> targetLoops = continueInsn.getAll(AType.LOOP);
+			if (targetLoops.size() != 1) {
+				return;
+			}
+			LoopInfo targetLoop = targetLoops.get(0);
+			BlockNode current = block;
+			Set<BlockNode> visited = new HashSet<>();
+			while (visited.size() < 16 && visited.add(current)) {
+				List<BlockNode> successors = current.getCleanSuccessors().stream()
+						.filter(caseBlocks::contains)
+						.toList();
+				if (successors.size() != 1) {
+					return;
+				}
+				current = successors.get(0);
+				InsnNode nextContinue = BlockUtils.getLastInsn(current);
+				if (nextContinue != null
+						&& nextContinue.getType() == InsnType.CONTINUE
+						&& nextContinue.contains(AFlag.SYNTHETIC)
+						&& nextContinue.getAll(AType.LOOP).contains(targetLoop)) {
+					block.getInstructions().remove(continueInsn);
+					return;
+				}
+				if (current.getInstructions().stream().anyMatch(insn -> !insn.contains(AFlag.DONT_GENERATE))) {
+					return;
+				}
+			}
+		});
 	}
 
 	private void addCases(SwitchRegion sw, @Nullable BlockNode out,
@@ -1205,16 +1270,25 @@ public final class SwitchRegionMaker {
 		if (!(last instanceof BlockNode)) {
 			return false;
 		}
-		BlockNode loopEnd = (BlockNode) last;
-		if (!loopEnd.contains(AFlag.LOOP_END)) {
+		BlockNode current = (BlockNode) last;
+		if (!current.contains(AFlag.LOOP_END)) {
 			return false;
 		}
-		for (BlockNode predecessor : loopEnd.getPredecessors()) {
-			if (caseBlocks.contains(predecessor)) {
-				InsnNode lastInsn = BlockUtils.getLastInsn(predecessor);
-				if (lastInsn != null && lastInsn.getType() == InsnType.CONTINUE) {
-					return true;
-				}
+		Set<BlockNode> visited = new HashSet<>();
+		while (visited.size() < 16 && visited.add(current)) {
+			List<BlockNode> casePredecessors = current.getPredecessors().stream()
+					.filter(caseBlocks::contains)
+					.toList();
+			if (casePredecessors.size() != 1) {
+				return false;
+			}
+			current = casePredecessors.get(0);
+			InsnNode lastInsn = BlockUtils.getLastInsn(current);
+			if (lastInsn != null && lastInsn.getType() == InsnType.CONTINUE) {
+				return true;
+			}
+			if (current.getInstructions().stream().anyMatch(insn -> !insn.contains(AFlag.DONT_GENERATE))) {
+				return false;
 			}
 		}
 		return false;

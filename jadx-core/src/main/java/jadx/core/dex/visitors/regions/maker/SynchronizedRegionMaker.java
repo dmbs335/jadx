@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.instructions.ConstClassNode;
 import jadx.core.dex.instructions.IfNode;
@@ -147,18 +148,42 @@ public class SynchronizedRegionMaker {
 		}
 		if (continuation != null) {
 			for (BlockNode directLoopBack : directLoopBacks) {
-				insertExplicitContinue(directLoopBack);
+				insertExplicitContinue(directLoopBack, innerLoop);
 			}
 		}
 		return continuation;
 	}
 
-	private static void insertExplicitContinue(BlockNode block) {
-		if (block.getInstructions().stream().anyMatch(insn -> insn.getType() == InsnType.CONTINUE)) {
+	private static void insertExplicitContinue(BlockNode block, LoopInfo loop) {
+		BlockNode current = block;
+		Set<BlockNode> visited = new HashSet<>();
+		boolean crossesEnclosingMonitorExit = false;
+		while (current != null && visited.size() < 16 && visited.add(current)) {
+			if (current.getInstructions().stream().anyMatch(insn -> insn.getType() == InsnType.CONTINUE)) {
+				return;
+			}
+			if (current.getInstructions().stream().anyMatch(insn -> insn.getType() == InsnType.MONITOR_EXIT)) {
+				crossesEnclosingMonitorExit = true;
+			}
+			if (current == loop.getStart() || current == loop.getEnd()) {
+				break;
+			}
+			List<BlockNode> successors = current.getCleanSuccessors().stream()
+					.filter(loop.getLoopBlocks()::contains)
+					.toList();
+			if (successors.size() != 1) {
+				break;
+			}
+			current = successors.get(0);
+		}
+		if (crossesEnclosingMonitorExit) {
+			// The enclosing synchronized region owns this loop exit and will place the continue
+			// after its monitor-exit. Adding one here creates two adjacent jump statements.
 			return;
 		}
 		InsnNode continueInsn = new InsnNode(InsnType.CONTINUE, 0);
 		continueInsn.add(AFlag.SYNTHETIC);
+		continueInsn.addAttr(AType.LOOP, loop);
 		block.getInstructions().add(continueInsn);
 	}
 
@@ -167,6 +192,9 @@ public class SynchronizedRegionMaker {
 		Set<BlockNode> visited = new HashSet<>();
 		while (block != null && visited.size() < 16 && visited.add(block)) {
 			if (block == loop.getStart() || block == loop.getEnd()) {
+				return true;
+			}
+			if (block.getInstructions().stream().anyMatch(insn -> insn.getType() == InsnType.CONTINUE)) {
 				return true;
 			}
 			if (block.getInstructions().stream().anyMatch(insn -> !insn.contains(AFlag.DONT_GENERATE))) {

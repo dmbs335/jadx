@@ -194,12 +194,25 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		if (first.getTopSplitter() != second.getTopSplitter()) {
 			return false;
 		}
+		if (hasCatchAllHandler(first)
+				&& !hasCatchAllHandler(second)
+				&& first.getBlocks().size() > second.getBlocks().size()
+				&& first.getBlocks().containsAll(second.getBlocks())) {
+			// A catch-all range which also covers the typed handler is the compiler's
+			// unextracted finally wrapper. Install it first so the typed catch remains
+			// inside and an exception is not cleaned up before it reaches that catch.
+			return true;
+		}
 		for (TryCatchBlockAttr outer = second.getOuterTryBlock(); outer != null; outer = outer.getOuterTryBlock()) {
 			if (outer == first) {
 				return true;
 			}
 		}
 		return false;
+	}
+
+	private static boolean hasCatchAllHandler(TryCatchBlockAttr tryBlock) {
+		return tryBlock.getHandlers().stream().anyMatch(ExceptionHandler::isCatchAll);
 	}
 
 	private static boolean checkAndWrap(MethodNode mth, List<TryCatchBlockAttr> tryBlocks, IRegion region) {

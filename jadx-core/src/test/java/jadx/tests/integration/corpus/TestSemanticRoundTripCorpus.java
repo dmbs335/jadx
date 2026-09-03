@@ -1668,6 +1668,70 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	public static class NestedMonitorSwitchFlow {
+		private final Object outerLock = new Object();
+		private final Object innerLock = new Object();
+		private String observed;
+
+		private String run(int mode) {
+			StringBuilder trace = new StringBuilder();
+			outer: for (int i = 0; i < 3; i++) {
+				synchronized (outerLock) {
+					trace.append('A').append(i);
+					synchronized (innerLock) {
+						trace.append('B');
+						try {
+							trace.append('T');
+							if (i == 1) {
+								switch (mode) {
+									case 0:
+										continue outer;
+									case 1:
+										break outer;
+									case 2:
+										return trace.append('R').toString();
+									case 3:
+										throw new IllegalArgumentException("caught");
+									default:
+										break;
+								}
+							}
+							trace.append('N');
+						} catch (IllegalArgumentException e) {
+							trace.append('X');
+						} finally {
+							trace.append('F');
+							observed = trace.toString();
+						}
+						trace.append('C');
+					}
+					trace.append('D');
+				}
+				trace.append('Z');
+			}
+			return trace.toString();
+		}
+
+		private void assertRun(int mode, String expectedResult, String expectedObserved) {
+			String result = run(mode);
+			if (!expectedResult.equals(result) || !expectedObserved.equals(observed)) {
+				throw new AssertionError("nested monitor switch " + mode + ": " + result + " | " + observed);
+			}
+		}
+
+		public void check() {
+			String first = "A0BTNFCDZ";
+			String third = "A2BTNFCDZ";
+			assertRun(0, first + "A1BTF" + third, first + "A1BTF" + "A2BTNF");
+			assertRun(1, first + "A1BTF", first + "A1BTF");
+			assertRun(2, first + "A1BTR", first + "A1BTRF");
+			assertRun(3, first + "A1BTXFCDZ" + third, first + "A1BTXFCDZ" + "A2BTNF");
+			assertRun(9,
+					first + "A1BTNFCDZ" + third,
+					first + "A1BTNFCDZ" + "A2BTNF");
+		}
+	}
+
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testComplexLoopFlow() {
 		getClassNode(ComplexLoopFlow.class);
@@ -1871,6 +1935,11 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testMultiResourceAbruptFlow() {
 		getClassNode(MultiResourceAbruptFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testNestedMonitorSwitchFlow() {
+		getClassNode(NestedMonitorSwitchFlow.class);
 	}
 
 }
