@@ -79,7 +79,7 @@ public class SSATransform extends AbstractVisitor {
 		ExceptionPhiData exceptionPhiData = placeExceptionHandlerPhis(mth, la);
 		renameVariables(mth, exceptionPhiData);
 		exceptionPhiData.checkComplete(mth);
-		fixLastAssignInTry(mth);
+		fixLastAssignInTry(mth, exceptionPhiData);
 		removeBlockerInsns(mth);
 		tryToFixUselessPhi(mth);
 		markThisArgs(mth.getThisArg());
@@ -1048,6 +1048,7 @@ public class SSATransform extends AbstractVisitor {
 		private Map<BlockNode, List<PhiInsn>> atBlockEnd;
 		private Map<InsnNode, List<PhiInsn>> beforeInsn;
 		private Map<PhiInsn, Integer> expectedArgs;
+		private Set<PhiInsn> beforeThrowPhis;
 
 		public void add(MethodNode mth, PhiInsn phiInsn, ExceptionPhiCandidate candidate) {
 			Map<BlockNode, List<PhiInsn>> sourceMap = atBlockEnd;
@@ -1059,6 +1060,10 @@ public class SSATransform extends AbstractVisitor {
 			}
 			List<BlockNode> sources = candidate.getSources();
 			if (candidate.getBindMode() == ExceptionPhiBindMode.BEFORE_THROW) {
+				if (beforeThrowPhis == null) {
+					beforeThrowPhis = Collections.newSetFromMap(new IdentityHashMap<>());
+				}
+				beforeThrowPhis.add(phiInsn);
 				if (insnMap == null) {
 					insnMap = new IdentityHashMap<>();
 					beforeInsn = insnMap;
@@ -1107,6 +1112,10 @@ public class SSATransform extends AbstractVisitor {
 		public boolean isExceptionPhi(PhiInsn phiInsn) {
 			Map<PhiInsn, Integer> expectedMap = expectedArgs;
 			return expectedMap != null && expectedMap.containsKey(phiInsn);
+		}
+
+		public boolean isBeforeThrowPhi(PhiInsn phiInsn) {
+			return beforeThrowPhis != null && beforeThrowPhis.contains(phiInsn);
 		}
 
 		public List<PhiInsn> getAtBlockEnd(BlockNode source) {
@@ -1211,26 +1220,27 @@ public class SSATransform extends AbstractVisitor {
 	/**
 	 * Fix last try/catch assign instruction
 	 */
-	private static void fixLastAssignInTry(MethodNode mth) {
+	private static void fixLastAssignInTry(MethodNode mth, ExceptionPhiData exceptionPhiData) {
 		for (BlockNode block : mth.getBasicBlocks()) {
 			PhiListAttr phiList = block.get(AType.PHI_LIST);
 			if (phiList != null) {
 				ExcHandlerAttr handlerAttr = block.get(AType.EXC_HANDLER);
 				if (handlerAttr != null) {
 					for (PhiInsn phi : phiList.getList()) {
-						fixPhiInTryCatch(mth, phi, handlerAttr);
+						fixPhiInTryCatch(mth, phi, handlerAttr, exceptionPhiData.isBeforeThrowPhi(phi));
 					}
 				}
 			}
 		}
 	}
 
-	private static void fixPhiInTryCatch(MethodNode mth, PhiInsn phi, ExcHandlerAttr handlerAttr) {
+	private static void fixPhiInTryCatch(
+			MethodNode mth, PhiInsn phi, ExcHandlerAttr handlerAttr, boolean beforeThrowPhi) {
 		int argsCount = phi.getArgsCount();
 		int k = 0;
 		while (k < argsCount) {
 			RegisterArg arg = phi.getArg(k);
-			if (shouldSkipInsnResult(mth, arg.getAssignInsn(), handlerAttr)) {
+			if (shouldSkipInsnResult(mth, arg.getAssignInsn(), handlerAttr, beforeThrowPhi)) {
 				phi.removeArg(arg);
 				argsCount--;
 			} else {
@@ -1242,12 +1252,15 @@ public class SSATransform extends AbstractVisitor {
 		}
 	}
 
-	private static boolean shouldSkipInsnResult(MethodNode mth, InsnNode insn, ExcHandlerAttr handlerAttr) {
+	private static boolean shouldSkipInsnResult(
+			MethodNode mth, InsnNode insn, ExcHandlerAttr handlerAttr, boolean beforeThrowPhi) {
 		if (insn != null
 				&& insn.getResult() != null
 				&& insn.contains(AFlag.TRY_LEAVE)) {
 			CatchAttr catchAttr = BlockUtils.getCatchAttrForInsn(mth, insn);
-			return catchAttr != null && catchAttr.getHandlers().contains(handlerAttr.getHandler());
+			if (catchAttr != null && catchAttr.getHandlers().contains(handlerAttr.getHandler())) {
+				return !beforeThrowPhi;
+			}
 		}
 		return false;
 	}

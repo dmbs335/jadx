@@ -1376,6 +1376,124 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	public static class NestedFinallyRethrowStateFlow {
+		private int run(int mode) {
+			int state = 1;
+			try {
+				try {
+					state += 2;
+					if (mode != 0) {
+						throw new IllegalArgumentException("inner");
+					}
+					state *= 3;
+				} catch (IllegalArgumentException e) {
+					state += 5;
+					throw e;
+				} finally {
+					state += 7;
+				}
+				state += 11;
+			} catch (IllegalArgumentException e) {
+				state = state * 3 + 13;
+			} finally {
+				state = state * 2 + 17;
+			}
+			return state;
+		}
+
+		public void check() {
+			int normal = run(0);
+			int rethrown = run(1);
+			if (normal != 71 || rethrown != 133) {
+				throw new AssertionError("nested finally rethrow state: "
+						+ normal + " | " + rethrown);
+			}
+		}
+	}
+
+	public static class FinallyLabeledSwitchExitFlow {
+		private String run(int mode) {
+			StringBuilder trace = new StringBuilder();
+			outer: for (int i = 0; i < 3; i++) {
+				for (int j = 0; j < 3; j++) {
+					try {
+						trace.append('T').append(i).append(j);
+						if (i == 1 && j == 1) {
+							switch (mode) {
+								case 0:
+									continue outer;
+								case 1:
+									break outer;
+								case 2:
+									return trace.append('R').toString();
+								case 3:
+									throw new IllegalStateException("caught");
+								default:
+									trace.append('D');
+							}
+						}
+					} catch (IllegalStateException e) {
+						trace.append('C');
+					} finally {
+						trace.append('F');
+					}
+					trace.append('Z');
+				}
+				trace.append('O');
+			}
+			return trace.toString();
+		}
+
+		public void check() {
+			String continued = run(0);
+			String stopped = run(1);
+			String returned = run(2);
+			String caught = run(3);
+			if (!"T00FZT01FZT02FZOT10FZT11FT20FZT21FZT22FZO".equals(continued)
+					|| !"T00FZT01FZT02FZOT10FZT11F".equals(stopped)
+					|| !"T00FZT01FZT02FZOT10FZT11R".equals(returned)
+					|| !"T00FZT01FZT02FZOT10FZT11CFZT12FZOT20FZT21FZT22FZO".equals(caught)) {
+				throw new AssertionError("finally labeled switch exits: "
+						+ continued + " | " + stopped + " | " + returned + " | " + caught);
+			}
+		}
+	}
+
+	public static class SynchronizedReturnSnapshotFlow {
+		private final Object lock = new Object();
+		private String observed;
+
+		private String run(boolean fail) {
+			StringBuilder trace = new StringBuilder();
+			synchronized (lock) {
+				try {
+					trace.append('T');
+					if (fail) {
+						throw new IllegalArgumentException("fail");
+					}
+					return trace.append('R').toString();
+				} catch (IllegalArgumentException e) {
+					return trace.append('C').toString();
+				} finally {
+					trace.append('F');
+					observed = trace.toString();
+				}
+			}
+		}
+
+		public void check() {
+			String normal = run(false);
+			String normalObserved = observed;
+			String failed = run(true);
+			String failedObserved = observed;
+			if (!"TR".equals(normal) || !"TRF".equals(normalObserved)
+					|| !"TC".equals(failed) || !"TCF".equals(failedObserved)) {
+				throw new AssertionError("synchronized return snapshot: "
+						+ normal + " / " + normalObserved + " | " + failed + " / " + failedObserved);
+			}
+		}
+	}
+
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testComplexLoopFlow() {
 		getClassNode(ComplexLoopFlow.class);
@@ -1554,6 +1672,21 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testSynchronizedAbruptExitFlow() {
 		getClassNode(SynchronizedAbruptExitFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.JAVA8 })
+	public void testNestedFinallyRethrowStateFlow() {
+		getClassNode(NestedFinallyRethrowStateFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testFinallyLabeledSwitchExitFlow() {
+		getClassNode(FinallyLabeledSwitchExitFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testSynchronizedReturnSnapshotFlow() {
+		getClassNode(SynchronizedReturnSnapshotFlow.class);
 	}
 
 }

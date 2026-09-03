@@ -90,7 +90,7 @@ public final class SwitchRegionMaker {
 				if (hasExecutableLoopTail(loop.getEnd())) {
 					commonNormalCaseOut = null;
 				} else {
-					insertContinueInSwitch(block, commonNormalCaseOut, loop.getEnd());
+					insertContinueInSwitch(block, commonNormalCaseOut, loop);
 				}
 			}
 			out = commonNormalCaseOut != null ? commonNormalCaseOut : originalOut;
@@ -727,7 +727,7 @@ public final class SwitchRegionMaker {
 					List<BlockNode> outList = BlockUtils.bitSetToBlocks(mth, outs);
 					outList.remove(loopEnd);
 					BlockNode possibleOut = Utils.getOne(outList);
-					if (possibleOut != null && insertContinueInSwitch(block, possibleOut, loopEnd)) {
+					if (possibleOut != null && insertContinueInSwitch(block, possibleOut, loop)) {
 						outs.clear(loopEnd.getId());
 						out = possibleOut;
 					} else if (possibleOut != null && hasExecutableLoopTail(loopEnd)) {
@@ -949,7 +949,8 @@ public final class SwitchRegionMaker {
 		}
 	}
 
-	private boolean insertContinueInSwitch(BlockNode switchBlock, BlockNode switchOut, BlockNode loopEnd) {
+	private boolean insertContinueInSwitch(BlockNode switchBlock, BlockNode switchOut, LoopInfo loop) {
+		BlockNode loopEnd = loop.getEnd();
 		if (hasExecutableLoopTail(loopEnd)) {
 			return false;
 		}
@@ -964,7 +965,9 @@ public final class SwitchRegionMaker {
 					for (BlockNode p : loopEnd.getPredecessors()) {
 						if (list.contains(p) || p == caseBlock) {
 							if (p.isSynthetic()) {
-								p.getInstructions().add(new InsnNode(InsnType.CONTINUE, 0));
+								InsnNode continueInsn = new InsnNode(InsnType.CONTINUE, 0);
+								addContinueLabelIfNeeded(switchBlock, loop, continueInsn);
+								p.getInstructions().add(continueInsn);
 								inserted = true;
 							}
 							break;
@@ -974,6 +977,16 @@ public final class SwitchRegionMaker {
 			}
 		}
 		return inserted;
+	}
+
+	private void addContinueLabelIfNeeded(BlockNode switchBlock, LoopInfo targetLoop, InsnNode continueInsn) {
+		boolean crossesNestedLoop = mth.getAllLoopsForBlock(switchBlock).stream()
+				.anyMatch(loop -> loop != targetLoop && loop.hasParent(targetLoop));
+		if (crossesNestedLoop) {
+			LoopLabelAttr labelAttr = new LoopLabelAttr(targetLoop);
+			continueInsn.addAttr(labelAttr);
+			targetLoop.getStart().addAttr(labelAttr);
+		}
 	}
 
 	private static boolean hasExecutableLoopTail(BlockNode loopEnd) {
