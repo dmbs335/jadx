@@ -1787,6 +1787,59 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	public static class NestedCatchReturnMutationFlow {
+		private int state;
+		private int index;
+
+		private int next(int value) {
+			state = state * 7 + value;
+			return index++ & 3;
+		}
+
+		private int run(int mode) {
+			int[] values = { 11, 17, 23, 29 };
+			state = 1;
+			index = 0;
+			try {
+				try {
+					values[next(2)] += 3;
+					switch (mode) {
+						case 0:
+							return values[next(5)]++;
+						case 1:
+							throw new IllegalArgumentException("caught");
+						case 2:
+							values[next(7)] = values[next(11)]++;
+							break;
+						default:
+							return state;
+					}
+					return values[next(13)] + state;
+				} catch (IllegalArgumentException e) {
+					values[next(17)] ^= state;
+					return values[(index - 1) & 3];
+				} finally {
+					values[next(19)] += state;
+					state = state * 23 + values[(index + 1) & 3];
+				}
+			} finally {
+				state = state * 29 + index;
+			}
+		}
+
+		public void check() {
+			StringBuilder result = new StringBuilder();
+			for (int mode = 0; mode < 4; mode++) {
+				int value = run(mode);
+				result.append(value).append('/').append(state).append('/').append(index).append(';');
+			}
+			String actual = result.toString();
+			if (!actual.equals("17/330574/3;65/386602/3;3549/16448254/5;9/55537/2;")) {
+				throw new AssertionError("nested catch/return mutation: " + actual);
+			}
+		}
+	}
+
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testComplexLoopFlow() {
 		getClassNode(ComplexLoopFlow.class);
@@ -2000,6 +2053,11 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testDoWhileMonitorFinallyFlow() {
 		getClassNode(DoWhileMonitorFinallyFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testNestedCatchReturnMutationFlow() {
+		getClassNode(NestedCatchReturnMutationFlow.class);
 	}
 
 }
