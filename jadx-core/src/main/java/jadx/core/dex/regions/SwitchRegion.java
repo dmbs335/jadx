@@ -25,7 +25,7 @@ public final class SwitchRegion extends AbstractRegion implements IBranchRegion 
 
 	private final BlockNode header;
 	private final SwitchInsn insn;
-
+	private boolean caseLoopBackRequired;
 	private final List<CaseInfo> cases;
 
 	public SwitchRegion(IRegion parent, BlockNode header, SwitchInsn insn) {
@@ -63,6 +63,14 @@ public final class SwitchRegion extends AbstractRegion implements IBranchRegion 
 
 	public SwitchInsn getInsn() {
 		return insn;
+	}
+
+	public boolean isCaseLoopBackRequired() {
+		return caseLoopBackRequired;
+	}
+
+	public void setCaseLoopBackRequired(boolean caseLoopBackRequired) {
+		this.caseLoopBackRequired = caseLoopBackRequired;
 	}
 
 	public void addCase(List<Object> keysList, IContainer c) {

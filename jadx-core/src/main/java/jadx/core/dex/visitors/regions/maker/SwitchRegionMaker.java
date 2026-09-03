@@ -86,13 +86,13 @@ public final class SwitchRegionMaker {
 		out = adjustOutForProtectedDefault(out, defCase);
 		BlockNode originalOut = out;
 		BlockNode commonNormalCaseOut = findCommonNormalCaseOut(out, blocksMap, stack);
+		LoopInfo switchLoop = getInnermostLoop(block);
 		if (commonNormalCaseOut != null) {
-			LoopInfo loop = getInnermostLoop(block);
-			if (loop != null && hasCasePathAvoidingOut(blocksMap, commonNormalCaseOut, loop)) {
-				if (!canInsertContinueInSwitch(block, loop)) {
+			if (switchLoop != null && hasCasePathAvoidingOut(blocksMap, commonNormalCaseOut, switchLoop)) {
+				if (!canInsertContinueInSwitch(block, switchLoop)) {
 					commonNormalCaseOut = null;
-				} else {
-					insertContinueInSwitch(block, commonNormalCaseOut, loop);
+				} else if (!insertContinueInSwitch(block, commonNormalCaseOut, switchLoop)) {
+					sw.setCaseLoopBackRequired(true);
 				}
 			}
 			out = commonNormalCaseOut != null ? commonNormalCaseOut : originalOut;
@@ -105,6 +105,12 @@ public final class SwitchRegionMaker {
 		if (ktorCioDirectReadTail != null) {
 			mth.addDebugComment("Share Ktor CIO direct-reader close tail at " + ktorCioDirectReadTail);
 			out = ktorCioDirectReadTail;
+		}
+		if (switchLoop != null
+				&& commonNormalCaseOut == null
+				&& out == defCase
+				&& hasCasePathToLoopBackAvoidingOut(blocksMap, out, switchLoop)) {
+			sw.setCaseLoopBackRequired(true);
 		}
 		stack.addExit(out);
 		markAcyclicSharedCasePaths(out, blocksMap.keySet());
@@ -160,16 +166,6 @@ public final class SwitchRegionMaker {
 		return handlers;
 	}
 
-	private static boolean hasResourceSuppressionHandler(MethodNode mth, IContainer container) {
-		boolean[] found = { false };
-		RegionUtils.visitBlockNodes(mth, container, block -> {
-			if (!found[0] && hasResourceSuppressionHandler(block)) {
-				found[0] = true;
-			}
-		});
-		return found[0];
-	}
-
 	private static boolean hasResourceSuppressionHandler(BlockNode block) {
 		Set<ExceptionHandler> handlers = new HashSet<>();
 		addHandlers(handlers, block.get(AType.EXC_CATCH));
@@ -178,6 +174,16 @@ public final class SwitchRegionMaker {
 		}
 		return handlers.stream()
 				.anyMatch(handler -> ProcessTryCatchRegions.containsResourceSuppressionTry(handler.getTryBlock()));
+	}
+
+	private static boolean hasResourceSuppressionHandler(MethodNode mth, IContainer container) {
+		boolean[] found = { false };
+		RegionUtils.visitBlockNodes(mth, container, block -> {
+			if (!found[0] && hasResourceSuppressionHandler(block)) {
+				found[0] = true;
+			}
+		});
+		return found[0];
 	}
 
 	/**
@@ -229,7 +235,8 @@ public final class SwitchRegionMaker {
 	public static void insertBreaks(MethodNode mth, SwitchRegion sw) {
 		boolean resourceCleanupSwitch = hasResourceSuppressionHandler(mth, sw);
 		for (SwitchRegion.CaseInfo caseInfo : sw.getCases()) {
-			insertBreaksForCase(mth, sw, caseInfo.getContainer(), resourceCleanupSwitch);
+			insertBreaksForCase(mth, sw, caseInfo.getContainer(),
+					resourceCleanupSwitch, sw.isCaseLoopBackRequired());
 			removeRedundantSyntheticContinues(mth, caseInfo.getContainer());
 		}
 	}
@@ -407,6 +414,10 @@ public final class SwitchRegionMaker {
 		int bestJoinedCases = 1;
 		long bestDistance = Long.MAX_VALUE;
 		boolean ambiguous = false;
+		BlockNode handlerJoin = null;
+		int bestHandlerCount = 0;
+		long bestHandlerDistance = Long.MAX_VALUE;
+		boolean handlerJoinAmbiguous = false;
 		for (BlockNode candidate : mth.getBasicBlocks()) {
 			/*
 			 * A subset of cases can share a normal continuation while the remaining cases leave an
@@ -433,22 +444,94 @@ public final class SwitchRegionMaker {
 					break;
 				}
 			}
-			if (invalid || joinedCases < 2) {
+			if (invalid || joinedCases == 0) {
 				continue;
 			}
 			if (!preservesHandlerJoin(candidate, caseHandlers, normalReach, enclosingExits)) {
 				continue;
 			}
-			if (joinedCases > bestJoinedCases || joinedCases == bestJoinedCases && distance < bestDistance) {
-				best = candidate;
-				bestJoinedCases = joinedCases;
-				bestDistance = distance;
-				ambiguous = false;
-			} else if (joinedCases == bestJoinedCases && distance == bestDistance && candidate != best) {
-				ambiguous = true;
+			if (joinedCases >= 2) {
+				if (joinedCases > bestJoinedCases || joinedCases == bestJoinedCases && distance < bestDistance) {
+					best = candidate;
+					bestJoinedCases = joinedCases;
+					bestDistance = distance;
+					ambiguous = false;
+				} else if (joinedCases == bestJoinedCases && distance == bestDistance && candidate != best) {
+					ambiguous = true;
+				}
+			} else if (!isPureLoopControlTail(candidate, enclosingExits)) {
+				int handlerJoins = countHandlersReaching(caseHandlers, candidate, enclosingExits);
+				if (handlerJoins == 0) {
+					continue;
+				}
+				if (handlerJoins > bestHandlerCount
+						|| handlerJoins == bestHandlerCount && distance < bestHandlerDistance) {
+					handlerJoin = candidate;
+					bestHandlerCount = handlerJoins;
+					bestHandlerDistance = distance;
+					handlerJoinAmbiguous = false;
+				} else if (handlerJoins == bestHandlerCount
+						&& distance == bestHandlerDistance && candidate != handlerJoin) {
+					handlerJoinAmbiguous = true;
+				}
 			}
 		}
-		return ambiguous ? null : best;
+		if (ambiguous) {
+			return null;
+		}
+		if (best == null || handlerJoin == null || !isPureLoopControlTail(best, enclosingExits)) {
+			return best;
+		}
+		return handlerJoinAmbiguous ? null : handlerJoin;
+	}
+
+	private int countHandlersReaching(
+			Set<ExceptionHandler> handlers, BlockNode candidate, Set<BlockNode> exits) {
+		int count = 0;
+		for (ExceptionHandler handler : handlers) {
+			BlockNode handlerBlock = handler.getHandlerBlock();
+			if (handlerBlock != null && shortestPathDistance(handlerBlock, candidate, exits) >= 0) {
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private boolean isPureLoopControlTail(BlockNode candidate, Set<BlockNode> enclosingExits) {
+		if (mth.getAllLoopsForBlock(candidate).isEmpty()) {
+			return false;
+		}
+		for (InsnNode insn : candidate.getInstructions()) {
+			if (!insn.contains(AFlag.DONT_GENERATE)
+					&& insn.getType() != InsnType.ARITH
+					&& insn.getType() != InsnType.MOVE) {
+				return false;
+			}
+		}
+		BlockSet visited = BlockSet.empty(mth);
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>(candidate.getCleanSuccessors());
+		boolean reachedExit = false;
+		while (!queue.isEmpty() && visited.size() < 16) {
+			BlockNode block = queue.removeFirst();
+			if (enclosingExits.contains(block)) {
+				reachedExit = true;
+				continue;
+			}
+			if (visited.addChecked(block)) {
+				continue;
+			}
+			for (InsnNode insn : block.getInstructions()) {
+				if (!insn.contains(AFlag.DONT_GENERATE) && insn.getType() != InsnType.IF) {
+					return false;
+				}
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.isEmpty()) {
+				return false;
+			}
+			queue.addAll(successors);
+		}
+		return reachedExit && queue.isEmpty();
 	}
 
 	private Set<ExceptionHandler> collectCaseHandlers(List<BlockNode> caseEntries, Set<BlockNode> exits) {
@@ -560,6 +643,17 @@ public final class SwitchRegionMaker {
 		loop.getExitEdges().forEach(edge -> loopBoundaries.add(edge.getTarget()));
 		for (BlockNode caseBlock : blocksMap.keySet()) {
 			if (hasPathToAnyAvoiding(caseBlock, loopBoundaries, out)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private boolean hasCasePathToLoopBackAvoidingOut(
+			Map<BlockNode, List<Object>> blocksMap, BlockNode out, LoopInfo loop) {
+		Set<BlockNode> loopBack = Set.of(loop.getStart(), loop.getEnd());
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			if (hasPathToAnyAvoiding(caseBlock, loopBack, out)) {
 				return true;
 			}
 		}
@@ -1123,7 +1217,8 @@ public final class SwitchRegionMaker {
 	 * {@link SwitchBreakVisitor}
 	 */
 	private static void insertBreaksForCase(
-			MethodNode mth, SwitchRegion switchRegion, IContainer caseContainer, boolean resourceCleanupSwitch) {
+			MethodNode mth, SwitchRegion switchRegion, IContainer caseContainer,
+			boolean resourceCleanupSwitch, boolean structuredLoopBack) {
 		labelLoopBreaksInsideSwitch(mth, caseContainer);
 		BlockSet caseBlocks = new BlockSet(mth);
 		RegionUtils.visitBlockNodes(mth, caseContainer, caseBlocks::add);
@@ -1152,7 +1247,9 @@ public final class SwitchRegionMaker {
 				if (insertBreak
 						&& region instanceof Region
 						&& canAppendBreak(region)) {
-					LoopInfo loopBack = resourceCleanupSwitch ? findOwnedLoopBack(mth, region) : null;
+					LoopInfo loopBack = resourceCleanupSwitch || structuredLoopBack
+							? findOwnedLoopBack(mth, region, structuredLoopBack)
+							: null;
 					if (loopBack == null) {
 						if (!endsWithLoopContinue(region, caseBlocks)) {
 							region.getSubBlocks().add(buildBreakContainer(switchRegion));
@@ -1166,7 +1263,8 @@ public final class SwitchRegionMaker {
 		});
 	}
 
-	private static @Nullable LoopInfo findOwnedLoopBack(MethodNode mth, IRegion region) {
+	private static @Nullable LoopInfo findOwnedLoopBack(
+			MethodNode mth, IRegion region, boolean allowStructuredFooter) {
 		IBlock last = RegionUtils.getLastBlock(region);
 		if (!(last instanceof BlockNode)) {
 			return null;
@@ -1176,8 +1274,34 @@ public final class SwitchRegionMaker {
 			if (loop.getEnd() == lastBlock && lastBlock.getSuccessors().contains(loop.getStart())) {
 				return loop;
 			}
+			if (allowStructuredFooter && reachesStructuredLoopEnd(lastBlock, loop)) {
+				return loop;
+			}
 		}
 		return null;
+	}
+
+	private static boolean reachesStructuredLoopEnd(BlockNode start, LoopInfo loop) {
+		Set<BlockNode> loopBlocks = loop.getLoopBlocks();
+		Set<BlockNode> visited = new HashSet<>();
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>(start.getCleanSuccessors());
+		boolean reachedEnd = false;
+		while (!queue.isEmpty() && visited.size() < 16) {
+			BlockNode block = queue.removeFirst();
+			if (block == loop.getEnd()) {
+				reachedEnd = true;
+				continue;
+			}
+			if (!loopBlocks.contains(block) || !visited.add(block)) {
+				continue;
+			}
+			if (!block.contains(AFlag.ADDED_TO_REGION)
+					&& block.getInstructions().stream().anyMatch(insn -> !insn.contains(AFlag.DONT_GENERATE))) {
+				return false;
+			}
+			queue.addAll(block.getCleanSuccessors());
+		}
+		return reachedEnd && queue.isEmpty();
 	}
 
 	private static void removePrematureSyntheticContinue(MethodNode mth, IRegion region, LoopInfo loop) {

@@ -1732,6 +1732,61 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	public static class DoWhileMonitorFinallyFlow {
+		private final Object lock = new Object();
+		private String observed;
+
+		private String run(int mode) {
+			StringBuilder trace = new StringBuilder();
+			int i = 0;
+			outer: do {
+				trace.append('A').append(i);
+				synchronized (lock) {
+					trace.append('B');
+					try {
+						switch (i == 1 ? mode : 9) {
+							case 0:
+								continue outer;
+							case 1:
+								break outer;
+							case 2:
+								return trace.append('R').toString();
+							case 3:
+								throw new IllegalStateException("caught");
+							default:
+								trace.append('N');
+						}
+					} catch (IllegalStateException e) {
+						trace.append('X');
+					} finally {
+						trace.append('F');
+						observed = trace.toString();
+					}
+					trace.append('C');
+				}
+				trace.append('D');
+			} while (++i < 3);
+			return trace.toString();
+		}
+
+		private void assertRun(int mode, String expectedResult, String expectedObserved) {
+			String result = run(mode);
+			if (!expectedResult.equals(result) || !expectedObserved.equals(observed)) {
+				throw new AssertionError("do-while monitor/finally " + mode + ": " + result + " | " + observed);
+			}
+		}
+
+		public void check() {
+			String first = "A0BNFCD";
+			String third = "A2BNFCD";
+			assertRun(0, first + "A1BF" + third, first + "A1BF" + "A2BNF");
+			assertRun(1, first + "A1BF", first + "A1BF");
+			assertRun(2, first + "A1BR", first + "A1BRF");
+			assertRun(3, first + "A1BXFCD" + third, first + "A1BXFCD" + "A2BNF");
+			assertRun(9, first + "A1BNFCD" + third, first + "A1BNFCD" + "A2BNF");
+		}
+	}
+
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testComplexLoopFlow() {
 		getClassNode(ComplexLoopFlow.class);
@@ -1940,6 +1995,11 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testNestedMonitorSwitchFlow() {
 		getClassNode(NestedMonitorSwitchFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testDoWhileMonitorFinallyFlow() {
+		getClassNode(DoWhileMonitorFinallyFlow.class);
 	}
 
 }
