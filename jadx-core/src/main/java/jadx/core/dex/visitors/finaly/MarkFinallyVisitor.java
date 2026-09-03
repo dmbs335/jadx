@@ -519,6 +519,9 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 	 * handler on the finally-bearing range.
 	 */
 	private static void mergeForwardingHandlerRanges(MethodNode mth, TryExtractInfo finallyInfo) {
+		if (mth.contains(AType.NORMALIZED_COROUTINE_LOOP)) {
+			return;
+		}
 		List<TryCatchBlockAttr> tryBlocks = mth.getAll(AType.TRY_BLOCKS_LIST);
 		for (TryCatchBlockAttr candidate : tryBlocks) {
 			if (candidate == finallyInfo.tryBlock || candidate.isMerged() || candidate.getHandlers().isEmpty()) {
