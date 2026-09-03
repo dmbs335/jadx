@@ -10,9 +10,13 @@ public class TestExceptionHandlerTypeSplit extends SmaliTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
+				.contains("catch (Exception unused2) {")
+				.contains("catch (Throwable th2) {")
+				.contains("close(fileOutputStream);")
+				.contains("throw th2;")
+				.doesNotContain("th = th2;")
 				.doesNotContain("Type inference failed")
 				.doesNotContain("Failed to insert an additional move")
 				.doesNotContain("??")

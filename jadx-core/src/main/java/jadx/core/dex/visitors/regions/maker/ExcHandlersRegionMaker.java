@@ -290,9 +290,13 @@ public class ExcHandlersRegionMaker {
 
 		BlockNode sharedRethrowExit = findSharedSynchronizedRethrow(start);
 		boolean declaredSynchronized = mth.getAccessFlags().isSynchronized();
-		List<InsnNode> rethrowMoves = findHandlerRethrowMoves(
-				start, sharedRethrowExit, handler, declaredSynchronized);
 		BlockNode handlerOutBlock = BlockUtils.getTryAndHandlerCrossBlock(mth, handler);
+		boolean appendSharedCleanupRethrow = handlerOutBlock != null
+				&& isSharedTerminalRethrow(handlerOutBlock)
+				&& !isSharedSynchronizedRethrow(handlerOutBlock);
+		BlockNode rethrowExit = appendSharedCleanupRethrow ? handlerOutBlock : sharedRethrowExit;
+		List<InsnNode> rethrowMoves = findHandlerRethrowMoves(
+				start, rethrowExit, handler, declaredSynchronized || appendSharedCleanupRethrow);
 		boolean namedRethrowChain = !rethrowMoves.isEmpty()
 				&& rethrowMoves.get(0).getArgsCount() == 1
 				&& rethrowMoves.get(0).getArg(0).isNamed();
@@ -338,6 +342,11 @@ public class ExcHandlersRegionMaker {
 			hideSharedRethrow(sharedRethrowExit);
 		}
 		handler.setHandlerRegion(regionMaker.makeRegion(start));
+		if (handlerOutBlock != null
+				&& handlerOutBlock.contains(AType.EXC_CATCH)
+				&& hasOnlyEmptyPath(start, handlerOutBlock)) {
+			appendSharedHandlerPrefix(handler, handlerOutBlock);
+		}
 		appendSharedTerminalReturn(handler);
 		for (InsnNode rethrowMove : rethrowMoves) {
 			rethrowMove.add(AFlag.DONT_GENERATE);
@@ -347,6 +356,9 @@ public class ExcHandlersRegionMaker {
 			// Keep the handler's NamedArg instance: codegen assigns its collision-free catch name.
 			rethrow.addArg(rethrowMoves.get(0).getArg(0));
 			handler.getHandlerRegion().getSubBlocks().add(new InsnContainer(rethrow));
+		}
+		if (appendSharedCleanupRethrow && namedRethrowChain) {
+			appendSharedCleanupRethrow(handler, handlerOutBlock);
 		}
 
 		ExcHandlerAttr excHandlerAttr = start.get(AType.EXC_HANDLER);
@@ -472,6 +484,105 @@ public class ExcHandlersRegionMaker {
 		BlockNode successor = block.getCleanSuccessors().get(0);
 		return successor.getInstructions().size() == 1
 				&& BlockUtils.getLastInsn(successor).getType() == InsnType.THROW;
+	}
+
+	private static boolean isSharedTerminalRethrow(BlockNode start) {
+		if (start.getPredecessors().size() < 2) {
+			return false;
+		}
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (visited.size() < 8 && visited.add(block)) {
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null && lastInsn.getType() == InsnType.THROW) {
+				return true;
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return false;
+			}
+			block = successors.get(0);
+		}
+		return false;
+	}
+
+	private static boolean hasOnlyEmptyPath(BlockNode start, BlockNode target) {
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != target && visited.size() < 8 && visited.add(block)) {
+			if (block.getInstructions().stream().anyMatch(insn -> !insn.contains(AFlag.DONT_GENERATE))) {
+				return false;
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return false;
+			}
+			block = successors.get(0);
+		}
+		return block == target;
+	}
+
+	private static void appendSharedHandlerPrefix(ExceptionHandler handler, BlockNode start) {
+		List<InsnNode> sharedInsns = new ArrayList<>();
+		boolean complete = false;
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (visited.size() < 8 && visited.add(block)) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.contains(AFlag.DONT_GENERATE)) {
+					continue;
+				}
+				if (insn.getType() == InsnType.IF || insn.getType() == InsnType.SWITCH) {
+					return;
+				}
+				sharedInsns.add(insn);
+			}
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null
+					&& (lastInsn.getType() == InsnType.RETURN || lastInsn.getType() == InsnType.THROW)) {
+				complete = true;
+				break;
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.isEmpty()) {
+				break;
+			}
+			if (successors.size() != 1) {
+				break;
+			}
+			block = successors.get(0);
+		}
+		if (complete && !sharedInsns.isEmpty()) {
+			handler.getHandlerRegion().getSubBlocks().add(new InsnContainer(sharedInsns));
+		}
+	}
+
+	private static void appendSharedCleanupRethrow(ExceptionHandler handler, BlockNode start) {
+		List<InsnNode> cleanupInsns = new ArrayList<>();
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (visited.size() < 8 && visited.add(block)) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.contains(AFlag.DONT_GENERATE)) {
+					continue;
+				}
+				if (insn.getType() == InsnType.THROW) {
+					if (!cleanupInsns.isEmpty()) {
+						handler.getHandlerRegion().getSubBlocks().add(new InsnContainer(cleanupInsns));
+					}
+					InsnNode rethrow = new InsnNode(InsnType.THROW, 1);
+					rethrow.addArg(handler.getArg());
+					handler.getHandlerRegion().getSubBlocks().add(new InsnContainer(rethrow));
+					return;
+				}
+				cleanupInsns.add(insn);
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return;
+			}
+			block = successors.get(0);
+		}
 	}
 
 	/**
