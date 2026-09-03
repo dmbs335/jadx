@@ -901,6 +901,11 @@ public class InsnGen {
 					}
 				}
 				code.add('>');
+			} else if (forceShortName && cls != null && !cls.getGenericTypeParameters().isEmpty()) {
+				// A parameterized enclosing instance cannot instantiate a raw generic inner class
+				// ("outer.new Inner()" is rejected by javac). The erased DEX may not retain the
+				// inner arguments, so use diamond inference to preserve a compilable constructor.
+				code.add("<>");
 			}
 		}
 		generateMethodArguments(code, insn, 0, callMth);
@@ -919,7 +924,11 @@ public class InsnGen {
 			return false;
 		}
 		// instance arg should be of an outer class type
-		if (!instArg.getType().equals(ctrCls.getDeclaringClass().getType())) {
+		ArgType instanceType = instArg.getType();
+		ArgType outerType = ctrCls.getDeclaringClass().getType();
+		if (!instanceType.equals(outerType)
+				&& (!instanceType.isObject() || !outerType.isObject()
+						|| !instanceType.getObject().equals(outerType.getObject()))) {
 			return false;
 		}
 		addArgDot(code, instArg);
