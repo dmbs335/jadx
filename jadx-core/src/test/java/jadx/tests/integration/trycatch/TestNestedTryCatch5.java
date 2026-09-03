@@ -2,7 +2,6 @@ package jadx.tests.integration.trycatch;
 
 import org.junit.jupiter.api.Test;
 
-import jadx.NotYetImplemented;
 import jadx.tests.api.SmaliTest;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
@@ -10,7 +9,6 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestNestedTryCatch5 extends SmaliTest {
 
 	@Test
-	@NotYetImplemented("Extracting finally on loop advancement")
 	public void test() {
 		disableCompilation();
 		assertThat(getClassNodeFromSmali())

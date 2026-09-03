@@ -77,6 +77,8 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 
 		private Set<BlockNode> completeFinallyBlocks = null;
 		private Set<BlockNode> completeCandidateBlocks = null;
+		private final Set<BlockNode> delegatedHandlerBlocks = new HashSet<>();
+		private int expectedCandidateCount;
 
 		private TryExtractInfo(TryCatchBlockAttr tryBlock, TryEdgeScopeGroupMap scopeGroups,
 				ExceptionHandler finallyHandler, Map<BlockNode, List<TryEdge>> fallthroughGroups,
@@ -411,10 +413,9 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		for (InsnNode finallyInsn : insns.keySet()) {
 			List<InsnNode> candidateInsns = insns.get(finallyInsn);
 
-			// For an instruction to have matched, the number of times it has been found must be
-			// equal to the number of edges that the exception handler has which aren't the
-			// finally handler.
-			int expectedCandidates = tryInfo.handlerScopes.size() - 1;
+			// Every normal exit needs an inlined copy. A nested rethrowing catch-all delegates
+			// directly to this finally handler and is excluded from the expected copy count.
+			int expectedCandidates = tryInfo.expectedCandidateCount;
 			if (candidateInsns.size() != expectedCandidates) {
 				ignoredFinallyInsns.add(finallyInsn);
 				ignoredCandidateInsns.addAll(candidateInsns);
@@ -437,9 +438,15 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		for (InsnNode finallyInsn : insnMap.keySet()) {
 			finallyInsn.add(AFlag.FINALLY_INSNS);
 			List<InsnNode> candidateInsns = insnMap.get(finallyInsn);
+			if (!tryInfo.delegatedHandlerBlocks.isEmpty() && !candidateInsns.isEmpty()) {
+				adoptNormalPathInputCodeVars(finallyInsn, candidateInsns.get(0));
+			}
 			for (InsnNode candidateInsn : candidateInsns) {
 				copyCodeVars(finallyInsn, candidateInsn);
 				candidateInsn.add(AFlag.DONT_GENERATE);
+			}
+			if (!candidateInsns.isEmpty()) {
+				copyDelegatedHandlerCodeVars(tryInfo, finallyInsn, candidateInsns.get(0));
 			}
 		}
 		for (BlockNode finallyBlock : tryInfo.completeFinallyBlocks) {
@@ -542,10 +549,17 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		Map<InsnNode, List<InsnNode>> matchingInsns = new HashMap<>();
 		SameInstructionsStrategy sameInstructions = new SameInstructionsStrategyImpl();
 		InsnNode finallyTailInsn = findFinallyTailInsn(finallyStart.block, allHandlerBlocks);
+		tryInfo.expectedCandidateCount = 0;
 		for (TryEdge edge : tryInfo.handlerScopes.keySet()) {
 			if (edge.isHandlerExit() && edge.getExceptionHandler() == tryInfo.finallyHandler) {
 				continue;
 			}
+			boolean needsCopy = needsDuplicatedFinallyCopy(edge);
+			if (!needsCopy) {
+				tryInfo.delegatedHandlerBlocks.addAll(tryInfo.handlerScopes.get(edge));
+				continue;
+			}
+			tryInfo.expectedCandidateCount++;
 			List<BlockNode> handlerBlocks = tryInfo.handlerScopes.get(edge);
 			BlockNode scopeTerminus = null;
 			for (BlockNode edgeTerminusBlock : tryInfo.scopeTerminusGroups.keySet()) {
@@ -620,6 +634,42 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		return matchingInsns;
 	}
 
+	/**
+	 * A rethrowing catch-all delegates its exceptional exit to the enclosing catch-all handler. Such
+	 * a nested handler has no inlined copy of the enclosing finally body; after extraction it is
+	 * covered by the enclosing try/finally region instead. Abrupt but normal exits (break/continue)
+	 * are deliberately retained because compilers inline the finally body on those paths.
+	 */
+	private static boolean needsDuplicatedFinallyCopy(TryEdge edge) {
+		return edge.isNotHandlerExit()
+				|| !edge.getExceptionHandler().isCatchAll()
+				|| !handlerAlwaysThrows(edge.getExceptionHandler().getHandlerBlock());
+	}
+
+	private static boolean handlerAlwaysThrows(BlockNode handlerBlock) {
+		Set<BlockNode> visited = new HashSet<>();
+		LinkedList<BlockNode> queue = new LinkedList<>();
+		queue.add(handlerBlock);
+		boolean throwFound = false;
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (!visited.add(block)) {
+				continue;
+			}
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null && lastInsn.getType() == InsnType.THROW) {
+				throwFound = true;
+				continue;
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.isEmpty()) {
+				return false;
+			}
+			queue.addAll(successors);
+		}
+		return throwFound;
+	}
+
 	private static TraversalStart findFinallyTraversalStart(
 			BlockNode scopeTerminus, List<BlockNode> finallyBlocks) {
 		if (finallyBlocks.contains(scopeTerminus) && !scopeTerminus.isEmpty()) {
@@ -667,6 +717,7 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		}
 		InsnNode matchedInsn = null;
 		TraversalStart matchedStart = null;
+		Set<BlockNode> candidateSet = new HashSet<>(candidateBlocks);
 		Set<BlockNode> visited = new HashSet<>();
 		for (BlockNode block : candidateBlocks) {
 			if (!visited.add(block)) {
@@ -675,8 +726,11 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 			List<InsnNode> insns = block.getInstructions();
 			for (int i = insns.size() - 1; i >= 0; i--) {
 				InsnNode candidateInsn = insns.get(i);
-				if (!candidateInsn.contains(AFlag.TRY_LEAVE)
-						|| !sameInstructions.sameInsns(candidateInsn, finallyTailInsn)) {
+				boolean directTryLeave = candidateInsn.contains(AFlag.TRY_LEAVE);
+				if (!sameInstructions.sameInsns(candidateInsn, finallyTailInsn)
+						|| !directTryLeave
+								&& (!isTryLeaveContinuation(block, candidateSet)
+										|| !isLoopAdvancementSuffix(insns, i + 1))) {
 					continue;
 				}
 				if (matchedInsn != null && matchedInsn != candidateInsn) {
@@ -689,6 +743,51 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		return matchedStart;
 	}
 
+	private static boolean isLoopAdvancementSuffix(List<InsnNode> insns, int start) {
+		boolean updateFound = false;
+		for (int i = start; i < insns.size(); i++) {
+			InsnNode insn = insns.get(i);
+			if (insn.getType() == InsnType.GOTO) {
+				continue;
+			}
+			RegisterArg result = insn.getResult();
+			if (insn.getType() != InsnType.ARITH
+					|| result == null
+					|| !result.getSVar().isUsedInPhi()) {
+				return false;
+			}
+			updateFound = true;
+		}
+		return updateFound;
+	}
+
+	/**
+	 * A normal finally copy can start in the successor of the protected block. This is common for
+	 * loop bodies where the copy is followed by the loop-variable update, so the copied instruction
+	 * itself carries the outer try's {@link AFlag#TRY_ENTER} instead of the inner try's
+	 * {@link AFlag#TRY_LEAVE}. Accept that start only when a predecessor in the same candidate scope
+	 * proves the protected-range exit; walk through empty connector blocks but never through code.
+	 */
+	private static boolean isTryLeaveContinuation(BlockNode start, Set<BlockNode> candidateBlocks) {
+		Set<BlockNode> visited = new HashSet<>();
+		LinkedList<BlockNode> queue = new LinkedList<>(start.getPredecessors());
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (!candidateBlocks.contains(block) || !visited.add(block)) {
+				continue;
+			}
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null) {
+				if (lastInsn.contains(AFlag.TRY_LEAVE)) {
+					return true;
+				}
+				continue;
+			}
+			queue.addAll(block.getPredecessors());
+		}
+		return false;
+	}
+
 	private static @Nullable InsnNode findFinallyTailInsn(
 			BlockNode terminus, List<BlockNode> finallyBlocks) {
 		Set<BlockNode> allowed = new HashSet<>(finallyBlocks);
@@ -698,7 +797,8 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 			List<InsnNode> insns = block.getInstructions();
 			for (int i = insns.size() - 1; i >= 0; i--) {
 				InsnNode insn = insns.get(i);
-				if (insn.getType() != InsnType.RETURN && insn.getType() != InsnType.THROW) {
+				InsnType type = insn.getType();
+				if (type != InsnType.RETURN && type != InsnType.THROW && type != InsnType.GOTO) {
 					return insn;
 				}
 			}
@@ -772,6 +872,52 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		SSAVar fromSsaVar = ((RegisterArg) fromArg).getSVar();
 		SSAVar toSsaVar = ((RegisterArg) toArg).getSVar();
 		toSsaVar.setCodeVar(fromSsaVar.getCodeVar());
+	}
+
+	private static void adoptNormalPathInputCodeVars(InsnNode finallyInsn, InsnNode candidateInsn) {
+		int argsCount = Math.min(finallyInsn.getArgsCount(), candidateInsn.getArgsCount());
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg finallyArg = finallyInsn.getArg(i);
+			InsnArg candidateArg = candidateInsn.getArg(i);
+			if (finallyArg.isRegister() && candidateArg.isRegister()) {
+				((RegisterArg) finallyArg).getSVar()
+						.setCodeVar(((RegisterArg) candidateArg).getSVar().getCodeVar());
+			}
+		}
+	}
+
+	/**
+	 * JVM exception frames can merge a local at the enclosing catch-all entry even though a nested
+	 * handler updates that same slot immediately before rethrowing. SSA then loses the exceptional
+	 * reaching-definition edge. When that handler delegates to the extracted finally, reconnect only
+	 * assignments to the exact physical register used by the matched normal-path operand.
+	 */
+	private static void copyDelegatedHandlerCodeVars(
+			TryExtractInfo tryInfo, InsnNode finallyInsn, InsnNode candidateInsn) {
+		int argsCount = Math.min(finallyInsn.getArgsCount(), candidateInsn.getArgsCount());
+		for (int i = 0; i < argsCount; i++) {
+			InsnArg finallyArg = finallyInsn.getArg(i);
+			InsnArg candidateArg = candidateInsn.getArg(i);
+			if (!finallyArg.isRegister() || !candidateArg.isRegister()) {
+				continue;
+			}
+			RegisterArg finallyReg = (RegisterArg) finallyArg;
+			RegisterArg candidateReg = (RegisterArg) candidateArg;
+			if (finallyReg.getRegNum() != candidateReg.getRegNum()) {
+				continue;
+			}
+			for (BlockNode block : tryInfo.delegatedHandlerBlocks) {
+				for (InsnNode insn : block.getInstructions()) {
+					insn.visitInsns(innerInsn -> {
+						RegisterArg result = innerInsn.getResult();
+						if (result != null && result.getRegNum() == candidateReg.getRegNum()) {
+							result.getSVar().setCodeVar(candidateReg.getSVar().getCodeVar());
+						}
+						return null;
+					});
+				}
+			}
+		}
 	}
 
 	/**

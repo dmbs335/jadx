@@ -1256,6 +1256,77 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	public static class NestedFinallyConditionalTailFlow {
+		private int run(boolean fail, boolean early) {
+			int result = 1;
+			try {
+				try {
+					if (fail) {
+						throw new IllegalArgumentException("fail");
+					}
+					result += 2;
+				} catch (IllegalArgumentException e) {
+					result += 4;
+				} finally {
+					result *= 3;
+				}
+			} finally {
+				result += 5;
+			}
+			if (early) {
+				return result;
+			}
+			return result * 2;
+		}
+
+		public void check() {
+			int normal = run(false, false);
+			int caught = run(true, false);
+			int normalEarly = run(false, true);
+			int caughtEarly = run(true, true);
+			if (normal != 28 || caught != 40 || normalEarly != 14 || caughtEarly != 20) {
+				throw new AssertionError("nested finally conditional tail: "
+						+ normal + " | " + caught + " | " + normalEarly + " | " + caughtEarly);
+			}
+		}
+	}
+
+	public static class NestedFinallyExceptionalStateFlow {
+		private int observed;
+
+		private void run(boolean fail) {
+			int result = 1;
+			try {
+				try {
+					if (fail) {
+						throw new IllegalStateException("fail");
+					}
+					result += 2;
+				} finally {
+					result *= 3;
+				}
+			} finally {
+				result += 5;
+				observed = result;
+			}
+		}
+
+		public void check() {
+			run(false);
+			if (observed != 14) {
+				throw new AssertionError("normal nested finally state: " + observed);
+			}
+			try {
+				run(true);
+				throw new AssertionError("exception expected");
+			} catch (IllegalStateException expected) {
+				if (observed != 8) {
+					throw new AssertionError("exceptional nested finally state: " + observed);
+				}
+			}
+		}
+	}
+
 	public static class SynchronizedAbruptExitFlow {
 		private final Object lock = new Object();
 
@@ -1468,6 +1539,16 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testCatchFinallyExpressionTailFlow() {
 		getClassNode(CatchFinallyExpressionTailFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testNestedFinallyConditionalTailFlow() {
+		getClassNode(NestedFinallyConditionalTailFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testNestedFinallyExceptionalStateFlow() {
+		getClassNode(NestedFinallyExceptionalStateFlow.class);
 	}
 
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })

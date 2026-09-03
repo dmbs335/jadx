@@ -2,6 +2,7 @@ package jadx.core.dex.visitors.regions;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import org.slf4j.Logger;
@@ -17,6 +18,7 @@ import jadx.core.dex.attributes.AType;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.RegisterArg;
+import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IBlock;
 import jadx.core.dex.nodes.IRegion;
@@ -74,6 +76,7 @@ public class CheckRegions extends AbstractVisitor {
 						&& !block.contains(AFlag.DONT_GENERATE)
 						&& !block.contains(AFlag.REMOVE)
 						&& !isImplicitVoidReturn(mth, block, blocksInRegions)
+						&& !isImplicitRemovedHandlerRethrow(mth, block)
 						&& !isGeneratedSyntheticDuplicate(block, blocksInRegions)) {
 					String blockCode = getBlockInsnStr(mth, block).replace("*/", "*\\/");
 					mth.addWarn("Code restructure failed: missing block: " + block + ", code lost:" + blockCode);
@@ -95,6 +98,60 @@ public class CheckRegions extends AbstractVisitor {
 				return true;
 			}
 		});
+	}
+
+	/**
+	 * Structured synchronized/finally regions implicitly rethrow the active exception. Once their
+	 * synthetic catch handler is removed, the original bytecode rethrow can remain as an orphan
+	 * block. Ignore it only when every incoming edge was removed and every SSA source of the thrown
+	 * value is a MOVE_EXCEPTION from a removed handler; an application-authored throw cannot satisfy
+	 * this proof.
+	 */
+	static boolean isImplicitRemovedHandlerRethrow(MethodNode mth, BlockNode block) {
+		if (block.getInstructions().size() != 1
+				|| block.getPredecessors().isEmpty()
+				|| block.getPredecessors().stream().anyMatch(pred -> !pred.contains(AFlag.REMOVE))) {
+			return false;
+		}
+		InsnNode throwInsn = block.getInstructions().get(0);
+		if (throwInsn.getType() != InsnType.THROW
+				|| throwInsn.getArgsCount() != 1
+				|| !throwInsn.getArg(0).isRegister()) {
+			return false;
+		}
+		Set<SSAVar> visited = new HashSet<>();
+		List<RegisterArg> pending = new ArrayList<>();
+		pending.add((RegisterArg) throwInsn.getArg(0));
+		boolean moveExceptionFound = false;
+		for (int pos = 0; pos < pending.size(); pos++) {
+			RegisterArg arg = pending.get(pos);
+			var ssaVar = arg.getSVar();
+			if (ssaVar == null || !visited.add(ssaVar)) {
+				continue;
+			}
+			InsnNode assignInsn = ssaVar.getAssignInsn();
+			if (assignInsn == null) {
+				return false;
+			}
+			if (assignInsn.getType() == InsnType.MOVE_EXCEPTION) {
+				BlockNode assignBlock = BlockUtils.getBlockByInsn(mth, assignInsn);
+				if (assignBlock == null || !assignBlock.contains(AFlag.REMOVE)) {
+					return false;
+				}
+				moveExceptionFound = true;
+				continue;
+			}
+			if (assignInsn.getType() != InsnType.MOVE && assignInsn.getType() != InsnType.PHI) {
+				return false;
+			}
+			for (InsnArg sourceArg : assignInsn.getArguments()) {
+				if (!sourceArg.isRegister()) {
+					return false;
+				}
+				pending.add((RegisterArg) sourceArg);
+			}
+		}
+		return moveExceptionFound;
 	}
 
 	/**

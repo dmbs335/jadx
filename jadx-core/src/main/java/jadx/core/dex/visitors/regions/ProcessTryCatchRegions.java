@@ -2,7 +2,9 @@ package jadx.core.dex.visitors.regions;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
@@ -14,6 +16,7 @@ import jadx.core.dex.nodes.IBlock;
 import jadx.core.dex.nodes.IBranchRegion;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
+import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.AbstractRegion;
 import jadx.core.dex.regions.Region;
@@ -377,11 +380,46 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 					|| !lastInsn.contains(AFlag.DONT_GENERATE)) {
 				continue;
 			}
-			if (block.getSuccessors().stream().anyMatch(successor -> successor.contains(AFlag.SYNTHETIC))) {
+			if (block.getSuccessors().stream().anyMatch(successor -> successor.contains(AFlag.SYNTHETIC))
+					|| hasTerminalReturnContinuation(block)) {
 				return true;
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * A duplicated finally copy can be followed directly by a shared conditional return tail. It is
+	 * safe to keep that tail outside the generated try only when the continuation cannot cycle back
+	 * to the copy and every reachable terminal block returns from the method.
+	 */
+	private static boolean hasTerminalReturnContinuation(BlockNode finallyCopyBlock) {
+		List<BlockNode> successors = finallyCopyBlock.getCleanSuccessors();
+		if (successors.isEmpty()
+				|| successors.stream().anyMatch(successor -> BlockUtils.isPathExists(successor, finallyCopyBlock))) {
+			return false;
+		}
+		boolean returnFound = false;
+		List<BlockNode> pending = new ArrayList<>(successors);
+		Set<BlockNode> visited = new HashSet<>();
+		for (int pos = 0; pos < pending.size(); pos++) {
+			BlockNode block = pending.get(pos);
+			if (visited.contains(block)) {
+				continue;
+			}
+			visited.add(block);
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null && lastInsn.getType() == InsnType.RETURN) {
+				returnFound = true;
+				continue;
+			}
+			List<BlockNode> next = block.getCleanSuccessors();
+			if (next.isEmpty()) {
+				return false;
+			}
+			pending.addAll(next);
+		}
+		return returnFound;
 	}
 
 	/**
@@ -488,7 +526,10 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		int splitIndex = thenSplitIndex != -1 ? thenSplitIndex : elseSplitIndex;
 		List<IContainer> mixedBlocks = ((Region) mixedRegion).getSubBlocks();
 		List<IContainer> trailingBlocks = mixedBlocks.subList(splitIndex, mixedBlocks.size());
-		if (!containsExplicitThrow(trailingBlocks)) {
+		if (!containsExplicitThrow(trailingBlocks)
+				&& !(hasFinallyTailBoundary(tb)
+						&& !isInsideLoop(parent)
+						&& containsAbruptExit(trailingBlocks))) {
 			return false;
 		}
 		IContainer continuation = extractTrailingRegion((Region) mixedRegion, splitIndex);
@@ -497,6 +538,15 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		parentBlocks.add(ifIndex + 1, continuation);
 		((IRegion) continuation).setParent(parent);
 		return true;
+	}
+
+	private static boolean isInsideLoop(IRegion region) {
+		for (IRegion current = region; current != null; current = current.getParent()) {
+			if (current instanceof LoopRegion) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static boolean containsExplicitThrow(List<IContainer> containers) {
