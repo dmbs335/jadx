@@ -1,7 +1,14 @@
 package jadx.gui;
 
 import java.awt.Desktop;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
+import javax.swing.JOptionPane;
 import javax.swing.SwingUtilities;
 
 import org.slf4j.Logger;
@@ -22,6 +29,7 @@ import jadx.gui.utils.LafManager;
 
 public class JadxGUI {
 	private static final Logger LOG = LoggerFactory.getLogger(JadxGUI.class);
+	private static final String STARTUP_ERROR_LOG = "jadx-gui-startup-error.log";
 
 	public static void main(String[] args) {
 		try {
@@ -37,16 +45,49 @@ public class JadxGUI {
 
 			LogCollector.register();
 			printSystemInfo();
-			SwingUtilities.invokeLater(() -> {
-				LafManager.init(settings);
-				settings.getFontSettings().updateDefaultFont();
-				MainWindow mw = new MainWindow(settings);
-				registerOpenFileHandler(mw);
-				mw.init();
-			});
-		} catch (Exception e) {
-			LOG.error("Error: {}", e.getMessage(), e);
+			SwingUtilities.invokeLater(() -> initMainWindow(settings));
+		} catch (Throwable e) {
+			reportStartupFailure(e);
 			System.exit(1);
+		}
+	}
+
+	private static void initMainWindow(JadxSettings settings) {
+		try {
+			LafManager.init(settings);
+			settings.getFontSettings().updateDefaultFont();
+			MainWindow mw = new MainWindow(settings);
+			registerOpenFileHandler(mw);
+			mw.init();
+		} catch (Throwable e) {
+			reportStartupFailure(e);
+			System.exit(1);
+		}
+	}
+
+	private static void reportStartupFailure(Throwable error) {
+		LOG.error("Failed to start jadx-gui", error);
+		Path logPath = Path.of(System.getProperty("java.io.tmpdir"), STARTUP_ERROR_LOG);
+		try {
+			StringWriter stackTrace = new StringWriter();
+			error.printStackTrace(new PrintWriter(stackTrace));
+			Files.writeString(
+					logPath,
+					stackTrace.toString(),
+					StandardCharsets.UTF_8,
+					StandardOpenOption.CREATE,
+					StandardOpenOption.TRUNCATE_EXISTING);
+		} catch (Throwable writeError) {
+			LOG.error("Failed to write startup error log", writeError);
+		}
+		try {
+			JOptionPane.showMessageDialog(
+					null,
+					"jadx-gui could not start.\n\n" + error + "\n\nDiagnostic log: " + logPath,
+					"jadx startup error",
+					JOptionPane.ERROR_MESSAGE);
+		} catch (Throwable dialogError) {
+			LOG.error("Failed to show startup error dialog", dialogError);
 		}
 	}
 
