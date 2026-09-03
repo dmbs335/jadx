@@ -126,8 +126,7 @@ public class SSATransform extends AbstractVisitor {
 						&& (existingPhi != null || definitionDominatesHandler);
 				boolean recoverPreTryHandlerState = definitionDominatesHandler
 						&& hasNewerDefinitionAtProtectedThrow(
-								mth, la, handler, handlerBlock, throwSources, regNum)
-						&& hasStableExceptionEntryState(mth, handler, throwSources, regNum);
+								mth, la, handler, handlerBlock, throwSources, regNum);
 				if (!la.isLive(handlerBlock, regNum)
 						|| existingPhi != null
 								&& !recoverCoroutineHandlerPhi && !recoverPreTryHandlerState
@@ -169,6 +168,7 @@ public class SSATransform extends AbstractVisitor {
 			}
 		}
 		List<ExceptionPhiCandidate> resolvedCandidates = resolveExceptionPhiCandidates(mth, candidates);
+		Map<Integer, List<BlockNode>> exceptionDefinitions = new HashMap<>();
 		int resolvedCount = resolvedCandidates.size();
 		for (int candidateIndex = 0; candidateIndex < resolvedCount; candidateIndex++) {
 			ExceptionPhiCandidate candidate = resolvedCandidates.get(candidateIndex);
@@ -178,8 +178,53 @@ public class SSATransform extends AbstractVisitor {
 				candidate.getHandlerBlock().getInstructions().add(0, phiInsn);
 			}
 			data.add(mth, phiInsn, candidate);
+			exceptionDefinitions.computeIfAbsent(candidate.getRegNum(), k -> new ArrayList<>())
+					.add(candidate.getHandlerBlock());
+		}
+		for (Map.Entry<Integer, List<BlockNode>> entry : exceptionDefinitions.entrySet()) {
+			placePhiForAdditionalDefinitions(mth, entry.getKey(), la, entry.getValue());
 		}
 		return data;
+	}
+
+	/**
+	 * Exception PHIs introduce definitions after the regular dominance-frontier pass has completed.
+	 * Propagate those definitions through ordinary joins, such as separate move-exception entries
+	 * that converge on a shared multi-catch body.
+	 */
+	private static void placePhiForAdditionalDefinitions(
+			MethodNode mth, int regNum, LiveVarAnalysis la, List<BlockNode> definitions) {
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		BitSet hasPhi = new BitSet(blocks.size());
+		for (BlockNode block : blocks) {
+			if (getPhiForReg(block, regNum) != null) {
+				hasPhi.set(block.getId());
+			}
+		}
+		BitSet processed = new BitSet(blocks.size());
+		ArrayDeque<BlockNode> workList = new ArrayDeque<>();
+		for (BlockNode definition : definitions) {
+			if (!processed.get(definition.getId())) {
+				processed.set(definition.getId());
+				workList.add(definition);
+			}
+		}
+		while (!workList.isEmpty()) {
+			BlockNode block = workList.pop();
+			BitSet domFrontier = block.getDomFrontier();
+			for (int id = domFrontier.nextSetBit(0); id >= 0; id = domFrontier.nextSetBit(id + 1)) {
+				if (!hasPhi.get(id) && la.isLive(id, regNum)) {
+					BlockNode df = blocks.get(id);
+					PhiInsn phiInsn = addPhi(mth, df, regNum);
+					df.getInstructions().add(0, phiInsn);
+					hasPhi.set(id);
+					if (!processed.get(id)) {
+						processed.set(id);
+						workList.add(df);
+					}
+				}
+			}
+		}
 	}
 
 	private static List<BlockNode> collectThrowSources(
@@ -212,13 +257,18 @@ public class SSATransform extends AbstractVisitor {
 			BlockNode handlerBlock, List<BlockNode> sources, int regNum) {
 		BitSet assignBlocks = la.getAssignBlocks(regNum);
 		for (BlockNode source : sources) {
+			boolean newerDefinition = false;
 			for (InsnNode insn : source.getInstructions()) {
-				if (canTransferToHandler(insn) && isProtectedByHandler(mth, handler, insn)) {
-					break;
+				if (newerDefinition
+						&& canTransferToHandler(insn)
+						&& isProtectedByHandler(mth, handler, insn)) {
+					return true;
 				}
 				RegisterArg result = insn.getResult();
 				if (result != null && result.getRegNum() == regNum) {
-					return true;
+					// A failed instruction doesn't assign its result. Only a later throwing
+					// instruction can expose this definition to the handler.
+					newerDefinition = true;
 				}
 			}
 			BitSet newerDoms = (BitSet) source.getDoms().clone();
@@ -229,34 +279,6 @@ public class SSATransform extends AbstractVisitor {
 			}
 		}
 		return false;
-	}
-
-	/**
-	 * A block can represent several exception edges, but {@link PhiInsn} accepts one input per source
-	 * block. Binding all edges to the first throwing instruction is safe only while the register value
-	 * does not change between protected throw points. A result produced by a throwing instruction is
-	 * deliberately considered after that edge: it is visible only if the instruction completed.
-	 */
-	private static boolean hasStableExceptionEntryState(
-			MethodNode mth, ExceptionHandler handler, List<BlockNode> sources, int regNum) {
-		for (BlockNode source : sources) {
-			boolean firstThrowSeen = false;
-			boolean changedAfterThrow = false;
-			for (InsnNode insn : source.getInstructions()) {
-				if (isProtectedByHandler(mth, handler, insn) && canTransferToHandler(insn)) {
-					if (firstThrowSeen && changedAfterThrow) {
-						return false;
-					}
-					firstThrowSeen = true;
-					changedAfterThrow = false;
-				}
-				RegisterArg result = insn.getResult();
-				if (firstThrowSeen && result != null && result.getRegNum() == regNum) {
-					changedAfterThrow = true;
-				}
-			}
-		}
-		return true;
 	}
 
 	private static boolean hasDuplicateBlocks(List<BlockNode> blocks) {
@@ -886,7 +908,7 @@ public class SSATransform extends AbstractVisitor {
 			List<PhiInsn> throwPhiInsns = exceptionPhiData.getBeforeInsn(insn);
 			int throwPhiInsnsCount = throwPhiInsns.size();
 			for (int phiInsnIndex = 0; phiInsnIndex < throwPhiInsnsCount; phiInsnIndex++) {
-				bindPhiArg(state, throwPhiInsns.get(phiInsnIndex));
+				bindPhiArg(state, throwPhiInsns.get(phiInsnIndex), true);
 			}
 			if (insn.getType() != InsnType.PHI) {
 				int argsCount = insn.getArgsCount();
@@ -1036,19 +1058,19 @@ public class SSATransform extends AbstractVisitor {
 				expectedArgs = expectedMap;
 			}
 			List<BlockNode> sources = candidate.getSources();
-			expectedMap.put(phiInsn, sources.size());
 			if (candidate.getBindMode() == ExceptionPhiBindMode.BEFORE_THROW) {
 				if (insnMap == null) {
 					insnMap = new IdentityHashMap<>();
 					beforeInsn = insnMap;
 				}
+				int expected = 0;
 				for (BlockNode source : sources) {
-					InsnNode throwInsn = findFirstProtectedThrowInsn(mth, candidate.getHandler(), source);
-					if (throwInsn != null) {
-						insnMap.computeIfAbsent(throwInsn, k -> new ArrayList<>()).add(phiInsn);
-					}
+					expected += addProtectedStateChangeThrows(
+							mth, candidate, source, phiInsn, insnMap);
 				}
+				expectedMap.put(phiInsn, expected);
 			} else {
+				expectedMap.put(phiInsn, sources.size());
 				if (sourceMap == null) {
 					sourceMap = new HashMap<>();
 					atBlockEnd = sourceMap;
@@ -1057,6 +1079,29 @@ public class SSATransform extends AbstractVisitor {
 					sourceMap.computeIfAbsent(source, k -> new ArrayList<>()).add(phiInsn);
 				}
 			}
+		}
+
+		private static int addProtectedStateChangeThrows(
+				MethodNode mth, ExceptionPhiCandidate candidate, BlockNode source,
+				PhiInsn phiInsn, Map<InsnNode, List<PhiInsn>> insnMap) {
+			boolean bindNextThrow = true;
+			int count = 0;
+			for (InsnNode insn : source.getInstructions()) {
+				if (bindNextThrow
+						&& canTransferToHandler(insn)
+						&& isProtectedByHandler(mth, candidate.getHandler(), insn)) {
+					insnMap.computeIfAbsent(insn, k -> new ArrayList<>()).add(phiInsn);
+					bindNextThrow = false;
+					count++;
+				}
+				RegisterArg result = insn.getResult();
+				if (result != null && result.getRegNum() == candidate.getRegNum()) {
+					// The exceptional edge of this instruction observes the old value; a completed
+					// assignment affects only a later throwing instruction.
+					bindNextThrow = true;
+				}
+			}
+			return count;
 		}
 
 		public boolean isExceptionPhi(PhiInsn phiInsn) {
@@ -1147,12 +1192,18 @@ public class SSATransform extends AbstractVisitor {
 	}
 
 	private static void bindPhiArg(RenameState state, PhiInsn phiInsn) {
+		bindPhiArg(state, phiInsn, false);
+	}
+
+	private static void bindPhiArg(RenameState state, PhiInsn phiInsn, boolean exceptionalEdge) {
 		int regNum = phiInsn.getResult().getRegNum();
 		SSAVar var = state.getVar(regNum);
 		if (var == null) {
 			return;
 		}
-		RegisterArg arg = phiInsn.bindArg(state.getBlock());
+		RegisterArg arg = exceptionalEdge
+				? phiInsn.bindExceptionArg(state.getBlock())
+				: phiInsn.bindArg(state.getBlock());
 		var.use(arg);
 		var.addUsedInPhi(phiInsn);
 	}

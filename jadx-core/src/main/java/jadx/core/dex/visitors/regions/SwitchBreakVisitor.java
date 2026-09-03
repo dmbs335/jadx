@@ -20,6 +20,7 @@ import jadx.core.dex.nodes.IRegion;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.SwitchRegion;
+import jadx.core.dex.regions.TryCatchRegion;
 import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.dex.visitors.JadxVisitor;
 import jadx.core.dex.visitors.regions.maker.SwitchRegionMaker;
@@ -83,6 +84,18 @@ public class SwitchBreakVisitor extends AbstractVisitor {
 				}
 			}
 			List<IContainer> branches = ((IBranchRegion) region).getBranches();
+			boolean hasNormalFallThroughBranch = branches.stream()
+					.filter(branch -> branch != null && !RegionUtils.hasExitBlock(branch))
+					.map(RegionUtils::getLastInsnWithBlock)
+					.anyMatch(last -> last != null && !isBreakBlock(last.getBlock()));
+			long nonExitBreakBranches = branches.stream()
+					.filter(branch -> branch != null && !RegionUtils.hasExitBlock(branch))
+					.map(RegionUtils::getLastInsnWithBlock)
+					.filter(last -> last != null && isBreakBlock(last.getBlock()))
+					.count();
+			boolean soleExceptionalBreak = !hasNormalFallThroughBranch && nonExitBreakBranches == 1;
+			boolean handlerConditional = !(region instanceof TryCatchRegion)
+					&& containsExceptionHandlerPath(mth, region);
 			boolean removeCommonBreak = true; // all branches contain exit insns, common break is unreachable
 			List<BlockParentContainer> forBreakRemove = new ArrayList<>();
 			for (IContainer branch : branches) {
@@ -95,12 +108,18 @@ public class SwitchBreakVisitor extends AbstractVisitor {
 					return;
 				}
 				InsnNode lastInsn = last.getInsn();
-				if (lastInsn.getType() == InsnType.BREAK && isBreakBlock(last.getBlock())) {
+				boolean branchExits = RegionUtils.hasExitBlock(branch);
+				boolean catchBranch = region instanceof TryCatchRegion
+						&& branch != ((TryCatchRegion) region).getTryRegion();
+				boolean unsafeExceptionalMove = soleExceptionalBreak && (catchBranch || handlerConditional);
+				if ((branchExits || !unsafeExceptionalMove)
+						&& lastInsn.getType() == InsnType.BREAK
+						&& isBreakBlock(last.getBlock())) {
 					IBlock block = last.getBlock();
 					IContainer parent = RegionUtils.getBlockContainer(branch, block);
 					forBreakRemove.add(new BlockParentContainer(parent, block));
 					removeCommonBreak = false;
-				} else if (!lastInsn.isExitEdgeInsn()) {
+				} else if (!branchExits) {
 					removeCommonBreak = false;
 				}
 			}
@@ -120,6 +139,16 @@ public class SwitchBreakVisitor extends AbstractVisitor {
 			if (removeCommonBreak && lastParentBlock != null) {
 				removeBreak(lastParentBlock, parentRegion);
 			}
+		}
+
+		private static boolean containsExceptionHandlerPath(MethodNode mth, IContainer container) {
+			boolean[] found = { false };
+			RegionUtils.visitBlockNodes(mth, container, block -> {
+				if (BlockUtils.isExceptionHandlerPath(block)) {
+					found[0] = true;
+				}
+			});
+			return found[0];
 		}
 	}
 
@@ -144,12 +173,38 @@ public class SwitchBreakVisitor extends AbstractVisitor {
 				prevInsn = insns.get(insns.size() - 2);
 			} else if (subBlocks.size() > 1) {
 				IContainer prev = subBlocks.get(subBlocks.size() - 2);
-				if (prev instanceof IBlock) {
-					List<InsnNode> insns = ((IBlock) prev).getInstructions();
-					prevInsn = ListUtils.last(insns);
+				if (prev instanceof IBranchRegion && RegionUtils.hasExitBlock(prev)) {
+					return true;
 				}
+				prevInsn = getLastGeneratedInsn(prev);
 			}
 			return prevInsn != null && prevInsn.isExitEdgeInsn();
+		}
+
+		private @Nullable InsnNode getLastGeneratedInsn(IContainer container) {
+			if (container instanceof IBlock) {
+				List<InsnNode> insns = ((IBlock) container).getInstructions();
+				for (int i = insns.size() - 1; i >= 0; i--) {
+					InsnNode insn = insns.get(i);
+					if (!insn.contains(AFlag.DONT_GENERATE)) {
+						return insn;
+					}
+				}
+				return null;
+			}
+			if (container instanceof IBranchRegion) {
+				return null;
+			}
+			if (container instanceof IRegion) {
+				List<IContainer> blocks = ((IRegion) container).getSubBlocks();
+				for (int i = blocks.size() - 1; i >= 0; i--) {
+					InsnNode insn = getLastGeneratedInsn(blocks.get(i));
+					if (insn != null) {
+						return insn;
+					}
+				}
+			}
+			return null;
 		}
 	}
 

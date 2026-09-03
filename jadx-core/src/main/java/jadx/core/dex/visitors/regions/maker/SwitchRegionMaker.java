@@ -17,6 +17,7 @@ import org.slf4j.LoggerFactory;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.LoopInfo;
+import jadx.core.dex.attributes.nodes.LoopLabelAttr;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.attributes.nodes.RegionRefAttr;
 import jadx.core.dex.instructions.InsnType;
@@ -26,6 +27,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.BlockNode;
+import jadx.core.dex.nodes.IBlock;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
 import jadx.core.dex.nodes.InsnContainer;
@@ -34,6 +36,10 @@ import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.SwitchRegion;
 import jadx.core.dex.regions.SwitchRegion.CaseInfo;
+import jadx.core.dex.regions.TryCatchRegion;
+import jadx.core.dex.regions.loops.LoopRegion;
+import jadx.core.dex.trycatch.CatchAttr;
+import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.visitors.kotlin.KtorCioRecovery;
 import jadx.core.dex.visitors.regions.AbstractRegionVisitor;
 import jadx.core.dex.visitors.regions.DepthRegionTraversal;
@@ -76,9 +82,18 @@ public final class SwitchRegionMaker {
 		stack.push(sw);
 
 		BlockNode out = calcSwitchOut(block, insn, stack);
+		BlockNode originalOut = out;
 		BlockNode commonNormalCaseOut = findCommonNormalCaseOut(out, blocksMap, stack);
 		if (commonNormalCaseOut != null) {
-			out = commonNormalCaseOut;
+			LoopInfo loop = getInnermostLoop(block);
+			if (loop != null && hasCasePathAvoidingOut(blocksMap, commonNormalCaseOut, loop)) {
+				if (hasExecutableLoopTail(loop.getEnd())) {
+					commonNormalCaseOut = null;
+				} else {
+					insertContinueInSwitch(block, commonNormalCaseOut, loop.getEnd());
+				}
+			}
+			out = commonNormalCaseOut != null ? commonNormalCaseOut : originalOut;
 		}
 		BlockNode sharedCaseOut = detectSharedCaseOut(blocksMap);
 		if (sharedCaseOut != null && shouldUseSharedCaseOut(out, sharedCaseOut)) {
@@ -243,75 +258,158 @@ public final class SwitchRegionMaker {
 			@Nullable BlockNode currentOut,
 			Map<BlockNode, List<Object>> blocksMap,
 			RegionStack stack) {
-		if (currentOut != null && currentOut != mth.getExitBlock()) {
+		if (currentOut != null
+				&& currentOut != mth.getExitBlock()
+				&& !hasOnlyTerminalPaths(currentOut)) {
 			return null;
 		}
 		Set<BlockNode> enclosingExits = new HashSet<>();
-		for (BlockNode exit : stack.getExits()) {
-			if (exit != mth.getExitBlock()) {
-				enclosingExits.add(exit);
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			LoopInfo loop = getInnermostLoop(caseBlock);
+			while (loop != null) {
+				enclosingExits.add(loop.getStart());
+				enclosingExits.add(loop.getEnd());
+				loop.getExitEdges().forEach(edge -> enclosingExits.add(edge.getTarget()));
+				loop = loop.getParentLoop();
 			}
 		}
+		enclosingExits.remove(mth.getExitBlock());
 		if (enclosingExits.isEmpty()) {
 			return null;
 		}
 
-		List<BlockNode> normalCases = new ArrayList<>();
+		List<BlockNode> caseEntries = new ArrayList<>(blocksMap.size());
 		for (BlockNode caseBlock : blocksMap.keySet()) {
-			if (hasPathToAny(caseBlock, enclosingExits)) {
-				normalCases.add(caseBlock);
-			} else if (!isTerminalCasePath(caseBlock, enclosingExits)) {
+			if (!hasPathToAny(caseBlock, enclosingExits) && !isTerminalCasePath(caseBlock, enclosingExits)) {
 				return null;
 			}
+			caseEntries.add(caseBlock);
 		}
-		if (normalCases.size() < 2) {
+		if (caseEntries.size() < 2) {
 			return null;
 		}
-		return findCommonNormalJoin(normalCases, enclosingExits);
+		return findCommonNormalJoin(caseEntries, enclosingExits);
 	}
 
 	private @Nullable BlockNode findCommonNormalJoin(
-			List<BlockNode> normalCases, Set<BlockNode> enclosingExits) {
+			List<BlockNode> caseEntries, Set<BlockNode> enclosingExits) {
+		Set<ExceptionHandler> caseHandlers = collectCaseHandlers(caseEntries, enclosingExits);
+		BlockSet normalReach = collectReachable(caseEntries, enclosingExits);
 		BlockNode best = null;
+		int bestJoinedCases = 1;
 		long bestDistance = Long.MAX_VALUE;
 		boolean ambiguous = false;
 		for (BlockNode candidate : mth.getBasicBlocks()) {
+			/*
+			 * A subset of cases can share a normal continuation while the remaining cases leave an
+			 * enclosing loop. Search only before those enclosing exits: unrestricted reachability can
+			 * cross a loop latch and make a continue-only case appear to reach the join next iteration.
+			 */
 			if (candidate == mth.getExitBlock()
 					|| enclosingExits.contains(candidate)
 					|| candidate.getPredecessors().size() < 2
-					|| BlockUtils.isExceptionHandlerPath(candidate)
-					|| !hasPathToAny(candidate, enclosingExits)
-					|| !BlockUtils.isAllPathExists(normalCases, candidate)) {
+					|| !hasPathToAny(candidate, enclosingExits)) {
 				continue;
 			}
-			boolean bypass = false;
-			for (BlockNode caseBlock : normalCases) {
-				if (hasPathToAnyAvoiding(caseBlock, enclosingExits, candidate)) {
-					bypass = true;
-					break;
-				}
-			}
-			if (bypass) {
-				continue;
-			}
+			int joinedCases = 0;
 			long distance = 0;
-			for (BlockNode caseBlock : normalCases) {
-				int caseDistance = shortestPathDistance(caseBlock, candidate);
-				if (caseDistance == -1) {
-					distance = Long.MAX_VALUE;
+			boolean invalid = false;
+			for (BlockNode caseBlock : caseEntries) {
+				int caseDistance = shortestPathDistance(caseBlock, candidate, enclosingExits);
+				if (caseDistance >= 0) {
+					joinedCases++;
+					distance += caseDistance;
+				} else if (!hasPathToAny(caseBlock, enclosingExits)
+						&& !isTerminalCasePath(caseBlock, enclosingExits)) {
+					invalid = true;
 					break;
 				}
-				distance += caseDistance;
 			}
-			if (distance < bestDistance) {
+			if (invalid || joinedCases < 2) {
+				continue;
+			}
+			if (!preservesHandlerJoin(candidate, caseHandlers, normalReach, enclosingExits)) {
+				continue;
+			}
+			if (joinedCases > bestJoinedCases || joinedCases == bestJoinedCases && distance < bestDistance) {
 				best = candidate;
+				bestJoinedCases = joinedCases;
 				bestDistance = distance;
 				ambiguous = false;
-			} else if (distance == bestDistance && candidate != best) {
+			} else if (joinedCases == bestJoinedCases && distance == bestDistance && candidate != best) {
 				ambiguous = true;
 			}
 		}
 		return ambiguous ? null : best;
+	}
+
+	private Set<ExceptionHandler> collectCaseHandlers(List<BlockNode> caseEntries, Set<BlockNode> exits) {
+		Set<ExceptionHandler> handlers = new HashSet<>();
+		BlockSet visited = BlockSet.empty(mth);
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>(caseEntries);
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (exits.contains(block) || visited.addChecked(block)) {
+				continue;
+			}
+			addHandlers(handlers, block.get(AType.EXC_CATCH));
+			for (InsnNode insn : block.getInstructions()) {
+				addHandlers(handlers, insn.get(AType.EXC_CATCH));
+			}
+			queue.addAll(block.getCleanSuccessors());
+		}
+		return handlers;
+	}
+
+	private static void addHandlers(Set<ExceptionHandler> handlers, @Nullable CatchAttr catchAttr) {
+		if (catchAttr != null) {
+			handlers.addAll(catchAttr.getHandlers());
+		}
+	}
+
+	private BlockSet collectReachable(List<BlockNode> starts, Set<BlockNode> exits) {
+		BlockSet visited = BlockSet.empty(mth);
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>(starts);
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (exits.contains(block) || visited.addChecked(block)) {
+				continue;
+			}
+			queue.addAll(block.getCleanSuccessors());
+		}
+		return visited;
+	}
+
+	private boolean preservesHandlerJoin(BlockNode candidate, Set<ExceptionHandler> handlers,
+			BlockSet normalReach, Set<BlockNode> exits) {
+		for (ExceptionHandler handler : handlers) {
+			BlockNode handlerBlock = handler.getHandlerBlock();
+			if (handlerBlock == null
+					|| shortestPathDistance(handlerBlock, candidate, exits) >= 0
+					|| !handlerMergesWithNormalFlow(handlerBlock, normalReach, exits)) {
+				continue;
+			}
+			return false;
+		}
+		return true;
+	}
+
+	private boolean handlerMergesWithNormalFlow(BlockNode start, BlockSet normalReach, Set<BlockNode> exits) {
+		BlockSet visited = BlockSet.empty(mth);
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		visited.add(start);
+		queue.addAll(start.getCleanSuccessors());
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (exits.contains(block) || visited.addChecked(block)) {
+				continue;
+			}
+			if (normalReach.contains(block)) {
+				return true;
+			}
+			queue.addAll(block.getCleanSuccessors());
+		}
+		return false;
 	}
 
 	private boolean hasPathToAny(BlockNode start, Set<BlockNode> ends) {
@@ -331,6 +429,30 @@ public final class SwitchRegionMaker {
 				if (!visited.addChecked(successor)) {
 					queue.addLast(successor);
 				}
+			}
+		}
+		return false;
+	}
+
+	private @Nullable LoopInfo getInnermostLoop(BlockNode block) {
+		LoopInfo innermost = null;
+		for (LoopInfo loop : mth.getAllLoopsForBlock(block)) {
+			if (innermost == null || loop.getLoopBlocks().size() < innermost.getLoopBlocks().size()) {
+				innermost = loop;
+			}
+		}
+		return innermost;
+	}
+
+	private boolean hasCasePathAvoidingOut(
+			Map<BlockNode, List<Object>> blocksMap, BlockNode out, LoopInfo loop) {
+		Set<BlockNode> loopBoundaries = new HashSet<>();
+		loopBoundaries.add(loop.getStart());
+		loopBoundaries.add(loop.getEnd());
+		loop.getExitEdges().forEach(edge -> loopBoundaries.add(edge.getTarget()));
+		for (BlockNode caseBlock : blocksMap.keySet()) {
+			if (hasPathToAnyAvoiding(caseBlock, loopBoundaries, out)) {
+				return true;
 			}
 		}
 		return false;
@@ -359,7 +481,7 @@ public final class SwitchRegionMaker {
 		return false;
 	}
 
-	private int shortestPathDistance(BlockNode start, BlockNode end) {
+	private int shortestPathDistance(BlockNode start, BlockNode end, Set<BlockNode> exits) {
 		if (start == end) {
 			return 0;
 		}
@@ -375,6 +497,9 @@ public final class SwitchRegionMaker {
 			for (BlockNode successor : current.getCleanSuccessors()) {
 				if (successor == end) {
 					return distance;
+				}
+				if (exits.contains(successor)) {
+					continue;
 				}
 				if (!visited.addChecked(successor)) {
 					queue.addLast(successor);
@@ -407,6 +532,38 @@ public final class SwitchRegionMaker {
 					foundTerminal = true;
 				} else if (enclosingExits.contains(successor)) {
 					return false;
+				} else if (!visited.addChecked(successor)) {
+					queue.addLast(successor);
+				}
+			}
+		}
+		return foundTerminal;
+	}
+
+	private boolean hasOnlyTerminalPaths(BlockNode start) {
+		boolean foundTerminal = false;
+		BlockSet visited = BlockSet.empty(mth);
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		visited.add(start);
+		queue.add(start);
+		while (!queue.isEmpty()) {
+			BlockNode current = queue.removeFirst();
+			if (current.contains(AFlag.LOOP_START) || current.contains(AFlag.LOOP_END)) {
+				return false;
+			}
+			List<BlockNode> successors = current.getCleanSuccessors();
+			if (successors.isEmpty()) {
+				return false;
+			}
+			for (BlockNode successor : successors) {
+				if (successor == mth.getExitBlock()) {
+					InsnNode lastInsn = BlockUtils.getLastInsn(current);
+					if (lastInsn == null
+							|| lastInsn.getType() != InsnType.RETURN
+									&& lastInsn.getType() != InsnType.THROW) {
+						return false;
+					}
+					foundTerminal = true;
 				} else if (!visited.addChecked(successor)) {
 					queue.addLast(successor);
 				}
@@ -573,6 +730,14 @@ public final class SwitchRegionMaker {
 					if (possibleOut != null && insertContinueInSwitch(block, possibleOut, loopEnd)) {
 						outs.clear(loopEnd.getId());
 						out = possibleOut;
+					} else if (possibleOut != null && hasExecutableLoopTail(loopEnd)) {
+						/*
+						 * A synthetic continue would jump directly to the loop update and skip
+						 * executable instructions shared by the case paths (for example an
+						 * expanded finally assignment). Keep the loop tail outside the switch so
+						 * every normal and caught-exception path executes it exactly once.
+						 */
+						out = loopEnd;
 					}
 				}
 				if (outs.isEmpty()) {
@@ -785,6 +950,9 @@ public final class SwitchRegionMaker {
 	}
 
 	private boolean insertContinueInSwitch(BlockNode switchBlock, BlockNode switchOut, BlockNode loopEnd) {
+		if (hasExecutableLoopTail(loopEnd)) {
+			return false;
+		}
 		boolean inserted = false;
 		for (BlockNode caseBlock : switchBlock.getCleanSuccessors()) {
 			if (caseBlock.getDomFrontier().get(loopEnd.getId()) && caseBlock != switchOut) {
@@ -808,12 +976,17 @@ public final class SwitchRegionMaker {
 		return inserted;
 	}
 
+	private static boolean hasExecutableLoopTail(BlockNode loopEnd) {
+		return loopEnd.getInstructions().size() > 1;
+	}
+
 	/**
 	 * Add break to every exit edge from 'case' region.
 	 * 'Break' optimizations (code duplication, unreachable, etc.) will be done at
 	 * {@link SwitchBreakVisitor}
 	 */
 	private static void insertBreaksForCase(MethodNode mth, SwitchRegion switchRegion, IContainer caseContainer) {
+		labelLoopBreaksInsideSwitch(mth, caseContainer);
 		BlockSet caseBlocks = new BlockSet(mth);
 		RegionUtils.visitBlockNodes(mth, caseContainer, caseBlocks::add);
 		DepthRegionTraversal.traverse(mth, caseContainer, new AbstractRegionVisitor() {
@@ -833,17 +1006,110 @@ public final class SwitchRegionMaker {
 								break;
 							}
 						}
+					} else if (lastContainer instanceof TryCatchRegion
+							&& hasImplicitCatchContinuationOutsideCase((TryCatchRegion) lastContainer, caseBlocks)) {
+						insertBreak = true;
 					}
 				}
-				if (insertBreak && region instanceof Region && canAppendBreak(region)) {
+				if (insertBreak
+						&& region instanceof Region
+						&& canAppendBreak(region)
+						&& !endsWithLoopContinue(region, caseBlocks)) {
 					region.getSubBlocks().add(buildBreakContainer(switchRegion));
 				}
 			}
 		});
 	}
 
+	private static boolean hasImplicitCatchContinuationOutsideCase(
+			TryCatchRegion tryCatchRegion, BlockSet caseBlocks) {
+		if (!RegionUtils.hasExitBlock(tryCatchRegion.getTryRegion())) {
+			return false;
+		}
+		for (IContainer catchRegion : tryCatchRegion.getCatchRegions().values()) {
+			if (RegionUtils.hasExitBlock(catchRegion)) {
+				continue;
+			}
+			Set<IBlock> catchBlocks = new HashSet<>();
+			RegionUtils.getAllRegionBlocks(catchRegion, catchBlocks);
+			for (IBlock catchBlock : catchBlocks) {
+				if (!(catchBlock instanceof BlockNode)) {
+					continue;
+				}
+				BlockNode blockNode = (BlockNode) catchBlock;
+				if (blockNode.getCleanSuccessors().size() < 2) {
+					continue;
+				}
+				for (BlockNode successor : blockNode.getCleanSuccessors()) {
+					if (!catchBlocks.contains(successor) && !caseBlocks.contains(successor)) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	private static void labelLoopBreaksInsideSwitch(MethodNode mth, IContainer caseContainer) {
+		RegionUtils.visitBlocks(mth, caseContainer, block -> {
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.getType() != InsnType.BREAK || insn.contains(AType.LOOP_LABEL)) {
+					continue;
+				}
+				List<LoopInfo> loops = insn.getAll(AType.LOOP);
+				if (loops.size() == 1) {
+					LoopInfo loop = loops.get(0);
+					if (isTargetLoopEnclosedByCase(caseContainer, block, loop)) {
+						continue;
+					}
+					LoopLabelAttr label = new LoopLabelAttr(loop);
+					insn.addAttr(label);
+					loop.getStart().addAttr(label);
+				}
+			}
+		});
+	}
+
+	private static boolean isTargetLoopEnclosedByCase(
+			IContainer caseContainer, IBlock breakBlock, LoopInfo targetLoop) {
+		IContainer current = RegionUtils.getBlockContainer(caseContainer, breakBlock);
+		while (current instanceof IRegion) {
+			if (current instanceof LoopRegion
+					&& ((LoopRegion) current).getInfo() == targetLoop) {
+				return true;
+			}
+			if (current == caseContainer) {
+				break;
+			}
+			current = ((IRegion) current).getParent();
+		}
+		return false;
+	}
+
+	private static boolean endsWithLoopContinue(IRegion region, BlockSet caseBlocks) {
+		IBlock last = RegionUtils.getLastBlock(region);
+		if (!(last instanceof BlockNode)) {
+			return false;
+		}
+		BlockNode loopEnd = (BlockNode) last;
+		if (!loopEnd.contains(AFlag.LOOP_END)) {
+			return false;
+		}
+		for (BlockNode predecessor : loopEnd.getPredecessors()) {
+			if (caseBlocks.contains(predecessor)) {
+				InsnNode lastInsn = BlockUtils.getLastInsn(predecessor);
+				if (lastInsn != null && lastInsn.getType() == InsnType.CONTINUE) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
 	public static boolean canAppendBreak(IRegion region) {
-		return !region.contains(AFlag.FALL_THROUGH) && !RegionUtils.hasExitBlock(region);
+		return !region.contains(AFlag.FALL_THROUGH)
+				&& !RegionUtils.hasExitBlock(region)
+				&& !RegionUtils.hasExitEdge(region);
 	}
 
 	public static InsnContainer buildBreakContainer(SwitchRegion switchRegion) {

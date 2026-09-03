@@ -643,6 +643,10 @@ final class IfRegionMaker {
 		boolean preserveCoroutineResumeJoin = earlierResumeJoin != null
 				&& isDirectCoroutineResumeJoin(structuralOut, thenBlock, elseBlock);
 		info.setOutBlock(structuralOut);
+		IfInfo switchExceptionExit = restructureSwitchFallThroughExceptionExit(info, thenBlock, elseBlock);
+		if (switchExceptionExit != null) {
+			return switchExceptionExit;
+		}
 		IfInfo inheritedLoopBreak = restructureInheritedLoopBreak(info, thenBlock, elseBlock);
 		if (inheritedLoopBreak != null) {
 			return inheritedLoopBreak;
@@ -772,6 +776,65 @@ final class IfRegionMaker {
 			info.setOutBlock(null);
 		}
 		return info;
+	}
+
+	/**
+	 * A fall-through switch case can contain a conditional throwing path whose handler continues at
+	 * the switch exit. The ordinary post-dominator is then the handler continuation, but using it as
+	 * the local IF out also puts that continuation on the non-throwing fall-through path. Keep the
+	 * next case as the IF boundary and render the exception-owned path as the selected branch.
+	 */
+	private @Nullable IfInfo restructureSwitchFallThroughExceptionExit(
+			IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		if (!isInsideSwitchRegion(regionMaker.getStack().peekRegion())) {
+			return null;
+		}
+		IfInfo result = trySwitchFallThroughExceptionExit(info, thenBlock, elseBlock, true);
+		return result != null
+				? result
+				: trySwitchFallThroughExceptionExit(info, elseBlock, thenBlock, false);
+	}
+
+	private @Nullable IfInfo trySwitchFallThroughExceptionExit(
+			IfInfo info, BlockNode inheritedExit, BlockNode exceptionBranch, boolean exitIsThen) {
+		RegionStack stack = regionMaker.getStack();
+		if (inheritedExit == null
+				|| exceptionBranch == null
+				|| !stack.containsExit(inheritedExit)
+				|| stack.containsExit(exceptionBranch)
+				|| isPathExists(exceptionBranch, inheritedExit)
+				|| !startsExceptionProtectedPath(exceptionBranch)
+				|| !reachesOtherInheritedExit(exceptionBranch, inheritedExit, stack)) {
+			return null;
+		}
+		IfInfo selected = exitIsThen ? IfInfo.invert(info) : info;
+		IfInfo result = new IfInfo(selected, exceptionBranch, null);
+		result.setOutBlock(inheritedExit);
+		return result;
+	}
+
+	private static boolean startsExceptionProtectedPath(BlockNode block) {
+		BlockNode current = block;
+		Set<BlockNode> visited = new HashSet<>();
+		while (current != null && visited.size() < 4 && visited.add(current)) {
+			if (current.contains(AFlag.EXC_TOP_SPLITTER)
+					|| current.contains(AType.EXC_CATCH)) {
+				return true;
+			}
+			List<BlockNode> successors = current.getCleanSuccessors();
+			current = current.isSynthetic() && successors.size() == 1 ? successors.get(0) : null;
+		}
+		return false;
+	}
+
+	private static boolean reachesOtherInheritedExit(
+			BlockNode start, BlockNode excludedExit, RegionStack stack) {
+		for (BlockNode exit : stack.getExits()) {
+			if (exit != excludedExit && isPathExists(start, exit)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

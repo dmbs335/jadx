@@ -4,6 +4,8 @@ import java.util.List;
 
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
+import jadx.core.dex.attributes.nodes.LoopInfo;
+import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
@@ -51,8 +53,8 @@ public final class PostProcessRegions extends AbstractRegionVisitor {
 		if (edgeInsnAttrs.isEmpty()) {
 			return;
 		}
-		EdgeInsnAttr insnAttr = edgeInsnAttrs.get(0);
-		if (!insnAttr.getStart().equals(last)) {
+		EdgeInsnAttr insnAttr = findRegionExitInsn(region, last, edgeInsnAttrs);
+		if (insnAttr == null) {
 			return;
 		}
 		if (last instanceof BlockNode) {
@@ -63,6 +65,66 @@ public final class PostProcessRegions extends AbstractRegionVisitor {
 			}
 		}
 		region.add(new InsnContainer(insnAttr.getInsn()));
+	}
+
+	private static EdgeInsnAttr findRegionExitInsn(
+			Region region, IContainer last, List<EdgeInsnAttr> edgeInsnAttrs) {
+		for (EdgeInsnAttr edgeInsnAttr : edgeInsnAttrs) {
+			if (edgeInsnAttr.getStart().equals(last)) {
+				return edgeInsnAttr;
+			}
+		}
+		if (!(last instanceof BlockNode)) {
+			return null;
+		}
+		BlockNode lastBlock = (BlockNode) last;
+		EdgeInsnAttr selected = null;
+		for (BlockNode predecessor : lastBlock.getPredecessors()) {
+			if (!RegionUtils.isRegionContainsBlock(region, predecessor)) {
+				continue;
+			}
+			EdgeInsnAttr predecessorInsn = null;
+			for (EdgeInsnAttr edgeInsnAttr : edgeInsnAttrs) {
+				if (edgeInsnAttr.getStart() == predecessor && edgeInsnAttr.getEnd() == lastBlock) {
+					predecessorInsn = edgeInsnAttr;
+					break;
+				}
+			}
+			if (predecessorInsn == null) {
+				return null;
+			}
+			if (selected != null
+					&& selected.getInsn().getType() != predecessorInsn.getInsn().getType()) {
+				return null;
+			}
+			selected = predecessorInsn;
+		}
+		if (selected != null
+				&& (selected.getInsn().getType() == InsnType.BREAK
+						|| selected.getInsn().getType() == InsnType.CONTINUE)) {
+			if (!targetsEnclosingLoop(region, selected)) {
+				return null;
+			}
+		}
+		return selected;
+	}
+
+	private static boolean targetsEnclosingLoop(Region region, EdgeInsnAttr edgeInsnAttr) {
+		List<LoopInfo> targetLoops = edgeInsnAttr.getInsn().getAll(AType.LOOP);
+		IRegion current = region;
+		while (current != null) {
+			if (current instanceof LoopRegion
+					&& targetLoops.contains(((LoopRegion) current).getInfo())) {
+				return true;
+			}
+			current = current.getParent();
+		}
+		for (LoopInfo targetLoop : targetLoops) {
+			if (!RegionUtils.isRegionContainsBlock(region, targetLoop.getStart())) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private PostProcessRegions() {

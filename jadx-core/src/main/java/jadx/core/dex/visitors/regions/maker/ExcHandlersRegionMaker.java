@@ -23,6 +23,7 @@ import jadx.core.dex.nodes.InsnContainer;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.Region;
+import jadx.core.dex.regions.SwitchRegion;
 import jadx.core.dex.trycatch.ExcHandlerAttr;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.trycatch.TryCatchBlockAttr;
@@ -103,6 +104,7 @@ public class ExcHandlersRegionMaker {
 
 		Set<IBlock> successorBlocks = new HashSet<>();
 		Set<IBlock> resourceSuccessorBlocks = new HashSet<>();
+		Set<IBlock> directTerminalBlocks = new HashSet<>();
 		for (TryCatchBlockAttr tc : tcs) {
 			Set<IBlock> trySuccessorBlocks = new HashSet<>();
 			for (ExceptionHandler handler : tc.getHandlers()) {
@@ -154,7 +156,25 @@ public class ExcHandlersRegionMaker {
 			}
 			successorBlocks = handlerOutBlocks;
 		} else {
-			successorBlocks.removeAll(allRegionBlocks);
+			Set<IBlock> handlerOutBlocks = new HashSet<>();
+			for (IBlock successor : successorBlocks) {
+				if (successor instanceof BlockNode) {
+					BlockNode terminalReturn = findTerminalReturnTail((BlockNode) successor);
+					if (terminalReturn != null) {
+						if (!allRegionBlocks.contains(terminalReturn)
+								|| mainRegionBlocks.contains(terminalReturn)
+										&& detachFromPlainRegion(mth.getRegion(), terminalReturn)) {
+							handlerOutBlocks.add(terminalReturn);
+							directTerminalBlocks.add(terminalReturn);
+						}
+						continue;
+					}
+				}
+				if (!allRegionBlocks.contains(successor)) {
+					handlerOutBlocks.add(successor);
+				}
+			}
+			successorBlocks = handlerOutBlocks;
 		}
 		if (successorBlocks.isEmpty()) {
 			return null;
@@ -163,9 +183,13 @@ public class ExcHandlersRegionMaker {
 		Region excOutRegion = new Region(mth.getRegion());
 		for (IBlock block : successorBlocks) {
 			if (block instanceof BlockNode) {
-				stack.clear();
-				stack.push(excOutRegion);
-				excOutRegion.add(regionMaker.makeRegion((BlockNode) block));
+				if (directTerminalBlocks.contains(block)) {
+					excOutRegion.add(block);
+				} else {
+					stack.clear();
+					stack.push(excOutRegion);
+					excOutRegion.add(regionMaker.makeRegion((BlockNode) block));
+				}
 			}
 		}
 		return excOutRegion;
@@ -288,16 +312,33 @@ public class ExcHandlersRegionMaker {
 		}
 
 		boolean inLoop = mth.getLoopForBlock(start) != null;
+		Set<BlockNode> inlineSwitchHandlerExits = new HashSet<>();
 		for (BlockNode exit : handlerExits) {
+			if (isFallThroughSwitchHandlerContinuation(
+					mth.getRegion(), handler.getTryBlock().getTopSplitter(), exit)) {
+				inlineSwitchHandlerExits.add(exit);
+			}
+		}
+		for (BlockNode exit : handlerExits) {
+			if (inlineSwitchHandlerExits.contains(exit)) {
+				continue;
+			}
 			if ((!inLoop || BlockUtils.isPathExists(start, exit))
 					&& RegionUtils.isRegionContainsBlock(mth.getRegion(), exit)) {
 				stack.addExit(exit);
+			}
+		}
+		if (!inlineSwitchHandlerExits.isEmpty()) {
+			var loop = mth.getLoopForBlock(start);
+			if (loop != null) {
+				stack.addExit(loop.getStart());
 			}
 		}
 		if (appendDirectRethrow && declaredSynchronized) {
 			hideSharedRethrow(sharedRethrowExit);
 		}
 		handler.setHandlerRegion(regionMaker.makeRegion(start));
+		appendSharedTerminalReturn(handler);
 		for (InsnNode rethrowMove : rethrowMoves) {
 			rethrowMove.add(AFlag.DONT_GENERATE);
 		}
@@ -313,6 +354,97 @@ public class ExcHandlersRegionMaker {
 			mth.addWarn("Missing exception handler attribute for start block: " + start);
 		} else {
 			handler.getHandlerRegion().addAttr(excHandlerAttr);
+		}
+	}
+
+	private static boolean isFallThroughSwitchHandlerContinuation(
+			IRegion region, BlockNode topSplitter, BlockNode handlerOut) {
+		if (region instanceof SwitchRegion) {
+			SwitchRegion switchRegion = (SwitchRegion) region;
+			IContainer owner = null;
+			boolean siblingOwnsOut = false;
+			for (SwitchRegion.CaseInfo caseInfo : switchRegion.getCases()) {
+				IContainer caseContainer = caseInfo.getContainer();
+				if (RegionUtils.isRegionContainsBlock(caseContainer, topSplitter)) {
+					owner = caseContainer;
+				} else if (RegionUtils.isRegionContainsBlock(caseContainer, handlerOut)) {
+					siblingOwnsOut = true;
+				}
+			}
+			if (owner != null
+					&& owner.contains(AFlag.FALL_THROUGH)
+					&& !RegionUtils.isRegionContainsBlock(owner, handlerOut)
+					&& siblingOwnsOut) {
+				return true;
+			}
+		}
+		for (IContainer container : region.getSubBlocks()) {
+			if (container instanceof IRegion
+					&& isFallThroughSwitchHandlerContinuation(
+							(IRegion) container, topSplitter, handlerOut)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A handler can branch around a normal continuation and join only at the method's shared return.
+	 * Region construction omits that boundary edge, which would otherwise make generated catch code
+	 * fall through into the normal continuation. Duplicate the terminal return inside the handler;
+	 * the original block remains available to the normal path.
+	 */
+	private static void appendSharedTerminalReturn(ExceptionHandler handler) {
+		IRegion handlerRegion = handler.getHandlerRegion();
+		if (handlerRegion == null || RegionUtils.hasExitBlock(handlerRegion)) {
+			return;
+		}
+		Set<IBlock> handlerBlocks = new HashSet<>();
+		RegionUtils.getAllRegionBlocks(handlerRegion, handlerBlocks);
+		boolean hasTerminalThrow = false;
+		for (IBlock handlerBlock : handlerBlocks) {
+			if (handlerBlock instanceof BlockNode) {
+				InsnNode lastInsn = BlockUtils.getLastInsn((BlockNode) handlerBlock);
+				if (lastInsn != null && lastInsn.getType() == InsnType.THROW) {
+					hasTerminalThrow = true;
+					break;
+				}
+			}
+		}
+		if (!hasTerminalThrow) {
+			return;
+		}
+		BlockNode terminalReturn = null;
+		for (IBlock handlerBlock : handlerBlocks) {
+			if (!(handlerBlock instanceof BlockNode)) {
+				continue;
+			}
+			BlockNode block = (BlockNode) handlerBlock;
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null
+					&& (lastInsn.getType() == InsnType.RETURN || lastInsn.getType() == InsnType.THROW)) {
+				continue;
+			}
+			for (BlockNode successor : block.getCleanSuccessors()) {
+				if (handlerBlocks.contains(successor)) {
+					continue;
+				}
+				BlockNode candidate = findTerminalReturnTail(successor);
+				if (candidate == null || terminalReturn != null && terminalReturn != candidate) {
+					return;
+				}
+				terminalReturn = candidate;
+			}
+		}
+		if (terminalReturn == null) {
+			return;
+		}
+		InsnNode returnInsn = BlockUtils.getLastInsn(terminalReturn);
+		if (returnInsn != null && returnInsn.getType() == InsnType.RETURN) {
+			// Keep the original instruction so its register argument remains attached to the
+			// SSA definition in the method block tree. A copied instruction creates a second
+			// parent for the same SSA variable and fails the post-region debug consistency check.
+			handlerRegion.getSubBlocks().add(new InsnContainer(returnInsn));
 		}
 	}
 

@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 import org.intellij.lang.annotations.MagicConstant;
 
@@ -24,6 +25,7 @@ public class ClspClass {
 	private Map<String, ClspMethod> methodsMap = Collections.emptyMap();
 	private volatile ClspMethod[] methodsArray;
 	private List<ArgType> typeParameters = Collections.emptyList();
+	private Set<String> superTypes;
 
 	private final ClspClassSource source;
 
@@ -107,6 +109,14 @@ public class ClspClass {
 			map.put(mth.getMethodInfo().getShortId(), mth);
 		}
 		setMethodsMap(map);
+	}
+
+	public Set<String> getSuperTypes() {
+		return superTypes;
+	}
+
+	public void setSuperTypes(Set<String> superTypes) {
+		this.superTypes = Objects.requireNonNull(superTypes);
 	}
 
 	public List<ArgType> getTypeParameters() {

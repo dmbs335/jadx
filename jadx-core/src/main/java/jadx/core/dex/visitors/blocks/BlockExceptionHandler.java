@@ -38,6 +38,7 @@ import jadx.core.dex.trycatch.CatchAttr;
 import jadx.core.dex.trycatch.ExcHandlerAttr;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.trycatch.TryCatchBlockAttr;
+import jadx.core.dex.visitors.kotlin.CoroutineMethodUtils;
 import jadx.core.dex.visitors.typeinference.TypeCompare;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnRemover;
@@ -72,6 +73,34 @@ public class BlockExceptionHandler {
 		BlockUtils.visitDFS(mth, sorted::add);
 		removeUnusedExcHandlers(mth, tryBlocks, sorted);
 		return true;
+	}
+
+	static boolean splitBlocksAfterTryLeave(MethodNode mth) {
+		boolean changed = false;
+		List<BlockNode> blocks = mth.getBasicBlocks();
+		for (int blockIndex = 0; blockIndex < blocks.size(); blockIndex++) {
+			BlockNode block = blocks.get(blockIndex);
+			List<InsnNode> insns = block.getInstructions();
+			for (int insnIndex = 0; insnIndex < insns.size() - 1; insnIndex++) {
+				if (!insns.get(insnIndex).contains(AFlag.TRY_LEAVE)) {
+					continue;
+				}
+				InsnNode tailFirstInsn = insns.get(insnIndex + 1);
+				BlockNode tail = BlockSplitter.startNewBlock(mth, tailFirstInsn.getOffset());
+				tail.add(AFlag.SYNTHETIC);
+				tail.getInstructions().addAll(new ArrayList<>(insns.subList(insnIndex + 1, insns.size())));
+				insns.subList(insnIndex + 1, insns.size()).clear();
+
+				for (BlockNode successor : new ArrayList<>(block.getSuccessors())) {
+					BlockSplitter.removeConnection(block, successor);
+					BlockSplitter.connect(tail, successor);
+				}
+				BlockSplitter.connect(block, tail);
+				changed = true;
+				break;
+			}
+		}
+		return changed;
 	}
 
 	/**
@@ -332,6 +361,26 @@ public class BlockExceptionHandler {
 			outerTryBlock.setBlocks(mergedBlocks);
 			return false;
 		}
+		boolean overlappingProtectedRange = outerTryBlock.getBlocks().containsAll(innerTryBlock.getBlocks())
+				|| innerTryBlock.getBlocks().containsAll(outerTryBlock.getBlocks());
+		int smallerRangeSize = Math.min(outerTryBlock.getBlocks().size(), innerTryBlock.getBlocks().size());
+		int largerRangeSize = Math.max(outerTryBlock.getBlocks().size(), innerTryBlock.getBlocks().size());
+		boolean substantiallySameRange = smallerRangeSize * 4 >= largerRangeSize * 3;
+		boolean typedHandlersOnly = outerTryBlock.getHandlers().stream().noneMatch(ExceptionHandler::isCatchAll)
+				&& innerTryBlock.getHandlers().stream().noneMatch(ExceptionHandler::isCatchAll);
+		if (overlappingProtectedRange && substantiallySameRange && typedHandlersOnly
+				&& !catchInHandler && !catchInTry) {
+			// Optimizing compilers can narrow individual typed catches to the instructions which
+			// can throw that type. The resulting dex try items describe one source-level try but
+			// differ by a few protected blocks and have disjoint handler lists. A real nested try
+			// has a handler path protected by the outer try and is handled by the relation above.
+			List<BlockNode> mergedBlocks = Utils.concatDistinct(outerTryBlock.getBlocks(), innerTryBlock.getBlocks());
+			List<ExceptionHandler> handlers = Utils.concatDistinct(outerTryBlock.getHandlers(), innerTryBlock.getHandlers());
+			tryBlocks.add(new TryCatchBlockAttr(tryBlocks.size(), handlers, mergedBlocks));
+			tryBlocks.remove(outerTryBlock);
+			tryBlocks.remove(innerTryBlock);
+			return true;
+		}
 		Set<ExceptionHandler> innerHandlerSet = new HashSet<>(innerTryBlock.getHandlers());
 		if (innerHandlerSet.containsAll(outerTryBlock.getHandlers())) {
 			// merge
@@ -467,7 +516,7 @@ public class BlockExceptionHandler {
 
 	private static BlockNode searchTopBlock(MethodNode mth, List<BlockNode> blocks) {
 		BlockNode top = BlockUtils.getTopBlock(blocks);
-		if (top != null) {
+		if (top != null && (CoroutineMethodUtils.isCoroutineMethod(mth) || dominatesAll(top, blocks))) {
 			return adjustTopBlock(top);
 		}
 		BlockNode topDom = BlockUtils.getCommonDominator(mth, blocks);
@@ -482,6 +531,15 @@ public class BlockExceptionHandler {
 			return adjustTopBlock(topDom);
 		}
 		throw new JadxRuntimeException("Failed to find top block for try-catch from: " + blocks);
+	}
+
+	private static boolean dominatesAll(BlockNode dominator, List<BlockNode> blocks) {
+		for (BlockNode block : blocks) {
+			if (block != dominator && !block.isDominator(dominator)) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private static BlockNode adjustTopBlock(BlockNode topBlock) {

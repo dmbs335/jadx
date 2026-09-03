@@ -31,7 +31,7 @@ public final class SameInstructionsStrategyImpl extends SameInstructionsStrategy
 		if (assignInsn.isConstInsn() && dupAssign.isConstInsn()) {
 			// Do this and not deep equals since we already know that the result is the same and that the insn
 			// type is the same
-			return !Objects.equals(assignInsn.getArguments(), assignInsn.getArguments());
+			return !Objects.equals(assignInsn.getArguments(), dupAssign.getArguments());
 		}
 		return false;
 	}

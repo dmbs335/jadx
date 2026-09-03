@@ -267,11 +267,11 @@ public class AttributeStorage {
 	}
 
 	private static final class AttributeMap {
-		private Object[] entries;
+		private IJadxAttribute[] entries;
 		private int size;
 
 		private AttributeMap(IJadxAttribute first, IJadxAttribute second) {
-			entries = new Object[] { first.getAttrType(), first, second.getAttrType(), second };
+			entries = new IJadxAttribute[] { first, second };
 			size = 2;
 		}
 
@@ -285,39 +285,34 @@ public class AttributeStorage {
 
 		private IJadxAttribute get(IJadxAttrType<?> type) {
 			for (int i = 0; i < size; i++) {
-				int offset = i * 2;
-				if (entries[offset] == type) {
-					return (IJadxAttribute) entries[offset + 1];
+				IJadxAttribute attr = entries[i];
+				if (attr.getAttrType() == type) {
+					return attr;
 				}
 			}
 			return null;
 		}
 
 		private IJadxAttribute valueAt(int index) {
-			return (IJadxAttribute) entries[index * 2 + 1];
+			return entries[index];
 		}
 
 		private void put(IJadxAttrType<?> type, IJadxAttribute attr) {
 			for (int i = 0; i < size; i++) {
-				int offset = i * 2;
-				if (entries[offset] == type) {
-					entries[offset + 1] = attr;
+				if (entries[i].getAttrType() == type) {
+					entries[i] = attr;
 					return;
 				}
 			}
-			int offset = size * 2;
-			if (offset == entries.length) {
+			if (size == entries.length) {
 				entries = Arrays.copyOf(entries, entries.length * 2);
 			}
-			entries[offset] = type;
-			entries[offset + 1] = attr;
-			size++;
+			entries[size++] = attr;
 		}
 
 		private void remove(IJadxAttrType<?> type) {
 			for (int i = 0; i < size; i++) {
-				int offset = i * 2;
-				if (entries[offset] == type) {
+				if (entries[i].getAttrType() == type) {
 					removeAt(i);
 					return;
 				}
@@ -333,14 +328,11 @@ public class AttributeStorage {
 		}
 
 		private void removeAt(int index) {
-			int offset = index * 2;
-			int lastOffset = (size - 1) * 2;
-			if (offset != lastOffset) {
-				entries[offset] = entries[lastOffset];
-				entries[offset + 1] = entries[lastOffset + 1];
+			int lastIndex = size - 1;
+			if (index != lastIndex) {
+				entries[index] = entries[lastIndex];
 			}
-			entries[lastOffset] = null;
-			entries[lastOffset + 1] = null;
+			entries[lastIndex] = null;
 			size--;
 		}
 	}

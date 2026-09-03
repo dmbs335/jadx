@@ -355,6 +355,47 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	public static class ExceptionStateBetweenCallsFlow {
+		private static void parse(String value) {
+			Integer.parseInt(value);
+		}
+
+		private int evaluate(String first, String second) {
+			int state = 1;
+			try {
+				parse(first);
+				state = 2;
+				parse(second);
+				state = 3;
+			} catch (NumberFormatException e) {
+				return state;
+			}
+			return state;
+		}
+
+		private int evaluateAssignment(String first, String second) {
+			int state = 7;
+			try {
+				state = Integer.parseInt(first);
+				Integer.parseInt(second);
+			} catch (NumberFormatException e) {
+				return state;
+			}
+			return state;
+		}
+
+		public void check() {
+			if (evaluate("bad", "4") != 1
+					|| evaluate("4", "bad") != 2
+					|| evaluate("4", "5") != 3
+					|| evaluateAssignment("bad", "5") != 7
+					|| evaluateAssignment("4", "bad") != 4
+					|| evaluateAssignment("4", "5") != 4) {
+				throw new AssertionError("exception state between calls");
+			}
+		}
+	}
+
 	public static class ExpressionMatrixFlow {
 		private long mix(int x, long y) {
 			int narrowByte = (byte) (x * 31);
@@ -369,6 +410,897 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 					|| mix(1, 5) != 9223371970282782690L
 					|| mix(-7, 0x123456789abcdef0L) != -1885653428083849263L) {
 				throw new AssertionError("expression matrix");
+			}
+		}
+	}
+
+	public static class LabeledFinallyExitFlow {
+		private int run(int mode) {
+			int result = 0;
+			outer: for (int i = 0; i < 5; i++) {
+				try {
+					if (i + mode == 1) {
+						continue;
+					}
+					if (i + mode == 3) {
+						break outer;
+					}
+					if (i == 4 && mode < 0) {
+						return result - 7;
+					}
+					result = result * 10 + i;
+				} finally {
+					result += 5;
+				}
+			}
+			return result;
+		}
+
+		public void check() {
+			if (run(0) != 112 || run(1) != 61 || run(-4) != 5671) {
+				throw new AssertionError("labeled finally exits");
+			}
+		}
+	}
+
+	public static class MultiCatchStateFlow {
+		private int evaluate(String text, int mode) {
+			int value = 7;
+			try {
+				value += Integer.parseInt(text);
+				if (mode == 1) {
+					throw new UnsupportedOperationException("operation");
+				}
+				if (mode == 2) {
+					throw new IllegalStateException("state");
+				}
+				value *= 2;
+			} catch (NumberFormatException | UnsupportedOperationException e) {
+				value += 9;
+			} catch (IllegalStateException e) {
+				value = -value;
+			} finally {
+				value = (value << 1) ^ 5;
+			}
+			return value;
+		}
+
+		public void check() {
+			if (evaluate("3", 0) != 45 || evaluate("x", 0) != 37
+					|| evaluate("3", 1) != 35 || evaluate("3", 2) != -23) {
+				throw new AssertionError("multi-catch state");
+			}
+		}
+	}
+
+	public static class SwitchLoopExceptionStateFlow {
+		private int fold(String[] values, int mode) {
+			int acc = 3;
+			for (int i = 0; i < values.length; i++) {
+				try {
+					switch ((i + mode) & 3) {
+						case 0:
+							acc += Integer.parseInt(values[i]);
+							break;
+						case 1:
+							if (values[i] == null) {
+								throw new NullPointerException("value");
+							}
+							acc ^= values[i].length();
+							continue;
+						case 2:
+							acc *= Integer.parseInt(values[i]);
+							break;
+						default:
+							return acc - i;
+					}
+				} catch (NumberFormatException | NullPointerException e) {
+					acc = acc * 5 + i;
+				} finally {
+					acc ^= i + 11;
+				}
+			}
+			return acc;
+		}
+
+		public void check() {
+			String[] first = { "2", "bad", null };
+			String[] second = { null, "4", "5" };
+			if (fold(first, 0) != 10 || fold(first, 1) != 32
+					|| fold(second, 0) != 32 || fold(second, 3) != 3) {
+				throw new AssertionError("switch loop exception state");
+			}
+		}
+	}
+
+	public static class NestedFinallyReturnFlow {
+		private int state;
+
+		private int evaluate(int mode) {
+			try {
+				state = 1;
+				try {
+					if (mode == 0) {
+						return 10;
+					}
+					if (mode == 1) {
+						throw new IllegalArgumentException("mode");
+					}
+					state = 2;
+					return 20;
+				} catch (IllegalArgumentException e) {
+					state = 3;
+					return 30;
+				} finally {
+					state = state * 10 + 4;
+				}
+			} finally {
+				state = state * 10 + 5;
+			}
+		}
+
+		public void check() {
+			state = 0;
+			if (evaluate(0) != 10 || state != 145) {
+				throw new AssertionError("nested finally direct return: " + state);
+			}
+			state = 0;
+			if (evaluate(1) != 30 || state != 345) {
+				throw new AssertionError("nested finally caught return: " + state);
+			}
+			state = 0;
+			if (evaluate(2) != 20 || state != 245) {
+				throw new AssertionError("nested finally tail return: " + state);
+			}
+		}
+	}
+
+	public static class ArrayEvaluationOrderFlow {
+		private int cursor;
+		private int calls;
+
+		private int next() {
+			calls++;
+			return cursor++;
+		}
+
+		@SuppressWarnings("checkstyle:InnerAssignment")
+		private int evaluate() {
+			int[] values = { 2, 3, 4, 5 };
+			cursor = 0;
+			calls = 0;
+			values[next()] += values[next()] *= 2;
+			values[cursor++] ^= cursor + values[cursor++];
+			return values[0] * 10000 + values[1] * 1000 + values[2] * 100 + values[3] * 10
+					+ cursor + calls;
+		}
+
+		public void check() {
+			if (evaluate() != 87256 || cursor != 4 || calls != 2) {
+				throw new AssertionError("array evaluation order");
+			}
+		}
+	}
+
+	public static class ExceptionalExpressionOrderFlow {
+		private int trace;
+
+		private int step(int value, int failAt) {
+			trace = trace * 10 + value;
+			if (value == failAt) {
+				throw new IllegalStateException("step " + value);
+			}
+			return value;
+		}
+
+		private int evaluate(int failAt) {
+			trace = 0;
+			try {
+				int result = step(1, failAt) + step(2, failAt) * step(3, failAt);
+				return result * 10000 + trace;
+			} catch (IllegalStateException e) {
+				return -trace;
+			} finally {
+				trace = trace * 10 + 9;
+			}
+		}
+
+		public void check() {
+			if (evaluate(0) != 70123 || trace != 1239) {
+				throw new AssertionError("expression normal order: " + trace);
+			}
+			if (evaluate(2) != -12 || trace != 129) {
+				throw new AssertionError("expression middle failure: " + trace);
+			}
+			if (evaluate(3) != -123 || trace != 1239) {
+				throw new AssertionError("expression tail failure: " + trace);
+			}
+		}
+	}
+
+	public static class FinallyOverrideFlow {
+		private int trace;
+
+		private int evaluate(int mode) {
+			try {
+				trace = 1;
+				if (mode == 3) {
+					throw new IllegalArgumentException("body");
+				}
+				return 10 + mode;
+			} catch (IllegalArgumentException e) {
+				trace = 2;
+				return 20;
+			} finally {
+				trace = trace * 10 + 5;
+				if (mode == 1) {
+					return 99;
+				}
+				if (mode == 2) {
+					throw new IllegalStateException("finally");
+				}
+			}
+		}
+
+		public void check() {
+			if (evaluate(0) != 10 || trace != 15) {
+				throw new AssertionError("finally keeps return: " + trace);
+			}
+			if (evaluate(1) != 99 || trace != 15) {
+				throw new AssertionError("finally overrides return: " + trace);
+			}
+			try {
+				evaluate(2);
+				throw new AssertionError("finally must throw");
+			} catch (IllegalStateException e) {
+				if (trace != 15) {
+					throw new AssertionError("finally throw state: " + trace);
+				}
+			}
+			if (evaluate(3) != 20 || trace != 25) {
+				throw new AssertionError("finally after catch return: " + trace);
+			}
+		}
+	}
+
+	public static class FinallyThrowOverrideFlow {
+		private int trace;
+
+		private int evaluate(int mode) {
+			try {
+				trace = 1;
+				if (mode == 3) {
+					throw new IllegalArgumentException("body");
+				}
+				return 10 + mode;
+			} catch (IllegalArgumentException e) {
+				trace = 2;
+				return 20;
+			} finally {
+				trace = trace * 10 + 6;
+				if (mode == 1) {
+					throw new IllegalStateException("finally");
+				}
+			}
+		}
+
+		public void check() {
+			if (evaluate(0) != 10 || trace != 16) {
+				throw new AssertionError("finally keeps return: " + trace);
+			}
+			try {
+				evaluate(1);
+				throw new AssertionError("finally must throw");
+			} catch (IllegalStateException e) {
+				if (trace != 16) {
+					throw new AssertionError("finally throw state: " + trace);
+				}
+			}
+			if (evaluate(3) != 20 || trace != 26) {
+				throw new AssertionError("finally after catch return: " + trace);
+			}
+		}
+	}
+
+	public static class FinallyReturnOverrideFlow {
+		private int trace;
+
+		private int evaluate(int mode) {
+			try {
+				trace = 1;
+				if (mode == 3) {
+					throw new IllegalArgumentException("body");
+				}
+				return 10 + mode;
+			} catch (IllegalArgumentException e) {
+				trace = 2;
+				return 20;
+			} finally {
+				trace = trace * 10 + 7;
+				if (mode == 1) {
+					return 99;
+				}
+			}
+		}
+
+		public void check() {
+			if (evaluate(0) != 10 || trace != 17) {
+				throw new AssertionError("finally keeps return: " + trace);
+			}
+			if (evaluate(1) != 99 || trace != 17) {
+				throw new AssertionError("finally overrides return: " + trace);
+			}
+			if (evaluate(3) != 20 || trace != 27) {
+				throw new AssertionError("finally after catch return: " + trace);
+			}
+		}
+	}
+
+	public static class FinallySwitchOverrideFlow {
+		private int trace;
+
+		private int evaluate(int mode) {
+			try {
+				trace = 1;
+				if (mode == 3) {
+					throw new IllegalArgumentException("body");
+				}
+				return 10 + mode;
+			} catch (IllegalArgumentException e) {
+				trace = 2;
+				return 20;
+			} finally {
+				trace = trace * 10 + 8;
+				switch (mode) {
+					case 1:
+						throw new IllegalStateException("finally");
+					case 2:
+						return 98;
+					default:
+						break;
+				}
+			}
+		}
+
+		public void check() {
+			if (evaluate(0) != 10 || trace != 18) {
+				throw new AssertionError("finally keeps return: " + trace);
+			}
+			try {
+				evaluate(1);
+				throw new AssertionError("finally must throw");
+			} catch (IllegalStateException e) {
+				if (trace != 18) {
+					throw new AssertionError("finally throw state: " + trace);
+				}
+			}
+			if (evaluate(2) != 98 || trace != 18) {
+				throw new AssertionError("finally switch return: " + trace);
+			}
+			if (evaluate(3) != 20 || trace != 28) {
+				throw new AssertionError("finally after catch return: " + trace);
+			}
+		}
+	}
+
+	public static class MultiCatchFinallyThrowFlow {
+		private int trace;
+
+		private int evaluate(String input, int mode) {
+			try {
+				trace = 1;
+				if (mode == 4) {
+					throw new IllegalArgumentException("mode");
+				}
+				return Integer.parseInt(input) + mode;
+			} catch (NumberFormatException e) {
+				trace = 2;
+				return 20;
+			} catch (IllegalArgumentException e) {
+				trace = 3;
+				return 30;
+			} finally {
+				trace = trace * 10 + 9;
+				if (mode == 1) {
+					throw new IllegalStateException("finally");
+				}
+			}
+		}
+
+		public void check() {
+			if (evaluate("5", 0) != 5 || trace != 19) {
+				throw new AssertionError("normal return: " + trace);
+			}
+			if (evaluate("bad", 0) != 20 || trace != 29) {
+				throw new AssertionError("number catch: " + trace);
+			}
+			if (evaluate("5", 4) != 30 || trace != 39) {
+				throw new AssertionError("argument catch: " + trace);
+			}
+			try {
+				evaluate("5", 1);
+				throw new AssertionError("finally must throw");
+			} catch (IllegalStateException e) {
+				if (trace != 19) {
+					throw new AssertionError("finally throw state: " + trace);
+				}
+			}
+		}
+	}
+
+	public static class FinallySameTypeThrowFlow {
+		private int trace;
+
+		private int evaluate(String input, int mode) {
+			try {
+				trace = 1;
+				return Integer.parseInt(input);
+			} catch (IllegalArgumentException e) {
+				trace = 2;
+				return 20;
+			} finally {
+				trace = trace * 10 + 4;
+				if (mode == 1) {
+					throw new IllegalArgumentException("finally");
+				}
+			}
+		}
+
+		public void check() {
+			if (evaluate("5", 0) != 5 || trace != 14) {
+				throw new AssertionError("normal return: " + trace);
+			}
+			if (evaluate("bad", 0) != 20 || trace != 24) {
+				throw new AssertionError("caught return: " + trace);
+			}
+			try {
+				evaluate("5", 1);
+				throw new AssertionError("finally exception must escape");
+			} catch (IllegalArgumentException e) {
+				if (trace != 14 || !"finally".equals(e.getMessage())) {
+					throw new AssertionError("finally exception identity: " + trace);
+				}
+			}
+		}
+	}
+
+	public static class NestedSwitchFinallyLoopFlow {
+		private int run(int mode) {
+			int trace = 0;
+			int acc = 2;
+			outer: for (int i = 0; i < 4; i++) {
+				try {
+					switch ((i + mode) & 3) {
+						case 0:
+							acc = acc * 10 + i;
+							break;
+						case 1:
+							acc += 7;
+							continue outer;
+						case 2:
+							try {
+								acc += 20 / (i - 1);
+							} catch (ArithmeticException e) {
+								acc += 13;
+							}
+							break;
+						default:
+							if (mode < 0) {
+								break outer;
+							}
+							acc ^= i;
+					}
+					acc += 3;
+				} finally {
+					trace = trace * 10 + i;
+					acc += 1;
+				}
+			}
+			return acc * 10_000 + trace;
+		}
+
+		public void check() {
+			if (run(-1) != 30_000 || run(0) != 630_123
+					|| run(1) != 2_970_123 || run(2) != -759_877) {
+				throw new AssertionError("nested switch/finally loop");
+			}
+		}
+	}
+
+	public static class SwitchFallThroughCatchFlow {
+		private int run(int mode) {
+			int acc = 1;
+			int trace = 0;
+			for (int i = 0; i < 5; i++) {
+				try {
+					switch ((i + mode) & 3) {
+						case 0:
+							acc += i + 1;
+						case 1:
+							acc *= 2;
+							if (i == 2) {
+								throw new IllegalArgumentException("case");
+							}
+						case 2:
+							acc += 3;
+							break;
+						default:
+							continue;
+					}
+				} catch (IllegalArgumentException e) {
+					acc = -acc;
+				} finally {
+					trace = trace * 10 + i;
+					acc += 10;
+				}
+				acc ^= i + mode;
+			}
+			return acc * 100_000 + trace;
+		}
+
+		public void check() {
+			if (run(-2) != 5_901_234 || run(0) != 15_301_234
+					|| run(1) != 20_601_234 || run(3) != -4_598_766) {
+				throw new AssertionError("switch fall-through catch");
+			}
+		}
+	}
+
+	public static class NestedLoopSwitchCatchFinallyFlow {
+		private int run(int mode) {
+			int acc = 1;
+			int trace = 0;
+			outer: for (int row = 0; row < 4; row++) {
+				int col = 0;
+				while (col < 5) {
+					int value = row * 5 + col++;
+					try {
+						switch ((value + mode) & 3) {
+							case 0:
+								acc += value;
+								continue;
+							case 1:
+								if (row + mode == 2) {
+									throw new IllegalStateException("row");
+								}
+								acc = acc * 2 + col;
+								break;
+							case 2:
+								if (col == 3) {
+									continue outer;
+								}
+								acc ^= value;
+								break;
+							default:
+								if (row == 3) {
+									break outer;
+								}
+								acc -= col;
+						}
+						acc += 7;
+					} catch (IllegalStateException e) {
+						acc += 100 + row;
+						if ((mode & 1) == 0) {
+							continue outer;
+						}
+					} finally {
+						trace = (trace * 17 + row * 5 + col) % 10_000;
+						acc += 3;
+					}
+					acc ^= trace & 7;
+				}
+			}
+			return acc * 10_000 + trace;
+		}
+
+		public void check() {
+			if (run(-2) != 8_913_598 || run(-1) != 7_036_038
+					|| run(0) != 3_305_216 || run(1) != 11_102_683
+					|| run(2) != 13_393_545 || run(3) != 7_036_038) {
+				throw new AssertionError("nested loop switch catch/finally");
+			}
+		}
+	}
+
+	public static class SideEffectGuardCatchFinallyFlow {
+		private int state;
+
+		private int probe(int value) {
+			state = (state * 17 + value) & 0xffff;
+			if ((state & 31) == 7) {
+				throw new IllegalStateException("probe");
+			}
+			return state;
+		}
+
+		private long run(int mode) {
+			state = mode + 7;
+			int acc = 3;
+			outer: for (int row = 0; row < 5; row++) {
+				for (int col = 0; col < 4; col++) {
+					try {
+						int selector = (probe(row + 1) + col + mode) & 3;
+						switch (selector) {
+							case 0:
+								if ((probe(col + 2) & 1) == 0
+										&& (probe(mode + 5) % 3 != 0 || probe(row + 6) > 0)) {
+									acc += 11;
+								} else {
+									acc -= 3;
+								}
+								break;
+							case 1:
+								acc ^= probe(row + col + 3);
+								continue;
+							case 2:
+								try {
+									acc += 50 / (probe(col - mode + 1) % 4);
+								} catch (ArithmeticException e) {
+									acc += 13;
+								}
+								if ((acc & 7) == 0) {
+									continue outer;
+								}
+								break;
+							default:
+								if (row == 4 && (probe(col + 1) & 1) != 0) {
+									break outer;
+								}
+								acc += probe(2);
+						}
+						acc += 5;
+					} catch (IllegalStateException e) {
+						acc -= 17;
+						if ((state & 1) == 0) {
+							continue outer;
+						}
+					} finally {
+						acc = acc * 3 + row - col;
+						state ^= acc & 15;
+					}
+					acc ^= state;
+				}
+			}
+			return ((long) acc << 32) | (state & 0xffffL);
+		}
+
+		public void check() {
+			long[] actual = { run(-3), run(-1), run(0), run(2), run(5) };
+			long[] expected = {
+					-3_886_225_716_684_984_206L,
+					-8_259_634_345_464_023_146L,
+					-4_648_195_649_920_028_198L,
+					-4_882_732_028_564_298_879L,
+					-7_263_064_725_766_769_318L
+			};
+			if (!Arrays.equals(actual, expected)) {
+				throw new AssertionError("side-effect guard/catch/finally: " + Arrays.toString(actual));
+			}
+		}
+	}
+
+	public static class CatchHierarchyFinallyLoopFlow {
+		private String run(String[] values, int mode) {
+			StringBuilder trace = new StringBuilder();
+			outer: for (int i = 0; i < values.length; i++) {
+				try {
+					trace.append('T').append(i);
+					int value = Integer.parseInt(values[i]);
+					if (value < 0) {
+						throw new IllegalArgumentException("negative");
+					}
+					if (mode == 1 && i == 1) {
+						throw new IllegalStateException("stop");
+					}
+					trace.append('V').append(value);
+				} catch (NumberFormatException e) {
+					trace.append('N');
+					continue;
+				} catch (IllegalArgumentException e) {
+					trace.append('A');
+				} catch (RuntimeException e) {
+					trace.append('R');
+					break outer;
+				} finally {
+					trace.append('F');
+				}
+				trace.append('Z');
+			}
+			return trace.toString();
+		}
+
+		public void check() {
+			String mixed = run(new String[] { "2", "x", "-1", "4" }, 0);
+			String stopped = run(new String[] { "2", "3", "-1", "4" }, 1);
+			if (!"T0V2FZT1NFT2AFZT3V4FZ".equals(mixed)
+					|| !"T0V2FZT1RF".equals(stopped)) {
+				throw new AssertionError("catch hierarchy/finally: " + mixed + " | " + stopped);
+			}
+		}
+	}
+
+	public static class NestedHandlerLoopExitFlow {
+		private String continueOuter() {
+			StringBuilder trace = new StringBuilder();
+			outer: for (int i = 0; i < 3; i++) {
+				for (int j = 0; j < 3; j++) {
+					try {
+						if (j == 1) {
+							throw new NumberFormatException("next");
+						}
+						trace.append('T').append(i).append(j);
+					} catch (NumberFormatException e) {
+						trace.append('C');
+						continue outer;
+					} finally {
+						trace.append('F');
+					}
+					trace.append('Z');
+				}
+				trace.append('O');
+			}
+			return trace.toString();
+		}
+
+		private String breakOuter() {
+			StringBuilder trace = new StringBuilder();
+			outer: for (int i = 0; i < 3; i++) {
+				for (int j = 0; j < 3; j++) {
+					try {
+						if (j == 1) {
+							throw new NumberFormatException("stop");
+						}
+						trace.append('T').append(i).append(j);
+					} catch (NumberFormatException e) {
+						trace.append('C');
+						break outer;
+					} finally {
+						trace.append('F');
+					}
+					trace.append('Z');
+				}
+				trace.append('O');
+			}
+			return trace.toString();
+		}
+
+		public void check() {
+			String continued = continueOuter();
+			String stopped = breakOuter();
+			if (!"T00FZCFT10FZCFT20FZCF".equals(continued)
+					|| !"T00FZCF".equals(stopped)) {
+				throw new AssertionError("nested handler loop exits: " + continued + " | " + stopped);
+			}
+		}
+	}
+
+	public static class WhileCatchSharedTailFlow {
+		private int run(String[] values) {
+			int acc = 1;
+			int i = 0;
+			while (i < values.length) {
+				try {
+					acc += Integer.parseInt(values[i]);
+				} catch (NumberFormatException e) {
+					acc += 7;
+				} finally {
+					i++;
+				}
+				acc = acc * 3 + i;
+			}
+			return acc;
+		}
+
+		public void check() {
+			int result = run(new String[] { "2", "bad", "4" });
+			if (result != 174) {
+				throw new AssertionError("while catch shared tail: " + result);
+			}
+		}
+	}
+
+	public static class NestedFinallySharedTailFlow {
+		private int run(boolean fail) {
+			int result = 1;
+			try {
+				try {
+					if (fail) {
+						throw new IllegalArgumentException("fail");
+					}
+					result += 2;
+				} catch (IllegalArgumentException e) {
+					result += 4;
+				} finally {
+					result *= 3;
+				}
+			} finally {
+				result += 5;
+			}
+			return result * 2;
+		}
+
+		public void check() {
+			int success = run(false);
+			int failed = run(true);
+			if (success != 28 || failed != 40) {
+				throw new AssertionError("nested finally shared tail: " + success + " | " + failed);
+			}
+		}
+	}
+
+	public static class CatchFinallyExpressionTailFlow {
+		private int run(String value, int mode) {
+			int state = 3;
+			try {
+				state += Integer.parseInt(value);
+				if (mode == 1) {
+					return state * 2;
+				}
+			} catch (NumberFormatException e) {
+				state = state * 5 + 1;
+			} finally {
+				state = state * 3 + mode;
+			}
+			return (state + 7) * (mode + 2);
+		}
+
+		public void check() {
+			int normal = run("4", 0);
+			int caught = run("bad", 0);
+			int returned = run("4", 1);
+			int caughtWithMode = run("bad", 2);
+			if (normal != 56 || caught != 110 || returned != 14 || caughtWithMode != 228) {
+				throw new AssertionError("catch/finally expression tail: "
+						+ normal + " | " + caught + " | " + returned + " | " + caughtWithMode);
+			}
+		}
+	}
+
+	public static class SynchronizedAbruptExitFlow {
+		private final Object lock = new Object();
+
+		private String run(int mode) {
+			StringBuilder trace = new StringBuilder();
+			outer: for (int i = 0; i < 4; i++) {
+				synchronized (lock) {
+					trace.append('L').append(i);
+					try {
+						if (mode == 0 && i == 1) {
+							continue outer;
+						}
+						if (mode == 1 && i == 2) {
+							break outer;
+						}
+						if (mode == 2 && i == 1) {
+							trace.append('R');
+							return trace.toString();
+						}
+						if (mode == 3 && i == 1) {
+							throw new IllegalArgumentException("caught");
+						}
+						trace.append('B');
+					} catch (IllegalArgumentException e) {
+						trace.append('C');
+					} finally {
+						trace.append('F');
+					}
+				}
+				trace.append('Z');
+			}
+			return trace.toString();
+		}
+
+		public void check() {
+			String continued = run(0);
+			String stopped = run(1);
+			String returned = run(2);
+			String caught = run(3);
+			if (!"L0BFZL1FL2BFZL3BFZ".equals(continued)
+					|| !"L0BFZL1BFZL2F".equals(stopped)
+					|| !"L0BFZL1R".equals(returned)
+					|| !"L0BFZL1CFZL2BFZL3BFZ".equals(caught)) {
+				throw new AssertionError("synchronized abrupt exits: "
+						+ continued + " | " + stopped + " | " + returned + " | " + caught);
 			}
 		}
 	}
@@ -418,13 +1350,129 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		getClassNode(EnumFallThroughFlow.class);
 	}
 
-	@TestWithProfiles({ TestProfile.D8_J8, TestProfile.JAVA8 })
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testExceptionPhiFlow() {
 		getClassNode(ExceptionPhiFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testExceptionStateBetweenCallsFlow() {
+		getClassNode(ExceptionStateBetweenCallsFlow.class);
 	}
 
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testExpressionMatrixFlow() {
 		getClassNode(ExpressionMatrixFlow.class);
 	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testLabeledFinallyExitFlow() {
+		getClassNode(LabeledFinallyExitFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testMultiCatchStateFlow() {
+		getClassNode(MultiCatchStateFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testSwitchLoopExceptionStateFlow() {
+		getClassNode(SwitchLoopExceptionStateFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testNestedFinallyReturnFlow() {
+		getClassNode(NestedFinallyReturnFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testArrayEvaluationOrderFlow() {
+		getClassNode(ArrayEvaluationOrderFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testExceptionalExpressionOrderFlow() {
+		getClassNode(ExceptionalExpressionOrderFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testFinallyOverrideFlow() {
+		getClassNode(FinallyOverrideFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testFinallyThrowOverrideFlow() {
+		getClassNode(FinallyThrowOverrideFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testFinallyReturnOverrideFlow() {
+		getClassNode(FinallyReturnOverrideFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testFinallySwitchOverrideFlow() {
+		getClassNode(FinallySwitchOverrideFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testMultiCatchFinallyThrowFlow() {
+		getClassNode(MultiCatchFinallyThrowFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testFinallySameTypeThrowFlow() {
+		getClassNode(FinallySameTypeThrowFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testNestedSwitchFinallyLoopFlow() {
+		getClassNode(NestedSwitchFinallyLoopFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testSwitchFallThroughCatchFlow() {
+		getClassNode(SwitchFallThroughCatchFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testNestedLoopSwitchCatchFinallyFlow() {
+		getClassNode(NestedLoopSwitchCatchFinallyFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testSideEffectGuardCatchFinallyFlow() {
+		getClassNode(SideEffectGuardCatchFinallyFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testCatchHierarchyFinallyLoopFlow() {
+		getClassNode(CatchHierarchyFinallyLoopFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testNestedHandlerLoopExitFlow() {
+		getClassNode(NestedHandlerLoopExitFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testWhileCatchSharedTailFlow() {
+		getClassNode(WhileCatchSharedTailFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testNestedFinallySharedTailFlow() {
+		getClassNode(NestedFinallySharedTailFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testCatchFinallyExpressionTailFlow() {
+		getClassNode(CatchFinallyExpressionTailFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testSynchronizedAbruptExitFlow() {
+		getClassNode(SynchronizedAbruptExitFlow.class);
+	}
+
 }

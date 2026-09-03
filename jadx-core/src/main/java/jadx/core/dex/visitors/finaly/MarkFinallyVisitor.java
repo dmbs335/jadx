@@ -90,6 +90,16 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		}
 	}
 
+	private static final class TraversalStart {
+		private final BlockNode block;
+		private final int bottomOffset;
+
+		private TraversalStart(BlockNode block, int bottomOffset) {
+			this.block = block;
+			this.bottomOffset = bottomOffset;
+		}
+	}
+
 	@Override
 	public void visit(MethodNode mth) {
 		if (mth.isNoCode() || mth.isNoExceptionHandlers()) {
@@ -404,15 +414,25 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 			// For an instruction to have matched, the number of times it has been found must be
 			// equal to the number of edges that the exception handler has which aren't the
 			// finally handler.
-			if (candidateInsns.size() != tryInfo.handlerScopes.size() - 1) {
+			int expectedCandidates = tryInfo.handlerScopes.size() - 1;
+			if (candidateInsns.size() != expectedCandidates) {
 				ignoredFinallyInsns.add(finallyInsn);
 				ignoredCandidateInsns.addAll(candidateInsns);
 				// TODO: Add support for partial `catch (Throwable)` finally clauses.
 				// continue;
 				return false;
 			}
-
 			insnMap.put(finallyInsn, candidateInsns);
+		}
+		boolean unmatchedCompleteCopy = hasUnmatchedCompleteCopy(mth, tryInfo, insnMap);
+		if (unmatchedCompleteCopy) {
+			/*
+			 * Compilers duplicate a finally sequence at every normal exit. Scope grouping can
+			 * collapse several exits into one candidate edge, especially around loops, switches
+			 * and nested try blocks. Extracting while a complete equivalent copy remains would
+			 * execute the sequence twice, so retain the bytecode-shaped representation.
+			 */
+			return false;
 		}
 		for (InsnNode finallyInsn : insnMap.keySet()) {
 			finallyInsn.add(AFlag.FINALLY_INSNS);
@@ -460,6 +480,36 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		return true;
 	}
 
+	private static boolean hasUnmatchedCompleteCopy(
+			MethodNode mth, TryExtractInfo tryInfo, Map<InsnNode, List<InsnNode>> insnMap) {
+		SameInstructionsStrategy sameInstructions = new SameInstructionsStrategyImpl();
+		Set<BlockNode> finallyHandlerBlocks = new HashSet<>(tryInfo.finallyHandler.getBlocks());
+		finallyHandlerBlocks.add(tryInfo.finallyHandler.getHandlerBlock());
+		for (Map.Entry<InsnNode, List<InsnNode>> entry : insnMap.entrySet()) {
+			InsnNode finallyInsn = entry.getKey();
+			List<InsnNode> candidateInsns = entry.getValue();
+			boolean unmatched = false;
+			for (BlockNode block : mth.getBasicBlocks()) {
+				if (finallyHandlerBlocks.contains(block)) {
+					continue;
+				}
+				for (InsnNode insn : block.getInstructions()) {
+					if (!candidateInsns.contains(insn) && sameInstructions.sameInsns(insn, finallyInsn)) {
+						unmatched = true;
+						break;
+					}
+				}
+				if (unmatched) {
+					break;
+				}
+			}
+			if (!unmatched) {
+				return false;
+			}
+		}
+		return !insnMap.isEmpty();
+	}
+
 	/**
 	 * Gets a list of every exception handler attached to this try block, including handlers of inner
 	 * try blocks.
@@ -488,7 +538,10 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		if (finallyScopeTerminus == null) {
 			return null;
 		}
+		TraversalStart finallyStart = findFinallyTraversalStart(finallyScopeTerminus, allHandlerBlocks);
 		Map<InsnNode, List<InsnNode>> matchingInsns = new HashMap<>();
+		SameInstructionsStrategy sameInstructions = new SameInstructionsStrategyImpl();
+		InsnNode finallyTailInsn = findFinallyTailInsn(finallyStart.block, allHandlerBlocks);
 		for (TryEdge edge : tryInfo.handlerScopes.keySet()) {
 			if (edge.isHandlerExit() && edge.getExceptionHandler() == tryInfo.finallyHandler) {
 				continue;
@@ -505,9 +558,12 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 			if (scopeTerminus == null) {
 				throw new JadxRuntimeException("Expected to find fallthrough terminus for handler " + edge);
 			}
+			int candidateBottomOffset = findCandidateTerminusBottomOffset(
+					scopeTerminus, finallyTailInsn, sameInstructions);
 			TraverserActivePathState comparatorState =
-					new TraverserActivePathState(mth, new SameInstructionsStrategyImpl(), finallyScopeTerminus,
-							scopeTerminus, allHandlerBlocks, handlerBlocks);
+					new TraverserActivePathState(mth, sameInstructions, finallyStart.block,
+							scopeTerminus, allHandlerBlocks, handlerBlocks,
+							finallyStart.bottomOffset, candidateBottomOffset);
 			TraverserController controller = new TraverserController();
 			List<TraverserActivePathState> pathResults;
 			try {
@@ -515,6 +571,22 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 			} catch (TraverserException e) {
 				LOG.error("Could not search for finally duplicate instructions in path", e);
 				return null;
+			}
+			if (!hasMatchedInsns(pathResults)) {
+				TraversalStart traversalStart = findTryLeaveTraversalStart(
+						handlerBlocks, finallyTailInsn, sameInstructions);
+				if (traversalStart != null) {
+					comparatorState = new TraverserActivePathState(mth, sameInstructions, finallyStart.block,
+							traversalStart.block, allHandlerBlocks, handlerBlocks,
+							finallyStart.bottomOffset, traversalStart.bottomOffset);
+					controller = new TraverserController();
+					try {
+						pathResults = controller.process(comparatorState);
+					} catch (TraverserException e) {
+						LOG.error("Could not search for finally duplicate instructions from try-leave block", e);
+						return null;
+					}
+				}
 			}
 			Set<BlockNode> completeFinally = new HashSet<>();
 			Set<BlockNode> completeCandidate = new HashSet<>();
@@ -548,6 +620,117 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		return matchingInsns;
 	}
 
+	private static TraversalStart findFinallyTraversalStart(
+			BlockNode scopeTerminus, List<BlockNode> finallyBlocks) {
+		if (finallyBlocks.contains(scopeTerminus) && !scopeTerminus.isEmpty()) {
+			return new TraversalStart(scopeTerminus, 0);
+		}
+		Set<BlockNode> allowed = new HashSet<>(finallyBlocks);
+		if (scopeTerminus.isEmpty()) {
+			allowed.remove(scopeTerminus);
+		}
+		BlockNode exit = null;
+		for (BlockNode block : finallyBlocks) {
+			boolean hasSuccessorInScope = block.getCleanSuccessors().stream().anyMatch(allowed::contains);
+			if (hasSuccessorInScope) {
+				continue;
+			}
+			if (exit != null && exit != block) {
+				return new TraversalStart(scopeTerminus, 0);
+			}
+			exit = block;
+		}
+		if (exit == null) {
+			return new TraversalStart(scopeTerminus, 0);
+		}
+		int bottomOffset = 0;
+		List<InsnNode> insns = exit.getInstructions();
+		for (int i = insns.size() - 1; i >= 0; i--) {
+			InsnType type = insns.get(i).getType();
+			if (type != InsnType.RETURN && type != InsnType.THROW) {
+				break;
+			}
+			bottomOffset++;
+		}
+		return new TraversalStart(exit, bottomOffset);
+	}
+
+	private static boolean hasMatchedInsns(List<TraverserActivePathState> pathResults) {
+		return ListUtils.anyMatch(pathResults, result -> !result.getMatchedInsns().isEmpty());
+	}
+
+	private static @Nullable TraversalStart findTryLeaveTraversalStart(
+			List<BlockNode> candidateBlocks, @Nullable InsnNode finallyTailInsn,
+			SameInstructionsStrategy sameInstructions) {
+		if (finallyTailInsn == null) {
+			return null;
+		}
+		InsnNode matchedInsn = null;
+		TraversalStart matchedStart = null;
+		Set<BlockNode> visited = new HashSet<>();
+		for (BlockNode block : candidateBlocks) {
+			if (!visited.add(block)) {
+				continue;
+			}
+			List<InsnNode> insns = block.getInstructions();
+			for (int i = insns.size() - 1; i >= 0; i--) {
+				InsnNode candidateInsn = insns.get(i);
+				if (!candidateInsn.contains(AFlag.TRY_LEAVE)
+						|| !sameInstructions.sameInsns(candidateInsn, finallyTailInsn)) {
+					continue;
+				}
+				if (matchedInsn != null && matchedInsn != candidateInsn) {
+					return null;
+				}
+				matchedInsn = candidateInsn;
+				matchedStart = new TraversalStart(block, insns.size() - i - 1);
+			}
+		}
+		return matchedStart;
+	}
+
+	private static @Nullable InsnNode findFinallyTailInsn(
+			BlockNode terminus, List<BlockNode> finallyBlocks) {
+		Set<BlockNode> allowed = new HashSet<>(finallyBlocks);
+		Set<BlockNode> visited = new HashSet<>();
+		BlockNode block = terminus;
+		while (block != null && visited.add(block)) {
+			List<InsnNode> insns = block.getInstructions();
+			for (int i = insns.size() - 1; i >= 0; i--) {
+				InsnNode insn = insns.get(i);
+				if (insn.getType() != InsnType.RETURN && insn.getType() != InsnType.THROW) {
+					return insn;
+				}
+			}
+			BlockNode predecessor = null;
+			for (BlockNode candidate : block.getPredecessors()) {
+				if (!allowed.contains(candidate)) {
+					continue;
+				}
+				if (predecessor != null) {
+					return null;
+				}
+				predecessor = candidate;
+			}
+			block = predecessor;
+		}
+		return null;
+	}
+
+	private static int findCandidateTerminusBottomOffset(
+			BlockNode terminus, @Nullable InsnNode finallyTailInsn, SameInstructionsStrategy sameInstructions) {
+		if (finallyTailInsn == null) {
+			return 0;
+		}
+		List<InsnNode> insns = terminus.getInstructions();
+		for (int i = insns.size() - 2; i >= 0; i--) {
+			if (sameInstructions.sameInsns(insns.get(i), finallyTailInsn)) {
+				return insns.size() - i - 1;
+			}
+		}
+		return 0;
+	}
+
 	private static void removeEmptyUpPath(List<BlockNode> handlerBlocks, BlockNode startBlock) {
 		for (BlockNode pred : startBlock.getPredecessors()) {
 			if (pred.isEmpty()) {
@@ -559,10 +742,25 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 	}
 
 	private static void copyCodeVars(InsnNode fromInsn, InsnNode toInsn) {
-		copyCodeVars(fromInsn.getResult(), toInsn.getResult());
+		copyResultCodeVar(fromInsn.getResult(), toInsn.getResult());
 		int argsCount = fromInsn.getArgsCount();
 		for (int i = 0; i < argsCount; i++) {
 			copyCodeVars(fromInsn.getArg(i), toInsn.getArg(i));
+		}
+	}
+
+	private static void copyResultCodeVar(@Nullable RegisterArg finallyResult, @Nullable RegisterArg candidateResult) {
+		if (finallyResult == null || candidateResult == null) {
+			return;
+		}
+		SSAVar finallyVar = finallyResult.getSVar();
+		SSAVar candidateVar = candidateResult.getSVar();
+		if (candidateVar.isUsedInPhi() && !finallyVar.isUsedInPhi()) {
+			// A duplicated assignment feeding a loop PHI owns the source-level variable. Reversing
+			// this relationship creates a fresh finally-local and leaves the loop variable unchanged.
+			finallyVar.setCodeVar(candidateVar.getCodeVar());
+		} else {
+			candidateVar.setCodeVar(finallyVar.getCodeVar());
 		}
 	}
 

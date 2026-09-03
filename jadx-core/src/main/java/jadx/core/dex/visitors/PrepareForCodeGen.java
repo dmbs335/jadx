@@ -99,6 +99,7 @@ public class PrepareForCodeGen extends AbstractVisitor {
 			checkInline(block);
 			collapseMarkedFloatIdentityConversions(mth, block);
 			removeParenthesis(block);
+			restoreSameCodeVarIncrementOrder(block);
 			modifyArith(block);
 			checkConstUsage(block);
 			addNullCasts(mth, block);
@@ -413,6 +414,80 @@ public class PrepareForCodeGen extends AbstractVisitor {
 					insn.add(AFlag.ARITH_ONEARG);
 				}
 			}
+		}
+	}
+
+	/**
+	 * SSA permits an increment to be scheduled before a remaining use of the previous value. If both
+	 * SSA versions are rendered as one Java variable, emitting that order changes the value observed
+	 * by the later expression. Move a local increment past consecutive pure expressions which still
+	 * consume the old SSA version. Stop at any operation that can expose the timing of the update.
+	 */
+	private static void restoreSameCodeVarIncrementOrder(BlockNode block) {
+		List<InsnNode> insns = block.getInstructions();
+		for (int index = 0; index < insns.size(); index++) {
+			InsnNode insn = insns.get(index);
+			if (!(insn instanceof ArithNode)
+					|| insn.contains(AFlag.ARITH_ONEARG)
+					|| insn.contains(AFlag.DECLARE_VAR)) {
+				continue;
+			}
+			ArithNode arith = (ArithNode) insn;
+			ArithOp op = arith.getOp();
+			if ((op != ArithOp.ADD && op != ArithOp.SUB)
+					|| !arith.getArg(0).isRegister()
+					|| !arith.getArg(1).isLiteral()
+					|| ((LiteralArg) arith.getArg(1)).getLiteral() != 1) {
+				continue;
+			}
+			RegisterArg result = arith.getResult();
+			RegisterArg oldValue = (RegisterArg) arith.getArg(0);
+			if (result == null
+					|| result.getSVar() == null
+					|| oldValue.getSVar() == null
+					|| result.getSVar() == oldValue.getSVar()
+					|| !result.sameCodeVar(oldValue)) {
+				continue;
+			}
+			int moveAfter = -1;
+			for (int nextIndex = index + 1; nextIndex < insns.size(); nextIndex++) {
+				InsnNode nextInsn = insns.get(nextIndex);
+				if (!isPureLocalExpression(nextInsn) || usesSsaVar(nextInsn, result.getSVar())) {
+					break;
+				}
+				if (usesSsaVar(nextInsn, oldValue.getSVar())) {
+					moveAfter = nextIndex;
+				}
+			}
+			if (moveAfter != -1) {
+				insns.remove(index);
+				insns.add(moveAfter, insn);
+				index = moveAfter;
+			}
+		}
+	}
+
+	private static boolean usesSsaVar(InsnNode insn, SSAVar ssaVar) {
+		List<RegisterArg> args = new ArrayList<>();
+		insn.getRegisterArgs(args);
+		for (RegisterArg arg : args) {
+			if (arg.getSVar() == ssaVar) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean isPureLocalExpression(InsnNode insn) {
+		switch (insn.getType()) {
+			case CONST:
+			case MOVE:
+				return true;
+			case ARITH:
+				ArithOp op = ((ArithNode) insn).getOp();
+				return op != ArithOp.DIV && op != ArithOp.REM;
+			default:
+				return false;
 		}
 	}
 

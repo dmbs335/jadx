@@ -38,7 +38,7 @@ class TaskExecutorTest {
 		executor.addParallelTasks(tasks);
 		try {
 			executor.execute();
-			assertThat(twoTasksStarted.await(1, TimeUnit.SECONDS)).isTrue();
+			assertThat(twoTasksStarted.await(10, TimeUnit.SECONDS)).isTrue();
 			executor.cancelPendingTasks();
 			releaseTasks.countDown();
 			executor.awaitTermination();

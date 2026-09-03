@@ -40,8 +40,23 @@ public final class PhiInsn extends InsnNode {
 		return arg;
 	}
 
+	/**
+	 * Bind an input arriving on an exceptional edge. A basic block can contain several throwing
+	 * instructions and the register state can change between them, so several exceptional inputs
+	 * can legitimately originate from the same block.
+	 */
+	public RegisterArg bindExceptionArg(BlockNode pred) {
+		RegisterArg arg = InsnArg.reg(getResult().getRegNum(), getResult().getInitType());
+		bindArg(arg, pred, true);
+		return arg;
+	}
+
 	public void bindArg(RegisterArg arg, BlockNode pred) {
-		if (blockBinds.contains(pred)) {
+		bindArg(arg, pred, false);
+	}
+
+	private void bindArg(RegisterArg arg, BlockNode pred, boolean allowDuplicateBlock) {
+		if (!allowDuplicateBlock && blockBinds.contains(pred)) {
 			throw new JadxRuntimeException("Duplicate predecessors in PHI insn: " + pred + ", " + this);
 		}
 		if (pred == null) {

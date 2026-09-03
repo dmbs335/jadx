@@ -207,7 +207,8 @@ public final class MethodInfo implements Comparable<MethodInfo> {
 			return false;
 		}
 		MethodInfo other = (MethodInfo) obj;
-		return shortId.equals(other.shortId)
+		return hash == other.hash
+				&& shortId.equals(other.shortId)
 				&& declClass.equals(other.declClass);
 	}
 

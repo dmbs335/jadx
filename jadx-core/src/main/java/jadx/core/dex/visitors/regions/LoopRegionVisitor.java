@@ -61,6 +61,7 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 	@Override
 	public void visit(MethodNode mth) {
 		DepthRegionTraversal.traverse(mth, this);
+		RestoreExceptionHandlerLoopExits.process(mth);
 		IfRegionVisitor.processIfRequested(mth);
 	}
 

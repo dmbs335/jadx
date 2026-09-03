@@ -235,13 +235,20 @@ public class TraverserActivePathState {
 	public TraverserActivePathState(MethodNode mth, SameInstructionsStrategy sameInstructionsStrategy,
 			BlockNode finallyBlockTerminus, BlockNode candidateBlockTerminus, List<BlockNode> finallyBlocks,
 			List<BlockNode> candidateBlocks) {
+		this(mth, sameInstructionsStrategy, finallyBlockTerminus, candidateBlockTerminus,
+				finallyBlocks, candidateBlocks, 0, 0);
+	}
+
+	public TraverserActivePathState(MethodNode mth, SameInstructionsStrategy sameInstructionsStrategy,
+			BlockNode finallyBlockTerminus, BlockNode candidateBlockTerminus, List<BlockNode> finallyBlocks,
+			List<BlockNode> candidateBlocks, int finallyBottomOffset, int candidateBottomOffset) {
 		boolean shouldFinallyAllowFirstBlockSkip = !finallyBlockTerminus.getInstructions().isEmpty();
 		boolean shouldCandidateAllowFirstBlockSkip = !candidateBlockTerminus.getInstructions().isEmpty();
 		CentralityState finallyCentralityState = new CentralityState(sameInstructionsStrategy, shouldFinallyAllowFirstBlockSkip);
 		CentralityState candidateCentralityState = new CentralityState(sameInstructionsStrategy, shouldCandidateAllowFirstBlockSkip);
 
-		TraverserBlockInfo finallyBlockInfo = new TraverserBlockInfo(finallyBlockTerminus);
-		TraverserBlockInfo candidateBlockInfo = new TraverserBlockInfo(candidateBlockTerminus);
+		TraverserBlockInfo finallyBlockInfo = new TraverserBlockInfo(finallyBlockTerminus, finallyBottomOffset, 0, 0);
+		TraverserBlockInfo candidateBlockInfo = new TraverserBlockInfo(candidateBlockTerminus, candidateBottomOffset, 0, 0);
 
 		TraverserState finallyState = new NewBlockTraverserState(this, finallyCentralityState, finallyBlockInfo);
 		TraverserState candidateState = new NewBlockTraverserState(this, candidateCentralityState, candidateBlockInfo);

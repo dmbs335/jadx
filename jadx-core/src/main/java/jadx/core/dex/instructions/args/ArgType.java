@@ -953,13 +953,11 @@ public abstract class ArgType {
 		if (this == obj) {
 			return true;
 		}
-		if (obj == null) {
+		if (obj == null || getClass() != obj.getClass()) {
 			return false;
 		}
-		if (hash != obj.hashCode()) {
-			return false;
-		}
-		if (getClass() != obj.getClass()) {
+		ArgType other = (ArgType) obj;
+		if (hash != other.hash) {
 			return false;
 		}
 		return internalEquals(obj);

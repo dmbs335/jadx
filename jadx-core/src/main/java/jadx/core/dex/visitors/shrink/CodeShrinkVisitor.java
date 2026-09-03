@@ -107,6 +107,7 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 		}
 		InsnNode assignInsn = sVar.getAssign().getParentInsn();
 		if (assignInsn == null
+				|| assignInsn.contains(AFlag.DONT_GENERATE)
 				|| assignInsn.contains(AFlag.DONT_INLINE)
 				|| assignInsn.contains(AFlag.WRAPPED)) {
 			return null;

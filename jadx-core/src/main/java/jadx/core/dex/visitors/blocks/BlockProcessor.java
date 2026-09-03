@@ -619,6 +619,10 @@ public class BlockProcessor extends AbstractVisitor {
 				changed = true;
 			}
 		}
+		if (BlockExceptionHandler.splitBlocksAfterTryLeave(mth)) {
+			changed = true;
+			computeDominators(mth);
+		}
 		if (BlockExceptionHandler.process(mth)) {
 			changed = true;
 		}
