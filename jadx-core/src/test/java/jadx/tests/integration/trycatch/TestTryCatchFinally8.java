@@ -6,7 +6,6 @@ import java.io.IOException;
 
 import org.junit.jupiter.api.Test;
 
-import jadx.NotYetImplemented;
 import jadx.tests.api.IntegrationTest;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
@@ -42,7 +41,6 @@ public class TestTryCatchFinally8 extends IntegrationTest {
 	}
 
 	@Test
-	@NotYetImplemented("Fix merged catch blocks (shared code between catches)")
 	public void test() {
 		assertThat(getClassNode(TestCls.class))
 				.code()
@@ -50,6 +48,9 @@ public class TestTryCatchFinally8 extends IntegrationTest {
 				.countString(2, "try {")
 				.countString(2, "} catch (IOException e")
 				.containsOne("} finally {")
-				.containsOne("file.delete();");
+				.containsOne("file.delete();")
+				.doesNotContain("catch (Throwable")
+				.doesNotContain("th = th")
+				.doesNotContain("output = output;");
 	}
 }

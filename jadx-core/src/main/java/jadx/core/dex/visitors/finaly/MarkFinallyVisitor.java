@@ -79,6 +79,7 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		private Set<BlockNode> completeFinallyBlocks = null;
 		private Set<BlockNode> completeCandidateBlocks = null;
 		private final Set<BlockNode> delegatedHandlerBlocks = new HashSet<>();
+		private final Set<ExceptionHandler> forwardingHandlers = new HashSet<>();
 		private int expectedCandidateCount;
 
 		private TryExtractInfo(TryCatchBlockAttr tryBlock, TryEdgeScopeGroupMap scopeGroups,
@@ -436,6 +437,7 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 			 */
 			return false;
 		}
+		mergeForwardingHandlerRanges(mth, tryInfo);
 		for (InsnNode finallyInsn : insnMap.keySet()) {
 			finallyInsn.add(AFlag.FINALLY_INSNS);
 			List<InsnNode> candidateInsns = insnMap.get(finallyInsn);
@@ -467,6 +469,10 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 			}
 			candidateBlock.add(AFlag.DONT_GENERATE);
 		}
+		tryInfo.forwardingHandlers.add(tryInfo.finallyHandler);
+		for (ExceptionHandler forwardingHandler : tryInfo.forwardingHandlers) {
+			markHandlerForwardingPrefix(forwardingHandler);
+		}
 
 		// If any scope has been merged with the fallthrough case of the try catch, don't merge inner trys.
 		// Otherwise, merge inner trys.
@@ -488,10 +494,116 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		return true;
 	}
 
+	private static void markHandlerForwardingPrefix(ExceptionHandler handler) {
+		BlockNode target = findForwardingTarget(handler.getHandlerBlock());
+		BlockNode block = handler.getHandlerBlock();
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != null && block != target && visited.add(block)) {
+			for (InsnNode insn : block.getInstructions()) {
+				InsnType type = insn.getType();
+				if (type == InsnType.MOVE_EXCEPTION || type == InsnType.MOVE
+						|| type == InsnType.PHI || type == InsnType.GOTO) {
+					insn.add(AFlag.DONT_GENERATE);
+				}
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			block = successors.size() == 1 ? successors.get(0) : null;
+		}
+	}
+
+	/**
+	 * A source-level try/catch/finally can be emitted as several adjacent protected ranges. Equivalent
+	 * handlers for these ranges reach the same body through different MOVE_EXCEPTION/MOVE prefixes.
+	 * Once the common cleanup is extracted, keeping the split ranges produces nested or empty catches.
+	 * Merge only ranges for which every handler has the same types and exact forwarding target as a
+	 * handler on the finally-bearing range.
+	 */
+	private static void mergeForwardingHandlerRanges(MethodNode mth, TryExtractInfo finallyInfo) {
+		List<TryCatchBlockAttr> tryBlocks = mth.getAll(AType.TRY_BLOCKS_LIST);
+		for (TryCatchBlockAttr candidate : tryBlocks) {
+			if (candidate == finallyInfo.tryBlock || candidate.isMerged() || candidate.getHandlers().isEmpty()) {
+				continue;
+			}
+			List<ExceptionHandler> matchedHandlers = new ArrayList<>();
+			Set<ExceptionHandler> matchedExpectedHandlers = new HashSet<>();
+			for (ExceptionHandler candidateHandler : candidate.getHandlers()) {
+				ExceptionHandler match = findEquivalentForwardingHandler(
+						candidateHandler, finallyInfo.tryBlock.getHandlers());
+				if (match == null) {
+					matchedHandlers.clear();
+					matchedExpectedHandlers.clear();
+					break;
+				}
+				matchedExpectedHandlers.add(match);
+				matchedHandlers.add(candidateHandler);
+			}
+			if (matchedHandlers.isEmpty()) {
+				continue;
+			}
+			finallyInfo.tryBlock.getBlocks().addAll(candidate.getBlocks());
+			BlockNode candidateTop = candidate.getTopSplitter();
+			BlockNode finallyTop = finallyInfo.tryBlock.getTopSplitter();
+			if (candidateTop != null && finallyTop != null
+					&& BlockUtils.isPathExists(candidateTop, finallyTop)) {
+				finallyInfo.tryBlock.setTopSplitter(candidateTop);
+			}
+			for (ExceptionHandler handler : matchedHandlers) {
+				finallyInfo.delegatedHandlerBlocks.add(handler.getHandlerBlock());
+				finallyInfo.delegatedHandlerBlocks.addAll(handler.getBlocks());
+				candidate.removeHandler(handler);
+			}
+			for (ExceptionHandler handler : matchedExpectedHandlers) {
+				finallyInfo.forwardingHandlers.add(handler);
+				finallyInfo.delegatedHandlerBlocks.add(handler.getHandlerBlock());
+				finallyInfo.delegatedHandlerBlocks.addAll(handler.getBlocks());
+			}
+		}
+		finallyInfo.tryBlock.setBlocks(ListUtils.distinctList(finallyInfo.tryBlock.getBlocks()));
+	}
+
+	private static @Nullable ExceptionHandler findEquivalentForwardingHandler(
+			ExceptionHandler candidate, List<ExceptionHandler> expectedHandlers) {
+		BlockNode candidateTarget = findForwardingTarget(candidate.getHandlerBlock());
+		if (candidateTarget == null) {
+			return null;
+		}
+		for (ExceptionHandler expected : expectedHandlers) {
+			if (candidate.getCatchTypes().equals(expected.getCatchTypes())
+					&& candidateTarget == findForwardingTarget(expected.getHandlerBlock())) {
+				return expected;
+			}
+		}
+		return null;
+	}
+
+	private static @Nullable BlockNode findForwardingTarget(BlockNode start) {
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != null && visited.add(block)) {
+			for (InsnNode insn : block.getInstructions()) {
+				InsnType type = insn.getType();
+				if (type != InsnType.MOVE_EXCEPTION && type != InsnType.MOVE
+						&& type != InsnType.PHI && type != InsnType.GOTO) {
+					return block;
+				}
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return null;
+			}
+			block = successors.get(0);
+		}
+		return null;
+	}
+
 	private static boolean hasUnmatchedCompleteCopy(
 			MethodNode mth, TryExtractInfo tryInfo, Map<InsnNode, List<InsnNode>> insnMap) {
 		SameInstructionsStrategy sameInstructions = new SameInstructionsStrategyImpl();
-		Set<BlockNode> finallyHandlerBlocks = new HashSet<>(tryInfo.finallyHandler.getBlocks());
+		List<BlockNode> scopedFinallyBlocks = tryInfo.handlerScopes.getBlocksForHandler(tryInfo.finallyHandler);
+		Set<BlockNode> finallyHandlerBlocks = scopedFinallyBlocks == null
+				? new HashSet<>()
+				: new HashSet<>(scopedFinallyBlocks);
+		finallyHandlerBlocks.addAll(tryInfo.finallyHandler.getBlocks());
 		finallyHandlerBlocks.add(tryInfo.finallyHandler.getHandlerBlock());
 		for (Map.Entry<InsnNode, List<InsnNode>> entry : insnMap.entrySet()) {
 			InsnNode finallyInsn = entry.getKey();
@@ -573,12 +685,12 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 			if (scopeTerminus == null) {
 				throw new JadxRuntimeException("Expected to find fallthrough terminus for handler " + edge);
 			}
-			int candidateBottomOffset = findCandidateTerminusBottomOffset(
-					scopeTerminus, finallyTailInsn, sameInstructions);
+			TraversalStart candidateStart = findCandidateTraversalStart(
+					scopeTerminus, handlerBlocks, finallyTailInsn, sameInstructions);
 			TraverserActivePathState comparatorState =
 					new TraverserActivePathState(mth, sameInstructions, finallyStart.block,
-							scopeTerminus, allHandlerBlocks, handlerBlocks,
-							finallyStart.bottomOffset, candidateBottomOffset);
+							candidateStart.block, allHandlerBlocks, handlerBlocks,
+							finallyStart.bottomOffset, candidateStart.bottomOffset);
 			TraverserController controller = new TraverserController();
 			List<TraverserActivePathState> pathResults;
 			try {
@@ -818,18 +930,38 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		return null;
 	}
 
-	private static int findCandidateTerminusBottomOffset(
-			BlockNode terminus, @Nullable InsnNode finallyTailInsn, SameInstructionsStrategy sameInstructions) {
+	private static TraversalStart findCandidateTraversalStart(
+			BlockNode terminus, List<BlockNode> candidateBlocks,
+			@Nullable InsnNode finallyTailInsn, SameInstructionsStrategy sameInstructions) {
 		if (finallyTailInsn == null) {
-			return 0;
+			return new TraversalStart(terminus, 0);
 		}
-		List<InsnNode> insns = terminus.getInstructions();
-		for (int i = insns.size() - 2; i >= 0; i--) {
-			if (sameInstructions.sameInsns(insns.get(i), finallyTailInsn)) {
-				return insns.size() - i - 1;
+		Set<BlockNode> candidateSet = new HashSet<>(candidateBlocks);
+		Set<BlockNode> visited = new HashSet<>();
+		BlockNode block = terminus;
+		while (block != null && visited.add(block)) {
+			List<InsnNode> insns = block.getInstructions();
+			for (int i = insns.size() - 1; i >= 0; i--) {
+				if (sameInstructions.sameInsns(insns.get(i), finallyTailInsn)) {
+					return new TraversalStart(block, insns.size() - i - 1);
+				}
 			}
+			if (!insns.isEmpty()) {
+				break;
+			}
+			BlockNode predecessor = null;
+			for (BlockNode candidate : block.getPredecessors()) {
+				if (!candidateSet.contains(candidate)) {
+					continue;
+				}
+				if (predecessor != null) {
+					return new TraversalStart(terminus, 0);
+				}
+				predecessor = candidate;
+			}
+			block = predecessor;
 		}
-		return 0;
+		return new TraversalStart(terminus, 0);
 	}
 
 	private static void removeEmptyUpPath(List<BlockNode> handlerBlocks, BlockNode startBlock) {
@@ -913,6 +1045,12 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 						RegisterArg result = innerInsn.getResult();
 						if (result != null && result.getRegNum() == candidateReg.getRegNum()) {
 							result.getSVar().setCodeVar(candidateReg.getSVar().getCodeVar());
+							if (innerInsn.getType() == InsnType.MOVE
+									&& innerInsn.getArgsCount() == 1
+									&& innerInsn.getArg(0).isRegister()) {
+								((RegisterArg) innerInsn.getArg(0)).getSVar()
+										.setCodeVar(candidateReg.getSVar().getCodeVar());
+							}
 						}
 						return null;
 					});
