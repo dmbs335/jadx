@@ -82,7 +82,7 @@ public class JadxCLIArgs implements IJadxConfig {
 
 	@Parameter(
 			names = { "--content-store-index" },
-			description = "content index mode: 'none' (default) or 'full-text'"
+			description = "content index mode: 'none' (default) or 'full-text'; legacy 'security' is accepted as 'none'"
 	)
 	protected String contentStoreIndex = "none";
 
@@ -514,7 +514,7 @@ public class JadxCLIArgs implements IJadxConfig {
 		if (threadsCount <= 0) {
 			throw new JadxArgsValidateException("Threads count must be positive, got: " + threadsCount);
 		}
-		if (!Set.of("none", "full-text").contains(contentStoreIndex)) {
+		if (!Set.of("none", "security", "full-text").contains(contentStoreIndex)) {
 			throw new JadxArgsValidateException("Unknown content-store index mode: " + contentStoreIndex);
 		}
 		int storeCommandCount = (contentStoreSearch == null ? 0 : 1)

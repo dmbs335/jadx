@@ -8,6 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static jadx.core.utils.Utils.newConstStringMap;
+import static jadx.storage.api.ContentIndexMode.FULL_TEXT;
+import static jadx.storage.api.ContentIndexMode.NONE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class JadxCLIArgsTest {
@@ -46,6 +48,17 @@ public class JadxCLIArgsTest {
 		assertThat(args.toJadxArgs().getDependencyInputFiles())
 				.extracting(java.io.File::getPath)
 				.containsExactly("dependency-one.dex", "dependency-two.dex");
+	}
+
+	@Test
+	public void testContentStoreIndexCompatibility() {
+		assertThat(parse("--content-store-index", "none").getContentStoreIndex()).isEqualTo("none");
+		assertThat(parse("--content-store-index", "full-text").getContentStoreIndex()).isEqualTo("full-text");
+		assertThat(parse("--content-store-index", "security").getContentStoreIndex()).isEqualTo("security");
+
+		assertThat(JadxCLI.parseContentIndexMode("none")).isEqualTo(NONE);
+		assertThat(JadxCLI.parseContentIndexMode("full-text")).isEqualTo(FULL_TEXT);
+		assertThat(JadxCLI.parseContentIndexMode("security")).isEqualTo(NONE);
 	}
 
 	@Test

@@ -274,9 +274,13 @@ public class JadxCLI {
 				applicationName, inputPaths, args.getOutDir().toPath(), analysisKey, mode, indexMode);
 	}
 
-	private static ContentIndexMode parseContentIndexMode(String value) {
+	static ContentIndexMode parseContentIndexMode(String value) {
 		switch (value) {
 			case "none":
+				return ContentIndexMode.NONE;
+			case "security":
+				LOG.warn("Content-store index mode 'security' is no longer provided by core; "
+						+ "continuing with 'none'. Security analysis is supplied by extensions.");
 				return ContentIndexMode.NONE;
 			case "full-text":
 				return ContentIndexMode.FULL_TEXT;
