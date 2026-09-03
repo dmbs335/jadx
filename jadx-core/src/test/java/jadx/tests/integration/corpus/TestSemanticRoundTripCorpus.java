@@ -1494,6 +1494,87 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	public static class ResourceLabeledExitFlow {
+		private int state;
+
+		private final class Probe implements AutoCloseable {
+			private final int id;
+			private final boolean fail;
+
+			private Probe(int id, boolean fail) {
+				this.id = id;
+				this.fail = fail;
+			}
+
+			@Override
+			public void close() {
+				state = (state * 7 + id) % 1_000_003;
+				if (fail) {
+					throw new IllegalStateException("close");
+				}
+			}
+		}
+
+		private int run(int mode) {
+			state = 1;
+			outer: for (int i = 0; i < 3; i++) {
+				for (int j = 0; j < 3; j++) {
+					int id = i * 3 + j + 1;
+					try (Probe ignored = new Probe(id, mode == 4 && i == 1 && j == 1)) {
+						state = (state * 5 + id) % 1_000_003;
+						if (i == 1 && j == 1) {
+							switch (mode) {
+								case 0:
+									continue outer;
+								case 1:
+									break outer;
+								case 2:
+									return state;
+								case 3:
+									throw new IllegalArgumentException("body");
+								default:
+									break;
+							}
+						}
+					} catch (IllegalArgumentException e) {
+						state = (state * 11 + 3) % 1_000_003;
+					} catch (IllegalStateException e) {
+						state = (state * 13 + 5) % 1_000_003;
+					} finally {
+						state = (state * 17 + 7) % 1_000_003;
+					}
+					state ^= id;
+				}
+			}
+			return state;
+		}
+
+		public void check() {
+			int continued = run(0);
+			int continuedState = state;
+			int stopped = run(1);
+			int stoppedState = state;
+			int returned = run(2);
+			int returnedState = state;
+			int bodyFailure = run(3);
+			int bodyFailureState = state;
+			int closeFailure = run(4);
+			int closeFailureState = state;
+			if (continued != 939_606 || continuedState != 939_606
+					|| stopped != 822_260 || stoppedState != 822_260
+					|| returned != 116_153 || returnedState != 822_260
+					|| bodyFailure != 367_465 || bodyFailureState != 367_465
+					|| closeFailure != 404_732 || closeFailureState != 404_732) {
+				throw new AssertionError("resource labeled exits: "
+						+ continued + '/' + continuedState + " | "
+						+ stopped + '/' + stoppedState + " | "
+						+ returned + '/' + returnedState + " | "
+						+ bodyFailure + '/' + bodyFailureState + " | "
+						+ closeFailure + '/' + closeFailureState);
+			}
+		}
+	}
+
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testComplexLoopFlow() {
 		getClassNode(ComplexLoopFlow.class);
@@ -1687,6 +1768,11 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testSynchronizedReturnSnapshotFlow() {
 		getClassNode(SynchronizedReturnSnapshotFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testResourceLabeledExitFlow() {
+		getClassNode(ResourceLabeledExitFlow.class);
 	}
 
 }

@@ -87,7 +87,7 @@ public final class SwitchRegionMaker {
 		if (commonNormalCaseOut != null) {
 			LoopInfo loop = getInnermostLoop(block);
 			if (loop != null && hasCasePathAvoidingOut(blocksMap, commonNormalCaseOut, loop)) {
-				if (hasExecutableLoopTail(loop.getEnd())) {
+				if (!canInsertContinueInSwitch(block, loop)) {
 					commonNormalCaseOut = null;
 				} else {
 					insertContinueInSwitch(block, commonNormalCaseOut, loop);
@@ -727,10 +727,11 @@ public final class SwitchRegionMaker {
 					List<BlockNode> outList = BlockUtils.bitSetToBlocks(mth, outs);
 					outList.remove(loopEnd);
 					BlockNode possibleOut = Utils.getOne(outList);
-					if (possibleOut != null && insertContinueInSwitch(block, possibleOut, loop)) {
+					boolean canInsertContinue = canInsertContinueInSwitch(block, loop);
+					if (possibleOut != null && canInsertContinue && insertContinueInSwitch(block, possibleOut, loop)) {
 						outs.clear(loopEnd.getId());
 						out = possibleOut;
-					} else if (possibleOut != null && hasExecutableLoopTail(loopEnd)) {
+					} else if (possibleOut != null && !canInsertContinue) {
 						/*
 						 * A synthetic continue would jump directly to the loop update and skip
 						 * executable instructions shared by the case paths (for example an
@@ -951,9 +952,6 @@ public final class SwitchRegionMaker {
 
 	private boolean insertContinueInSwitch(BlockNode switchBlock, BlockNode switchOut, LoopInfo loop) {
 		BlockNode loopEnd = loop.getEnd();
-		if (hasExecutableLoopTail(loopEnd)) {
-			return false;
-		}
 		boolean inserted = false;
 		for (BlockNode caseBlock : switchBlock.getCleanSuccessors()) {
 			if (caseBlock.getDomFrontier().get(loopEnd.getId()) && caseBlock != switchOut) {
@@ -979,18 +977,34 @@ public final class SwitchRegionMaker {
 		return inserted;
 	}
 
+	private boolean canInsertContinueInSwitch(BlockNode switchBlock, LoopInfo targetLoop) {
+		BlockNode loopEnd = targetLoop.getEnd();
+		if (hasExecutableLoopTail(loopEnd)) {
+			return false;
+		}
+		return !needsContinueLabel(switchBlock, targetLoop) || !hasAnyExecutableLoopTail(loopEnd);
+	}
+
 	private void addContinueLabelIfNeeded(BlockNode switchBlock, LoopInfo targetLoop, InsnNode continueInsn) {
-		boolean crossesNestedLoop = mth.getAllLoopsForBlock(switchBlock).stream()
-				.anyMatch(loop -> loop != targetLoop && loop.hasParent(targetLoop));
-		if (crossesNestedLoop) {
+		if (needsContinueLabel(switchBlock, targetLoop)) {
 			LoopLabelAttr labelAttr = new LoopLabelAttr(targetLoop);
 			continueInsn.addAttr(labelAttr);
 			targetLoop.getStart().addAttr(labelAttr);
 		}
 	}
 
+	private boolean needsContinueLabel(BlockNode switchBlock, LoopInfo targetLoop) {
+		return mth.getAllLoopsForBlock(switchBlock).stream()
+				.anyMatch(loop -> loop != targetLoop && loop.hasParent(targetLoop));
+	}
+
 	private static boolean hasExecutableLoopTail(BlockNode loopEnd) {
 		return loopEnd.getInstructions().size() > 1;
+	}
+
+	private static boolean hasAnyExecutableLoopTail(BlockNode loopEnd) {
+		return loopEnd.getInstructions().stream()
+				.anyMatch(insn -> !insn.contains(AFlag.DONT_GENERATE));
 	}
 
 	/**
