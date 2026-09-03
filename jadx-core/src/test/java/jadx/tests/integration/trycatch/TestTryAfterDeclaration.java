@@ -6,7 +6,6 @@ import java.io.InputStream;
 
 import org.junit.jupiter.api.Test;
 
-import jadx.NotYetImplemented;
 import jadx.tests.api.IntegrationTest;
 import jadx.tests.api.utils.assertj.JadxAssertions;
 
@@ -29,10 +28,10 @@ public class TestTryAfterDeclaration extends IntegrationTest {
 	 * Issue #62.
 	 */
 	@Test
-	@NotYetImplemented
 	public void test62() {
 		JadxAssertions.assertThat(getClassNode(TestClass.class))
 				.code()
-				.containsOne("try {");
+				.containsOne("try {")
+				.containsOne("catch (IOException");
 	}
 }

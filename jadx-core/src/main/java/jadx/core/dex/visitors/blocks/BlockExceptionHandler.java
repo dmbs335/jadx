@@ -271,7 +271,7 @@ public class BlockExceptionHandler {
 		if (tryBlocks.size() > 1) {
 			// merge or mark as outer/inner
 			while (true) {
-				boolean restart = combineTryCatchBlocks(tryBlocks);
+				boolean restart = combineTryCatchBlocks(mth, tryBlocks);
 				if (!restart) {
 					break;
 				}
@@ -320,13 +320,13 @@ public class BlockExceptionHandler {
 		BlockSplitter.detachMarkedBlocks(mth);
 	}
 
-	private static boolean combineTryCatchBlocks(List<TryCatchBlockAttr> tryBlocks) {
+	private static boolean combineTryCatchBlocks(MethodNode mth, List<TryCatchBlockAttr> tryBlocks) {
 		for (TryCatchBlockAttr outerTryBlock : tryBlocks) {
 			for (TryCatchBlockAttr innerTryBlock : tryBlocks) {
 				if (outerTryBlock == innerTryBlock || innerTryBlock.getOuterTryBlock() != null) {
 					continue;
 				}
-				if (checkTryCatchRelation(tryBlocks, outerTryBlock, innerTryBlock)) {
+				if (checkTryCatchRelation(mth, tryBlocks, outerTryBlock, innerTryBlock)) {
 					return true;
 				}
 			}
@@ -334,7 +334,7 @@ public class BlockExceptionHandler {
 		return false;
 	}
 
-	private static boolean checkTryCatchRelation(List<TryCatchBlockAttr> tryBlocks,
+	private static boolean checkTryCatchRelation(MethodNode mth, List<TryCatchBlockAttr> tryBlocks,
 			TryCatchBlockAttr outerTryBlock, TryCatchBlockAttr innerTryBlock) {
 		if (outerTryBlock.getBlocks().equals(innerTryBlock.getBlocks())) {
 			// same try blocks -> merge handlers
@@ -381,6 +381,9 @@ public class BlockExceptionHandler {
 			tryBlocks.remove(innerTryBlock);
 			return true;
 		}
+		if (tryMergeEquivalentTerminalHandlers(mth, tryBlocks, outerTryBlock, innerTryBlock)) {
+			return true;
+		}
 		Set<ExceptionHandler> innerHandlerSet = new HashSet<>(innerTryBlock.getHandlers());
 		if (innerHandlerSet.containsAll(outerTryBlock.getHandlers())) {
 			// merge
@@ -392,6 +395,111 @@ public class BlockExceptionHandler {
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * D8 can split one source-level try around control-flow-only blocks and emit separate typed
+	 * handlers which both implement an empty catch at method exit. Keeping those table entries as
+	 * nested regions produces a duplicate catch whose body no longer throws the checked exception,
+	 * so the generated Java does not compile. Joining the protected ranges is safe only when every
+	 * block in the corridor is non-throwing and both handlers have the same transparent void-exit
+	 * behaviour.
+	 */
+	private static boolean tryMergeEquivalentTerminalHandlers(MethodNode mth, List<TryCatchBlockAttr> tryBlocks,
+			TryCatchBlockAttr firstTryBlock, TryCatchBlockAttr secondTryBlock) {
+		if (firstTryBlock.getHandlersCount() != 1 || secondTryBlock.getHandlersCount() != 1) {
+			return false;
+		}
+		ExceptionHandler firstHandler = firstTryBlock.getHandlers().get(0);
+		ExceptionHandler secondHandler = secondTryBlock.getHandlers().get(0);
+		if (firstHandler.isCatchAll()
+				|| secondHandler.isCatchAll()
+				|| firstHandler.isFinally()
+				|| secondHandler.isFinally()
+				|| !firstHandler.getCatchTypes().equals(secondHandler.getCatchTypes())
+				|| !isTransparentVoidExitHandler(mth, firstHandler)
+				|| !isTransparentVoidExitHandler(mth, secondHandler)
+				|| !hasNonThrowingProtectedCorridor(mth, firstTryBlock, secondTryBlock)) {
+			return false;
+		}
+
+		ExceptionHandler keptHandler = firstHandler.getBlocks().size() <= secondHandler.getBlocks().size()
+				? firstHandler
+				: secondHandler;
+		ExceptionHandler redundantHandler = keptHandler == firstHandler ? secondHandler : firstHandler;
+		List<BlockNode> mergedBlocks = Utils.concatDistinct(firstTryBlock.getBlocks(), secondTryBlock.getBlocks());
+		tryBlocks.add(new TryCatchBlockAttr(tryBlocks.size(), new ArrayList<>(List.of(keptHandler)), mergedBlocks));
+		tryBlocks.remove(firstTryBlock);
+		tryBlocks.remove(secondTryBlock);
+		removeExcHandler(mth, redundantHandler);
+		return true;
+	}
+
+	private static boolean isTransparentVoidExitHandler(MethodNode mth, ExceptionHandler handler) {
+		Set<BlockNode> handlerBlocks = new HashSet<>(handler.getBlocks());
+		for (BlockNode block : handlerBlocks) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.getType() == InsnType.MOVE_EXCEPTION || insn.getType() == InsnType.MOVE) {
+					continue;
+				}
+				if (insn.getType() != InsnType.RETURN || insn.getArgsCount() != 0) {
+					return false;
+				}
+			}
+			for (BlockNode successor : block.getSuccessors()) {
+				if (!handlerBlocks.contains(successor)
+						&& !isTransparentVoidExitPath(mth, successor, new HashSet<>())) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private static boolean isTransparentVoidExitPath(MethodNode mth, BlockNode block, Set<BlockNode> visited) {
+		if (block == mth.getExitBlock()) {
+			return true;
+		}
+		if (!visited.add(block)) {
+			return false;
+		}
+		for (InsnNode insn : block.getInstructions()) {
+			if (insn.getType() != InsnType.RETURN || insn.getArgsCount() != 0) {
+				return false;
+			}
+		}
+		List<BlockNode> successors = block.getSuccessors();
+		return !successors.isEmpty()
+				&& successors.stream().allMatch(successor -> isTransparentVoidExitPath(mth, successor, visited));
+	}
+
+	private static boolean hasNonThrowingProtectedCorridor(MethodNode mth,
+			TryCatchBlockAttr firstTryBlock, TryCatchBlockAttr secondTryBlock) {
+		if (hasNonThrowingProtectedCorridor(mth, firstTryBlock.getBlocks(), secondTryBlock.getBlocks())) {
+			return true;
+		}
+		return hasNonThrowingProtectedCorridor(mth, secondTryBlock.getBlocks(), firstTryBlock.getBlocks());
+	}
+
+	private static boolean hasNonThrowingProtectedCorridor(MethodNode mth,
+			List<BlockNode> earlierBlocks, List<BlockNode> laterBlocks) {
+		boolean connected = earlierBlocks.stream()
+				.anyMatch(earlier -> laterBlocks.stream().anyMatch(later -> BlockUtils.isPathExists(earlier, later)));
+		if (!connected) {
+			return false;
+		}
+		for (BlockNode block : mth.getBasicBlocks()) {
+			if (earlierBlocks.contains(block) || laterBlocks.contains(block)) {
+				continue;
+			}
+			boolean afterEarlier = earlierBlocks.stream().anyMatch(earlier -> BlockUtils.isPathExists(earlier, block));
+			boolean beforeLater = laterBlocks.stream().anyMatch(later -> BlockUtils.isPathExists(block, later));
+			if (afterEarlier && beforeLater
+					&& block.getInstructions().stream().anyMatch(InsnNode::canThrowException)) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	@NotNull
