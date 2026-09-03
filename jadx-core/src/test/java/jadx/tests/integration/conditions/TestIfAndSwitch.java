@@ -32,7 +32,6 @@ public class TestIfAndSwitch extends SmaliTest {
 
 	@Test
 	public void test() {
-		allowWarnInCode();
 		JadxAssertions.assertThat(getClassNodeFromSmali())
 				.code()
 				.countString(1, "if (rd.nextInt() == ACTION_MOVE) {")

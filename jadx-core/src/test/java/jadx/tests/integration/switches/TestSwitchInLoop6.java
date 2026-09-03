@@ -91,7 +91,6 @@ public class TestSwitchInLoop6 extends IntegrationTest {
 
 	@Test
 	public void test() {
-		allowWarnInCode();
 		assertThat(getClassNode(TestCls.class))
 				.code()
 				.containsOne("switch (n) {")

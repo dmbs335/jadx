@@ -66,7 +66,6 @@ public class TestConditions22 extends SmaliTest {
 
 	@Test
 	public void testSmali() {
-		allowWarnInCode(); // TODO: don't add 'duplicated region' warning for small and/or constant code
 		forceDecompiledCheck();
 		assertThat(getClassNodeFromSmali())
 				.code();
