@@ -1410,7 +1410,7 @@ public final class FixTypesVisitor extends AbstractVisitor {
 			}
 			count++;
 			if (apply) {
-				insertMove(mth, blockNode, phiInsn, reg);
+				insertMove(mth, blockNode, phiInsn, reg, isNullOnPhiEdge(phiInsn, argIndex, reg));
 			}
 		}
 		return count;
@@ -1493,16 +1493,42 @@ public final class FixTypesVisitor extends AbstractVisitor {
 				.anyMatch(type -> type.isObject() && "java.io.Closeable".equals(type.getObject()));
 	}
 
-	private void insertMove(MethodNode mth, BlockNode blockNode, PhiInsn phiInsn, RegisterArg reg) {
+	private static boolean isNullOnPhiEdge(PhiInsn phiInsn, int argIndex, RegisterArg reg) {
+		BlockNode sourceBlock = phiInsn.getBlockByArgIndex(argIndex);
+		InsnNode lastInsn = BlockUtils.getLastInsn(sourceBlock);
+		if (!(lastInsn instanceof IfNode)) {
+			return false;
+		}
+		IfNode ifInsn = (IfNode) lastInsn;
+		IfOp op = ifInsn.getOp();
+		if (op != IfOp.EQ && op != IfOp.NE) {
+			return false;
+		}
+		InsnArg firstArg = ifInsn.getArg(0);
+		InsnArg secondArg = ifInsn.getArg(1);
+		if (!(firstArg.isSameVar(reg) && secondArg.isZeroLiteral()
+				|| secondArg.isSameVar(reg) && firstArg.isZeroLiteral())) {
+			return false;
+		}
+		BlockNode nullBranch = op == IfOp.EQ ? ifInsn.getThenBlock() : ifInsn.getElseBlock();
+		if (nullBranch == null) {
+			return false;
+		}
+		PhiListAttr phiList = nullBranch.get(AType.PHI_LIST);
+		return phiList != null && phiList.getList().contains(phiInsn);
+	}
+
+	private void insertMove(MethodNode mth, BlockNode blockNode, PhiInsn phiInsn, RegisterArg reg, boolean nullInput) {
 		SSAVar var = reg.getSVar();
 		int regNum = reg.getRegNum();
 		RegisterArg resultArg = reg.duplicate(regNum, null);
 		SSAVar newSsaVar = mth.makeNewSVar(resultArg);
-		RegisterArg arg = reg.duplicate(regNum, var);
 
-		InsnNode moveInsn = new InsnNode(InsnType.MOVE, 1);
+		InsnNode moveInsn = new InsnNode(nullInput ? InsnType.CONST : InsnType.MOVE, 1);
 		moveInsn.setResult(resultArg);
-		moveInsn.addArg(arg);
+		moveInsn.addArg(nullInput
+				? LiteralArg.make(0, ArgType.UNKNOWN_OBJECT)
+				: reg.duplicate(regNum, var));
 		moveInsn.add(AFlag.SYNTHETIC);
 		blockNode.getInstructions().add(moveInsn);
 

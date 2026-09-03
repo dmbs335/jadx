@@ -2,7 +2,6 @@ package jadx.tests.integration.types;
 
 import org.junit.jupiter.api.Test;
 
-import jadx.NotYetImplemented;
 import jadx.tests.api.SmaliTest;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
@@ -35,7 +34,6 @@ public class TestTypeResolver8 extends SmaliTest {
 	// @formatter:on
 
 	@Test
-	@NotYetImplemented
 	public void test() {
 		assertThat(getClassNodeFromSmaliFiles("types", "TestTypeResolver8", "TestCls"))
 				.code()

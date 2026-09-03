@@ -14,7 +14,7 @@
 
 
 # direct methods
-.method public constructor <init>(Ltypes/A;)V
+.method public constructor <init>(Ltypes/TestCls$A;)V
     .registers 2
 
     invoke-direct {p0}, Ljava/lang/Object;-><init>()V
