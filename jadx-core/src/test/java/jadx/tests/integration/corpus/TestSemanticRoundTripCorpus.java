@@ -1575,6 +1575,99 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	public static class MultiResourceAbruptFlow {
+		private StringBuilder events;
+
+		private final class Probe implements AutoCloseable {
+			private final String name;
+			private final boolean closeFail;
+
+			private Probe(String name, boolean initFail, boolean closeFail) {
+				this.name = name;
+				this.closeFail = closeFail;
+				events.append('O').append(name);
+				if (initFail) {
+					throw new IllegalArgumentException("init-" + name);
+				}
+			}
+
+			@Override
+			public void close() {
+				events.append('C').append(name);
+				if (closeFail) {
+					throw new IllegalStateException(name);
+				}
+			}
+		}
+
+		private String run(int mode) {
+			events = new StringBuilder();
+			outer: for (int i = 0; i < 3; i++) {
+				try (Probe first = new Probe("a" + i, false, mode == 5 && i == 1);
+						Probe second = new Probe("b" + i, mode == 6 && i == 1,
+								(mode == 4 || mode == 5) && i == 1)) {
+					events.append('B').append(i);
+					if (i == 1) {
+						switch (mode) {
+							case 0:
+								continue outer;
+							case 1:
+								break outer;
+							case 2:
+								return events.toString();
+							case 3:
+								throw new IllegalArgumentException("body");
+							default:
+								break;
+						}
+					}
+				} catch (RuntimeException e) {
+					events.append('X').append(e.getClass().getSimpleName())
+							.append(':').append(e.getMessage())
+							.append(':').append(e.getSuppressed().length);
+				} finally {
+					events.append('F').append(i);
+				}
+				events.append('T').append(i);
+			}
+			return events.toString();
+		}
+
+		private static String normal(int i) {
+			return "Oa" + i + "Ob" + i + "B" + i + "Cb" + i + "Ca" + i + "F" + i + "T" + i;
+		}
+
+		private void assertRun(int mode, String expectedResult, String expectedEvents) {
+			String result = run(mode);
+			String actualEvents = events.toString();
+			if (!expectedResult.equals(result) || !expectedEvents.equals(actualEvents)) {
+				throw new AssertionError("multi-resource abrupt " + mode + ": " + result + " | " + actualEvents);
+			}
+		}
+
+		public void check() {
+			String first = normal(0);
+			String secondPrefix = "Oa1Ob1B1";
+			String secondClose = "Cb1Ca1F1";
+			String third = normal(2);
+			assertRun(0, first + secondPrefix + secondClose + third, first + secondPrefix + secondClose + third);
+			assertRun(1, first + secondPrefix + secondClose, first + secondPrefix + secondClose);
+			assertRun(2, first + secondPrefix, first + secondPrefix + secondClose);
+			assertRun(3,
+					first + secondPrefix + "Cb1Ca1XIllegalArgumentException:body:0F1T1" + third,
+					first + secondPrefix + "Cb1Ca1XIllegalArgumentException:body:0F1T1" + third);
+			assertRun(4,
+					first + secondPrefix + "Cb1Ca1XIllegalStateException:b1:0F1T1" + third,
+					first + secondPrefix + "Cb1Ca1XIllegalStateException:b1:0F1T1" + third);
+			assertRun(5,
+					first + secondPrefix + "Cb1Ca1XIllegalStateException:b1:1F1T1" + third,
+					first + secondPrefix + "Cb1Ca1XIllegalStateException:b1:1F1T1" + third);
+			assertRun(6,
+					first + "Oa1Ob1Ca1XIllegalArgumentException:init-b1:0F1T1" + third,
+					first + "Oa1Ob1Ca1XIllegalArgumentException:init-b1:0F1T1" + third);
+		}
+	}
+
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testComplexLoopFlow() {
 		getClassNode(ComplexLoopFlow.class);
@@ -1773,6 +1866,11 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testResourceLabeledExitFlow() {
 		getClassNode(ResourceLabeledExitFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testMultiResourceAbruptFlow() {
+		getClassNode(MultiResourceAbruptFlow.class);
 	}
 
 }

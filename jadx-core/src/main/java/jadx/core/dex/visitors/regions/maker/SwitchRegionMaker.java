@@ -43,6 +43,7 @@ import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.visitors.kotlin.KtorCioRecovery;
 import jadx.core.dex.visitors.regions.AbstractRegionVisitor;
 import jadx.core.dex.visitors.regions.DepthRegionTraversal;
+import jadx.core.dex.visitors.regions.ProcessTryCatchRegions;
 import jadx.core.dex.visitors.regions.SwitchBreakVisitor;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.ListUtils;
@@ -82,6 +83,7 @@ public final class SwitchRegionMaker {
 		stack.push(sw);
 
 		BlockNode out = calcSwitchOut(block, insn, stack);
+		out = adjustOutForProtectedDefault(out, defCase);
 		BlockNode originalOut = out;
 		BlockNode commonNormalCaseOut = findCommonNormalCaseOut(out, blocksMap, stack);
 		if (commonNormalCaseOut != null) {
@@ -112,6 +114,46 @@ public final class SwitchRegionMaker {
 
 		stack.pop();
 		return out;
+	}
+
+	/**
+	 * Some compilers lower a default switch edge directly into a protected cleanup block. The other
+	 * cases duplicate that cleanup before an abrupt exit, so their dominance frontiers meet only
+	 * after the surrounding catch/finally region. Using that later join as the switch exit moves the
+	 * loop tail ahead of cleanup. Keep the exception-scope transition outside the switch instead.
+	 */
+	private @Nullable BlockNode adjustOutForProtectedDefault(
+			@Nullable BlockNode out, @Nullable BlockNode defaultCase) {
+		if (out == null
+				|| defaultCase == null
+				|| defaultCase == out
+				|| !defaultCase.contains(AFlag.TRY_ENTER)
+				|| !defaultCase.contains(AFlag.TRY_LEAVE)
+				|| defaultCase.getInstructions().isEmpty()
+				|| !BlockUtils.isPathExists(defaultCase, out)) {
+			return out;
+		}
+		return hasResourceSuppressionHandler(defaultCase) ? defaultCase : out;
+	}
+
+	private static boolean hasResourceSuppressionHandler(MethodNode mth, IContainer container) {
+		boolean[] found = { false };
+		RegionUtils.visitBlockNodes(mth, container, block -> {
+			if (!found[0] && hasResourceSuppressionHandler(block)) {
+				found[0] = true;
+			}
+		});
+		return found[0];
+	}
+
+	private static boolean hasResourceSuppressionHandler(BlockNode block) {
+		Set<ExceptionHandler> handlers = new HashSet<>();
+		addHandlers(handlers, block.get(AType.EXC_CATCH));
+		for (InsnNode insn : block.getInstructions()) {
+			addHandlers(handlers, insn.get(AType.EXC_CATCH));
+		}
+		return handlers.stream()
+				.anyMatch(handler -> ProcessTryCatchRegions.containsResourceSuppressionTry(handler.getTryBlock()));
 	}
 
 	/**
@@ -161,8 +203,9 @@ public final class SwitchRegionMaker {
 	 * handle all blocks
 	 */
 	public static void insertBreaks(MethodNode mth, SwitchRegion sw) {
+		boolean resourceCleanupSwitch = hasResourceSuppressionHandler(mth, sw);
 		for (SwitchRegion.CaseInfo caseInfo : sw.getCases()) {
-			insertBreaksForCase(mth, sw, caseInfo.getContainer());
+			insertBreaksForCase(mth, sw, caseInfo.getContainer(), resourceCleanupSwitch);
 		}
 	}
 
@@ -964,6 +1007,8 @@ public final class SwitchRegionMaker {
 						if (list.contains(p) || p == caseBlock) {
 							if (p.isSynthetic()) {
 								InsnNode continueInsn = new InsnNode(InsnType.CONTINUE, 0);
+								continueInsn.add(AFlag.SYNTHETIC);
+								continueInsn.addAttr(AType.LOOP, loop);
 								addContinueLabelIfNeeded(switchBlock, loop, continueInsn);
 								p.getInstructions().add(continueInsn);
 								inserted = true;
@@ -1012,7 +1057,8 @@ public final class SwitchRegionMaker {
 	 * 'Break' optimizations (code duplication, unreachable, etc.) will be done at
 	 * {@link SwitchBreakVisitor}
 	 */
-	private static void insertBreaksForCase(MethodNode mth, SwitchRegion switchRegion, IContainer caseContainer) {
+	private static void insertBreaksForCase(
+			MethodNode mth, SwitchRegion switchRegion, IContainer caseContainer, boolean resourceCleanupSwitch) {
 		labelLoopBreaksInsideSwitch(mth, caseContainer);
 		BlockSet caseBlocks = new BlockSet(mth);
 		RegionUtils.visitBlockNodes(mth, caseContainer, caseBlocks::add);
@@ -1040,12 +1086,53 @@ public final class SwitchRegionMaker {
 				}
 				if (insertBreak
 						&& region instanceof Region
-						&& canAppendBreak(region)
-						&& !endsWithLoopContinue(region, caseBlocks)) {
-					region.getSubBlocks().add(buildBreakContainer(switchRegion));
+						&& canAppendBreak(region)) {
+					LoopInfo loopBack = resourceCleanupSwitch ? findOwnedLoopBack(mth, region) : null;
+					if (loopBack == null) {
+						if (!endsWithLoopContinue(region, caseBlocks)) {
+							region.getSubBlocks().add(buildBreakContainer(switchRegion));
+						}
+					} else {
+						removePrematureSyntheticContinue(mth, region, loopBack);
+						region.getSubBlocks().add(buildContinueContainer(mth, switchRegion, loopBack));
+					}
 				}
 			}
 		});
+	}
+
+	private static @Nullable LoopInfo findOwnedLoopBack(MethodNode mth, IRegion region) {
+		IBlock last = RegionUtils.getLastBlock(region);
+		if (!(last instanceof BlockNode)) {
+			return null;
+		}
+		BlockNode lastBlock = (BlockNode) last;
+		for (LoopInfo loop : mth.getAllLoopsForBlock(lastBlock)) {
+			if (loop.getEnd() == lastBlock && lastBlock.getSuccessors().contains(loop.getStart())) {
+				return loop;
+			}
+		}
+		return null;
+	}
+
+	private static void removePrematureSyntheticContinue(MethodNode mth, IRegion region, LoopInfo loop) {
+		RegionUtils.visitBlockNodes(mth, region, block -> block.getInstructions().removeIf(insn -> insn.getType() == InsnType.CONTINUE
+				&& insn.contains(AFlag.SYNTHETIC)
+				&& insn.getAll(AType.LOOP).contains(loop)));
+	}
+
+	private static InsnContainer buildContinueContainer(MethodNode mth, SwitchRegion switchRegion, LoopInfo loop) {
+		InsnNode continueInsn = new InsnNode(InsnType.CONTINUE, 0);
+		continueInsn.add(AFlag.SYNTHETIC);
+		continueInsn.addAttr(AType.LOOP, loop);
+		boolean crossesNestedLoop = mth.getAllLoopsForBlock(switchRegion.getHeader()).stream()
+				.anyMatch(sourceLoop -> sourceLoop != loop && sourceLoop.hasParent(loop));
+		if (crossesNestedLoop) {
+			LoopLabelAttr labelAttr = new LoopLabelAttr(loop);
+			continueInsn.addAttr(labelAttr);
+			loop.getStart().addAttr(labelAttr);
+		}
+		return new InsnContainer(continueInsn);
 	}
 
 	private static boolean hasImplicitCatchContinuationOutsideCase(

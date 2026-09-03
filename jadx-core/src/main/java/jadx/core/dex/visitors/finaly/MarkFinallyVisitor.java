@@ -31,6 +31,7 @@ import jadx.core.dex.visitors.JadxVisitor;
 import jadx.core.dex.visitors.finaly.traverser.TraverserController;
 import jadx.core.dex.visitors.finaly.traverser.TraverserException;
 import jadx.core.dex.visitors.finaly.traverser.state.TraverserActivePathState;
+import jadx.core.dex.visitors.regions.ProcessTryCatchRegions;
 import jadx.core.dex.visitors.ssa.SSATransform;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.ListUtils;
@@ -178,7 +179,7 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 	 * @return The handler identified as the "all" handler.
 	 */
 	private static @Nullable TryExtractInfo getTryBlockData(MethodNode mth, TryCatchBlockAttr tryBlock) {
-		if (tryBlock.isMerged()) {
+		if (tryBlock.isMerged() || ProcessTryCatchRegions.isResourceSuppressionTry(tryBlock)) {
 			return null;
 		}
 		// Find the all handler
