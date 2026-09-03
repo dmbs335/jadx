@@ -617,9 +617,15 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 					continue;
 				}
 				for (InsnNode insn : block.getInstructions()) {
-					if (!candidateInsns.contains(insn) && sameInstructions.sameInsns(insn, finallyInsn)) {
+					if (candidateInsns.contains(insn)) {
+						continue;
+					}
+					if (sameInstructions.sameInsns(insn, finallyInsn)) {
 						unmatched = true;
 						break;
+					}
+					if (isNullProjectedFinallyCopy(insn, finallyInsn, sameInstructions)) {
+						candidateInsns.add(insn);
 					}
 				}
 				if (unmatched) {
@@ -631,6 +637,84 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 			}
 		}
 		return !insnMap.isEmpty();
+	}
+
+	/**
+	 * A compiler can keep a null initialization register on an early-return path while the
+	 * catch-all cleanup consumes a MOVE/PHI projection of that same value. Debug information often
+	 * joins these registers into one code variable, but stripped bytecode does not. Preserve the
+	 * path-specific relationship so this cleanup copy is removed with the other finally copies.
+	 */
+	private static boolean isNullProjectedFinallyCopy(
+			InsnNode candidateInsn, InsnNode finallyInsn, SameInstructionsStrategy sameInstructions) {
+		if (!candidateInsn.isSame(finallyInsn) || candidateInsn.getArgsCount() != finallyInsn.getArgsCount()) {
+			return false;
+		}
+		boolean projectedArgFound = false;
+		for (int i = 0; i < candidateInsn.getArgsCount(); i++) {
+			InsnArg candidateArg = candidateInsn.getArg(i);
+			InsnArg finallyArg = finallyInsn.getArg(i);
+			if (sameInstructions.isSameArgs(candidateArg, finallyArg)) {
+				continue;
+			}
+			if (!candidateArg.isRegister() || !finallyArg.isRegister()) {
+				return false;
+			}
+			RegisterArg candidateReg = (RegisterArg) candidateArg;
+			RegisterArg finallyReg = (RegisterArg) finallyArg;
+			if (!isProvenNull(candidateReg, new HashSet<>())
+					|| !containsSsaInput(candidateReg.getSVar(), finallyReg.getSVar(), new HashSet<>())) {
+				return false;
+			}
+			projectedArgFound = true;
+		}
+		return projectedArgFound;
+	}
+
+	private static boolean isProvenNull(RegisterArg arg, Set<SSAVar> visited) {
+		SSAVar var = arg.getSVar();
+		if (var == null || !visited.add(var)) {
+			return false;
+		}
+		InsnNode assignInsn = var.getAssignInsn();
+		if (assignInsn == null) {
+			return false;
+		}
+		if (assignInsn.getType() == InsnType.CONST) {
+			return assignInsn.getArgsCount() == 1 && assignInsn.getArg(0).isZeroConst();
+		}
+		if (assignInsn.getType() != InsnType.MOVE && assignInsn.getType() != InsnType.PHI) {
+			return false;
+		}
+		for (InsnArg sourceArg : assignInsn.getArguments()) {
+			if (!sourceArg.isRegister() || !isProvenNull((RegisterArg) sourceArg, new HashSet<>(visited))) {
+				return false;
+			}
+		}
+		return assignInsn.getArgsCount() != 0;
+	}
+
+	private static boolean containsSsaInput(SSAVar source, SSAVar target, Set<SSAVar> visited) {
+		if (source == null || target == null) {
+			return false;
+		}
+		if (source == target) {
+			return true;
+		}
+		if (!visited.add(target)) {
+			return false;
+		}
+		InsnNode assignInsn = target.getAssignInsn();
+		if (assignInsn == null || assignInsn.getType() != InsnType.MOVE && assignInsn.getType() != InsnType.PHI) {
+			return false;
+		}
+		for (InsnArg sourceArg : assignInsn.getArguments()) {
+			if (sourceArg.isRegister()
+					&& containsSsaInput(source, ((RegisterArg) sourceArg).getSVar(), visited)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**

@@ -5,7 +5,6 @@ import java.io.InputStream;
 
 import org.junit.jupiter.api.Test;
 
-import jadx.NotYetImplemented;
 import jadx.tests.api.SmaliTest;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
@@ -61,13 +60,14 @@ public class TestFinally3 extends SmaliTest {
 				.containsOne("close(inputStream);");
 	}
 
-	@NotYetImplemented("Finally extract failed")
 	@Test
 	public void test2NoDebug() {
 		noDebugInfo();
 		assertThat(getClassNode(TestCls.class))
 				.code()
 				.containsOne("} finally {")
+				.doesNotContain("close(null);")
+				.containsOne("InputStream inputStream = null;")
 				.containsOne(indent() + "close(");
 	}
 

@@ -566,6 +566,7 @@ public final class FinishTypeInference extends AbstractVisitor {
 	}
 
 	private static void repairPhiCodeVarTypes(MethodNode mth) {
+		repairNullProjectedFinallyCodeVars(mth);
 		normalizeProvenNullMoveSources(mth);
 		Map<CodeVar, List<SSAVar>> groups = collectCodeVarGroups(mth);
 		if (splitBroadcastConsumeEachMethodArgLifetime(mth, groups) != 0) {
@@ -738,6 +739,72 @@ public final class FinishTypeInference extends AbstractVisitor {
 		// concrete boundary after the regular group inference above has completed.
 		for (List<SSAVar> group : groups.values()) {
 			replaceClosedNullFlowUses(group);
+		}
+	}
+
+	/**
+	 * Finally extraction suppresses normal-path cleanup copies. A stripped DEX can feed one such
+	 * copy directly from an initial null register while the emitted catch-all copy consumes a
+	 * MOVE/PHI projection of it. Type inference legitimately separates those lifetimes, but Java's
+	 * definite-assignment rules require the resource local used by {@code finally} to retain that
+	 * initializer. Reconnect the projection only when both the null value and the duplicate cleanup
+	 * instruction are proven.
+	 */
+	private static void repairNullProjectedFinallyCodeVars(MethodNode mth) {
+		List<SSAVar> vars = mth.getSVars();
+		for (BlockNode block : mth.getBasicBlocks()) {
+			for (InsnNode finallyInsn : block.getInstructions()) {
+				if (!finallyInsn.contains(AFlag.FINALLY_INSNS)) {
+					continue;
+				}
+				int argsCount = finallyInsn.getArgsCount();
+				for (int argIndex = 0; argIndex < argsCount; argIndex++) {
+					InsnArg finallyArg = finallyInsn.getArg(argIndex);
+					if (!finallyArg.isRegister()) {
+						continue;
+					}
+					SSAVar finallyVar = ((RegisterArg) finallyArg).getSVar();
+					for (SSAVar nullVar : vars) {
+						RegisterArg assign = nullVar.getAssign();
+						if (assign == null
+								|| nullVar.getCodeVar() == finallyVar.getCodeVar()
+								|| !isProvenNullValue(assign, new HashSet<>())
+								|| !hasSuppressedFinallyCopyUse(nullVar, finallyInsn, argIndex)) {
+							continue;
+						}
+						adoptProjectedCodeVar(finallyVar, nullVar.getCodeVar(), new HashSet<>());
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	private static boolean hasSuppressedFinallyCopyUse(SSAVar var, InsnNode finallyInsn, int argIndex) {
+		for (RegisterArg use : var.getUseList()) {
+			InsnNode useInsn = use.getParentInsn();
+			if (useInsn != null && useInsn.contains(AFlag.DONT_GENERATE)
+					&& useInsn.isSame(finallyInsn)
+					&& argIndex < useInsn.getArgsCount() && useInsn.getArg(argIndex) == use) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static void adoptProjectedCodeVar(SSAVar var, CodeVar codeVar, Set<SSAVar> visited) {
+		if (var == null || !visited.add(var)) {
+			return;
+		}
+		var.setCodeVar(codeVar);
+		InsnNode assignInsn = var.getAssignInsn();
+		if (assignInsn == null || assignInsn.getType() != InsnType.MOVE && assignInsn.getType() != InsnType.PHI) {
+			return;
+		}
+		for (InsnArg arg : assignInsn.getArguments()) {
+			if (arg.isRegister()) {
+				adoptProjectedCodeVar(((RegisterArg) arg).getSVar(), codeVar, visited);
+			}
 		}
 	}
 
