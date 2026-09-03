@@ -10,7 +10,6 @@ public class TestSwitchSharedIfReturn extends SmaliTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.contains("case 0:")

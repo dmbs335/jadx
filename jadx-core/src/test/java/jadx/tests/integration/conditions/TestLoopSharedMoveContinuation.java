@@ -10,7 +10,6 @@ public class TestLoopSharedMoveContinuation extends SmaliTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.countString(3, "i2++")

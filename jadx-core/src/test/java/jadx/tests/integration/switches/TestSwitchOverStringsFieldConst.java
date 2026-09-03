@@ -10,7 +10,6 @@ public class TestSwitchOverStringsFieldConst extends SmaliTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.containsOne("switch (str)")

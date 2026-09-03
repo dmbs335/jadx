@@ -10,7 +10,6 @@ public class TestSharedTerminalDiscriminator extends SmaliTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.containsOne("cleanup();")

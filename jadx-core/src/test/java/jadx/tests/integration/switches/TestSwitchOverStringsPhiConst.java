@@ -10,8 +10,6 @@ public class TestSwitchOverStringsPhiConst extends SmaliTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
-		allowWarnInCode(); // unrelated type-inference warning for the synthetic loop register
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.containsOne("switch (str)")

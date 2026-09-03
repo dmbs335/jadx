@@ -10,7 +10,6 @@ public class TestBranchStartJoinWithTerminalPath extends SmaliTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.countString(3, "fourthDefault(")

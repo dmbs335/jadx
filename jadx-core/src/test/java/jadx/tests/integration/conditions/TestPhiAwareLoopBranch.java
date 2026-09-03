@@ -10,7 +10,6 @@ public class TestPhiAwareLoopBranch extends SmaliTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.contains(" ? ")

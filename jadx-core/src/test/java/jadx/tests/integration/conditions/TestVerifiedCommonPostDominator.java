@@ -11,7 +11,6 @@ public class TestVerifiedCommonPostDominator extends SmaliTest {
 	@Test
 	public void test() {
 		allowWarnInCode();
-		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.containsOne("tailA();")
