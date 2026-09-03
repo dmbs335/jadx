@@ -33,7 +33,6 @@ public class TestCastInOverloadedInvoke3 extends IntegrationTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		assertThat(getClassNode(TestCls.class))
 				.code()
 				.containsOne("OuterCls.call((String) null);");

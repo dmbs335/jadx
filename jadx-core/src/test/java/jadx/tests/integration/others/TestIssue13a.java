@@ -86,7 +86,6 @@ public class TestIssue13a extends IntegrationTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		ClassNode cls = getClassNode(TestCls.class);
 		String code = cls.getCode().toString();
 

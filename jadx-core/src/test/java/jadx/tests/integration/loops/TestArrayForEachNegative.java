@@ -44,7 +44,6 @@ public class TestArrayForEachNegative extends IntegrationTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		// Remove all comments - as the comment created by CodeGenUtils.addInputFileInfo always contains a
 		// colon
 		getArgs().setCommentsLevel(CommentsLevel.NONE);

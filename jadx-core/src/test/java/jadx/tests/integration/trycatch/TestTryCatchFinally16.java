@@ -32,7 +32,6 @@ public class TestTryCatchFinally16 extends SmaliTest {
 
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J11, TestProfile.JAVA8 })
 	public void test() {
-		disableCompilation();
 		ClassNode node = getClassNode(TestCls.class);
 		assertThat(node)
 				.code()
