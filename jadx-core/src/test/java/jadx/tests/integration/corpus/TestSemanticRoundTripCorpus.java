@@ -1840,6 +1840,309 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	public static class GenericInnerConstructionFlow {
+		private static class Box<T> {
+			private final T prefix;
+			private int sequence;
+
+			Box(T prefix) {
+				this.prefix = prefix;
+			}
+
+			class Entry<U> {
+				private final U value;
+
+				Entry(U value) {
+					this.value = value;
+					sequence = sequence * 10 + 1;
+				}
+
+				String render(int suffix) {
+					sequence = sequence * 10 + suffix;
+					return prefix + ":" + value + ":" + sequence;
+				}
+			}
+		}
+
+		private String run() {
+			Box<String> first = new Box<>("a");
+			Box<String>.Entry<Integer> one = first.new Entry<>(7);
+			Box<String> second = new Box<>("b");
+			Box<String>.Entry<String> two = second.new Entry<>("x");
+			return one.render(2) + '|' + two.render(3);
+		}
+
+		public void check() {
+			String actual = run();
+			if (!actual.equals("a:7:12|b:x:13")) {
+				throw new AssertionError("generic inner construction: " + actual);
+			}
+		}
+	}
+
+	public static class CompoundArrayEvaluationFlow {
+		private int state;
+		private int index;
+		private int[] active;
+
+		private int nextIndex() {
+			state = state * 10 + 1;
+			return index++;
+		}
+
+		private int right(boolean fail) {
+			state = state * 10 + 2;
+			active[0] = 40;
+			if (fail) {
+				throw new IllegalStateException("rhs");
+			}
+			return 4;
+		}
+
+		private int run(boolean fail) {
+			active = new int[] { 5, 7 };
+			state = 0;
+			index = 0;
+			try {
+				active[nextIndex()] += right(fail);
+				return active[0] * 100 + active[1];
+			} catch (IllegalStateException e) {
+				return -state;
+			} finally {
+				state = state * 10 + 3;
+			}
+		}
+
+		public void check() {
+			int value = run(false);
+			if (value != 907 || state != 123 || index != 1) {
+				throw new AssertionError("compound array success: " + value + '/' + state + '/' + index);
+			}
+			value = run(true);
+			if (value != -12 || state != 123 || index != 1 || active[0] != 40) {
+				throw new AssertionError("compound array failure: " + value + '/' + state + '/' + index);
+			}
+		}
+	}
+
+	public static class EnhancedForFinallyFlow {
+		private int trace;
+
+		private int run(int stop) {
+			int result = 0;
+			outer: for (List<Integer> row : Arrays.asList(Arrays.asList(1, 2, 3), Arrays.asList(4, 5))) {
+				for (int value : row) {
+					try {
+						if (value == stop) {
+							break outer;
+						}
+						if ((value & 1) == 0) {
+							continue;
+						}
+						result += value;
+					} finally {
+						trace = trace * 10 + value;
+						result += 10;
+					}
+				}
+			}
+			return result;
+		}
+
+		public void check() {
+			trace = 0;
+			int first = run(4);
+			if (first != 44 || trace != 1234) {
+				throw new AssertionError("enhanced for break: " + first + '/' + trace);
+			}
+			trace = 0;
+			int second = run(9);
+			if (second != 59 || trace != 12345) {
+				throw new AssertionError("enhanced for complete: " + second + '/' + trace);
+			}
+		}
+	}
+
+	public static class DefaultMethodLambdaBridgeFlow {
+		private interface Mapper<T> {
+			T map(T value);
+
+			default T twice(T value) {
+				return map(map(value));
+			}
+		}
+
+		private String run(String prefix) {
+			int[] calls = { 0 };
+			Mapper<String> mapper = value -> {
+				calls[0]++;
+				return prefix + calls[0] + value;
+			};
+			return mapper.twice("x") + '/' + calls[0];
+		}
+
+		public void check() {
+			String actual = run("p");
+			if (!actual.equals("p2p1x/2")) {
+				throw new AssertionError("default method lambda bridge: " + actual);
+			}
+		}
+	}
+
+	public static class BooleanAssignmentOrderFlow {
+		private int state;
+		private int value;
+
+		private boolean step(int marker, boolean result) {
+			state = state * 10 + marker;
+			return result;
+		}
+
+		private int run(int initial) {
+			state = 0;
+			value = initial;
+			try {
+				boolean result = (step(1, value++ > 0) && step(2, value++ > 2))
+						|| (step(3, (value += 2) > 0) && step(4, value-- > 2));
+				return (result ? 100 : 0) + value;
+			} finally {
+				state = state * 10 + 9;
+			}
+		}
+
+		private void assertRun(int initial, int expectedValue, int expectedState) {
+			int actual = run(initial);
+			if (actual != expectedValue || state != expectedState) {
+				throw new AssertionError("boolean assignment order: " + initial + '=' + actual + '/' + state);
+			}
+		}
+
+		public void check() {
+			assertRun(0, 102, 1349);
+			assertRun(1, 104, 12349);
+			assertRun(3, 105, 129);
+		}
+	}
+
+	public static class ArrayAliasAssignmentFlow {
+		private int state;
+		private int index;
+		private int[] active;
+
+		private int nextIndex() {
+			state = state * 10 + 1;
+			return index++;
+		}
+
+		private int[] replace(int[] replacement) {
+			state = state * 10 + 2;
+			active = replacement;
+			return replacement;
+		}
+
+		private String run() {
+			int[] first = { 10, 20 };
+			int[] second = { 3, 4 };
+			active = first;
+			state = 0;
+			index = 0;
+			active[nextIndex()] += replace(second)[nextIndex()];
+			return first[0] + ":" + active[0] + ":" + index + ":" + state;
+		}
+
+		public void check() {
+			String actual = run();
+			if (!actual.equals("14:3:2:121")) {
+				throw new AssertionError("array alias assignment: " + actual);
+			}
+		}
+	}
+
+	public static class ConstructorArgumentOrderFlow {
+		private static int trace;
+
+		private static int step(int marker) {
+			trace = trace * 10 + marker;
+			return trace;
+		}
+
+		private static class Base {
+			private final int first;
+			private final int second;
+
+			Base(int first, int second) {
+				this.first = first;
+				this.second = second;
+				trace = trace * 10 + 4;
+			}
+		}
+
+		private static class Child extends Base {
+			private final int field = step(3);
+
+			Child() {
+				super(step(1), step(2));
+				trace = trace * 10 + 5;
+			}
+		}
+
+		private String run() {
+			trace = 0;
+			Child child = new Child();
+			Base base = child;
+			return base.first + ":" + base.second + ":" + child.field + ":" + trace;
+		}
+
+		public void check() {
+			String actual = run();
+			if (!actual.equals("1:12:1243:12435")) {
+				throw new AssertionError("constructor argument order: " + actual);
+			}
+		}
+	}
+
+	public static class EnumNullSwitchFlow {
+		private enum Mode {
+			FIRST, SECOND
+		}
+
+		private int state;
+
+		private int run(Mode mode) {
+			state = 1;
+			try {
+				switch (mode) {
+					case FIRST:
+						state = state * 10 + 2;
+						return 10;
+					case SECOND:
+						state = state * 10 + 3;
+						return 20;
+					default:
+						return 30;
+				}
+			} catch (NullPointerException e) {
+				state = state * 10 + 4;
+				return -1;
+			} finally {
+				state = state * 10 + 5;
+			}
+		}
+
+		private void assertRun(Mode mode, int expectedValue, int expectedState) {
+			int actual = run(mode);
+			if (actual != expectedValue || state != expectedState) {
+				throw new AssertionError("enum null switch: " + mode + '=' + actual + '/' + state);
+			}
+		}
+
+		public void check() {
+			assertRun(Mode.FIRST, 10, 125);
+			assertRun(Mode.SECOND, 20, 135);
+			assertRun(null, -1, 145);
+		}
+	}
+
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testComplexLoopFlow() {
 		getClassNode(ComplexLoopFlow.class);
@@ -2058,6 +2361,46 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testNestedCatchReturnMutationFlow() {
 		getClassNode(NestedCatchReturnMutationFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testGenericInnerConstructionFlow() {
+		getClassNode(GenericInnerConstructionFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testCompoundArrayEvaluationFlow() {
+		getClassNode(CompoundArrayEvaluationFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testEnhancedForFinallyFlow() {
+		getClassNode(EnhancedForFinallyFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testDefaultMethodLambdaBridgeFlow() {
+		getClassNode(DefaultMethodLambdaBridgeFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testBooleanAssignmentOrderFlow() {
+		getClassNode(BooleanAssignmentOrderFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testArrayAliasAssignmentFlow() {
+		getClassNode(ArrayAliasAssignmentFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testConstructorArgumentOrderFlow() {
+		getClassNode(ConstructorArgumentOrderFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testEnumNullSwitchFlow() {
+		getClassNode(EnumNullSwitchFlow.class);
 	}
 
 }

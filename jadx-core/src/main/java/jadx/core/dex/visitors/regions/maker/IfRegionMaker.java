@@ -651,6 +651,13 @@ final class IfRegionMaker {
 		if (inheritedLoopBreak != null) {
 			return inheritedLoopBreak;
 		}
+		// A short-circuit branch can jump to an enclosing region exit while its sibling reaches a
+		// shared terminal tail. Select the inherited exit before ordinary branch ownership checks,
+		// otherwise the shared tail is emitted after the IF and also runs on the exiting path.
+		IfInfo directScopeTerminal = restructureDirectScopeExit(info, thenBlock, elseBlock);
+		if (directScopeTerminal != null) {
+			return directScopeTerminal;
+		}
 		IfInfo directScopeExit = restructureDeepDirectScopeExit(info, thenBlock, elseBlock);
 		if (directScopeExit != null) {
 			return directScopeExit;
