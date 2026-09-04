@@ -5,6 +5,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.jetbrains.annotations.Nullable;
+
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.PhiInsn;
@@ -165,6 +167,7 @@ public class TernaryMod extends AbstractRegionVisitor implements IRegionIterativ
 			InsnArg elseArg = InsnArg.wrapInsnIntoArg(elseInsn.copyWithoutResult());
 			TernaryInsn ternInsn = new TernaryInsn(ifRegion.getCondition(), resArg.duplicate(), thenArg, elseArg);
 			normalizeDynamicBooleanNumericBranches(ternInsn);
+			normalizeNarrowLiteralPromotion(ternInsn);
 			int branchLine = Math.max(thenInsn.getSourceLine(), elseInsn.getSourceLine());
 			ternInsn.setSourceLine(Math.max(ifRegion.getSourceLine(), branchLine));
 
@@ -685,6 +688,7 @@ public class TernaryMod extends AbstractRegionVisitor implements IRegionIterativ
 		RegisterArg resultArg = phiResult.duplicate();
 		TernaryInsn ternInsn = new TernaryInsn(ifRegion.getCondition(), resultArg, thenArg, elseArg);
 		normalizeDynamicBooleanNumericBranches(ternInsn);
+		normalizeNarrowLiteralPromotion(ternInsn);
 		ternInsn.simplifyCondition();
 
 		InsnRemover.unbindAllArgs(mth, phiInsn);
@@ -744,6 +748,63 @@ public class TernaryMod extends AbstractRegionVisitor implements IRegionIterativ
 				use.forceSetInitType(ArgType.INT);
 			}
 		}
+	}
+
+	private static void normalizeNarrowLiteralPromotion(TernaryInsn ternInsn) {
+		RegisterArg result = ternInsn.getResult();
+		if (result == null || result.getSVar() == null) {
+			return;
+		}
+		CodeVar codeVar = result.getSVar().getCodeVar();
+		ArgType resultType = codeVar.getType();
+		if (!ArgType.BYTE.equals(resultType)
+				&& !ArgType.SHORT.equals(resultType)
+				&& !ArgType.CHAR.equals(resultType)) {
+			return;
+		}
+		for (InsnArg arg : ternInsn.getArguments()) {
+			LiteralArg literal = getLiteral(arg);
+			if (literal != null && !fitsNarrowType(literal.getLiteral(), resultType)) {
+				// DEX registers don't truncate int values when a branch is assigned. If one
+				// ternary arm is a narrow variable but the other constant is outside that
+				// type, Java binary numeric promotion makes the expression int.
+				literal.setType(ArgType.INT);
+				codeVar.setType(ArgType.INT);
+				for (SSAVar var : codeVar.getSsaVars()) {
+					var.setType(ArgType.INT);
+					if (var.getAssign() != null) {
+						var.getAssign().forceSetInitType(ArgType.INT);
+					}
+					for (RegisterArg use : var.getUseList()) {
+						use.forceSetInitType(ArgType.INT);
+					}
+				}
+				return;
+			}
+		}
+	}
+
+	private static @Nullable LiteralArg getLiteral(InsnArg arg) {
+		if (arg instanceof LiteralArg) {
+			return (LiteralArg) arg;
+		}
+		if (arg.isInsnWrap()) {
+			InsnNode insn = arg.unwrap();
+			if (insn.getArgsCount() == 1 && insn.getArg(0) instanceof LiteralArg) {
+				return (LiteralArg) insn.getArg(0);
+			}
+		}
+		return null;
+	}
+
+	private static boolean fitsNarrowType(long value, ArgType type) {
+		if (ArgType.BYTE.equals(type)) {
+			return value >= Byte.MIN_VALUE && value <= Byte.MAX_VALUE;
+		}
+		if (ArgType.SHORT.equals(type)) {
+			return value >= Short.MIN_VALUE && value <= Short.MAX_VALUE;
+		}
+		return value >= Character.MIN_VALUE && value <= Character.MAX_VALUE;
 	}
 
 	private static ArgType getBranchType(InsnArg arg) {

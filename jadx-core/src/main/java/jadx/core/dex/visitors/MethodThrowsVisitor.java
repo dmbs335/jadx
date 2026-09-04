@@ -35,6 +35,7 @@ import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
 import jadx.core.dex.trycatch.CatchAttr;
+import jadx.core.dex.trycatch.ExcHandlerAttr;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.visitors.regions.RegionMakerVisitor;
 import jadx.core.dex.visitors.typeinference.TypeCompare;
@@ -240,13 +241,23 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 			if (throwArg instanceof RegisterArg) {
 				RegisterArg regArg = (RegisterArg) throwArg;
 				ArgType exceptionType = regArg.getType();
-				if (exceptionType.equals(ArgType.THROWABLE)) {
-
-					InsnNode assignInsn = regArg.getAssignInsn();
-					if (assignInsn != null
-							&& assignInsn.getType() == InsnType.MOVE_EXCEPTION
-							&& assignInsn.getResult().contains(AFlag.CUSTOM_DECLARE)) {
-						// arg variable is from catch statement, ignore Throwable rethrow
+				InsnNode assignInsn = regArg.getAssignInsn();
+				if (assignInsn != null
+						&& assignInsn.getType() == InsnType.MOVE_EXCEPTION
+						&& assignInsn.getResult().contains(AFlag.CUSTOM_DECLARE)) {
+					ExcHandlerAttr handlerAttr = assignInsn.get(AType.EXC_HANDLER);
+					if (handlerAttr != null && !handlerAttr.getHandler().isCatchAll()) {
+						// A multi-catch variable has the common supertype in bytecode (often
+						// Exception), but Java's precise rethrow type is the union of the caught
+						// alternatives. Propagating the common type makes callers uncompilable.
+						for (ClassInfo catchType : handlerAttr.getHandler().getCatchTypes()) {
+							visitThrows(mth, catchType.getType(), excludedExceptions);
+						}
+						return;
+					}
+					if (exceptionType.equals(ArgType.THROWABLE)) {
+						// Catch-all rethrows are commonly generated for synchronized/finally
+						// cleanup and must not leak a synthetic Throwable declaration.
 						return;
 					}
 				}
