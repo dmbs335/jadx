@@ -20,6 +20,7 @@ import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.FilledNewArrayNode;
 import jadx.core.dex.instructions.IfNode;
+import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeNode;
@@ -306,6 +307,16 @@ public class SimplifyVisitor extends AbstractVisitor {
 			InsnNode wi = ((InsnWrapArg) f).getWrapInsn();
 			if (wi.getType() == InsnType.CMP_L || wi.getType() == InsnType.CMP_G) {
 				if (insn.getArg(1).isZeroLiteral()) {
+					IfOp op = insn.getOp();
+					ArgType cmpArgType = wi.getArg(0).getType();
+					boolean floatingCmp = cmpArgType.contains(PrimitiveType.FLOAT)
+							|| cmpArgType.contains(PrimitiveType.DOUBLE);
+					if (floatingCmp && op != IfOp.EQ && op != IfOp.NE) {
+						// Keep the JVM NaN bias encoded by cmp_l/cmp_g. Condition codegen can
+						// render a relational form without turning logical negation into the
+						// non-equivalent opposite relation.
+						return;
+					}
 					insn.changeCondition(insn.getOp(), wi.getArg(0).duplicate(), wi.getArg(1).duplicate());
 					InsnRemover.unbindInsn(mth, wi);
 				} else {

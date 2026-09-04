@@ -20,6 +20,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
+import jadx.core.dex.instructions.args.PrimitiveType;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.InsnNode;
@@ -261,6 +262,15 @@ public final class IfCondition extends AttrNode {
 			case CMP_G:
 				if (lit == 0) {
 					if (c.isSharedView()) {
+						return null;
+					}
+					IfOp cmpOp = c.getOp();
+					ArgType cmpArgType = wrapInsn.getArg(0).getType();
+					boolean floatingCmp = cmpArgType.contains(PrimitiveType.FLOAT)
+							|| cmpArgType.contains(PrimitiveType.DOUBLE);
+					if (floatingCmp && cmpOp != IfOp.EQ && cmpOp != IfOp.NE) {
+						// Keep the cmp instruction until codegen: region inversion can turn a direct
+						// relation into its non-equivalent NaN-excluding opposite.
 						return null;
 					}
 					IfNode insn = c.getInsn();

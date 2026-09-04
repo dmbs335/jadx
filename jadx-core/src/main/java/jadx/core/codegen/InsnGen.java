@@ -472,7 +472,6 @@ public class InsnGen {
 				break;
 
 			case CMP_L:
-			case CMP_G:
 				code.add('(');
 				addArg(code, insn.getArg(0));
 				code.add(" > ");
@@ -482,6 +481,18 @@ public class InsnGen {
 				code.add(" == ");
 				addArg(code, insn.getArg(1));
 				code.add(" ? 0 : -1))");
+				break;
+
+			case CMP_G:
+				code.add('(');
+				addArg(code, insn.getArg(0));
+				code.add(" < ");
+				addArg(code, insn.getArg(1));
+				code.add(" ? -1 : (");
+				addArg(code, insn.getArg(0));
+				code.add(" == ");
+				addArg(code, insn.getArg(1));
+				code.add(" ? 0 : 1))");
 				break;
 
 			case INSTANCE_OF: {
@@ -1213,6 +1224,12 @@ public class InsnGen {
 	}
 
 	private void callSuper(ICodeWriter code, MethodInfo callMth) {
+		ClassNode callCls = root.resolveClass(callMth.getDeclClass());
+		if (callCls != null && callCls.getAccessFlags().isInterface()) {
+			useClass(code, callMth.getDeclClass());
+			code.add(".super");
+			return;
+		}
 		ClassInfo superCallCls = getClassForSuperCall(callMth);
 		if (superCallCls == null) {
 			// unknown class, add comment to keep that info

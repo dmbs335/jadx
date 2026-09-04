@@ -14,6 +14,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
+import jadx.core.dex.instructions.args.PrimitiveType;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.regions.conditions.Compare;
@@ -103,6 +104,9 @@ public class ConditionGen extends InsnGen {
 	private void addCompare(ICodeWriter code, CondStack stack, Compare compare, IfOp op) throws CodegenException {
 		InsnArg firstArg = compare.getA();
 		InsnArg secondArg = compare.getB();
+		if (addFloatingCmp(code, firstArg, secondArg, op)) {
+			return;
+		}
 		if (isBooleanConditionArg(firstArg)
 				&& secondArg.isLiteral()
 				&& isBooleanLiteral((LiteralArg) secondArg)) {
@@ -130,6 +134,52 @@ public class ConditionGen extends InsnGen {
 		addArg(code, firstArg, isArgWrapNeeded(firstArg));
 		code.add(' ').add(op.getSymbol()).add(' ');
 		addArg(code, secondArg, isArgWrapNeeded(secondArg));
+	}
+
+	/**
+	 * Render a floating-point {@code cmp_l/cmp_g} followed by a comparison with zero without
+	 * losing the bytecode instruction's NaN bias. In particular, negating {@code >=} is not
+	 * equivalent to {@code <} for NaN, so the unsafe relations must remain explicitly negated.
+	 */
+	private boolean addFloatingCmp(ICodeWriter code, InsnArg firstArg, InsnArg secondArg, IfOp op)
+			throws CodegenException {
+		if (!firstArg.isInsnWrap()
+				|| !secondArg.isLiteral()
+				|| ((LiteralArg) secondArg).getLiteral() != 0) {
+			return false;
+		}
+		InsnNode cmpInsn = firstArg.unwrap();
+		InsnType cmpType = cmpInsn.getType();
+		if (cmpType != InsnType.CMP_L && cmpType != InsnType.CMP_G) {
+			return false;
+		}
+		ArgType cmpArgType = cmpInsn.getArg(0).getType();
+		if (!cmpArgType.contains(PrimitiveType.FLOAT) && !cmpArgType.contains(PrimitiveType.DOUBLE)) {
+			return false;
+		}
+		IfOp directOp = op;
+		boolean negate = false;
+		if (cmpType == InsnType.CMP_L) {
+			if (op == IfOp.LT || op == IfOp.LE) {
+				directOp = op.invert();
+				negate = true;
+			}
+		} else if (op == IfOp.GT || op == IfOp.GE) {
+			directOp = op.invert();
+			negate = true;
+		}
+		if (negate) {
+			code.add("!(");
+		}
+		InsnArg left = cmpInsn.getArg(0);
+		InsnArg right = cmpInsn.getArg(1);
+		addArg(code, left, isArgWrapNeeded(left));
+		code.add(' ').add(directOp.getSymbol()).add(' ');
+		addArg(code, right, isArgWrapNeeded(right));
+		if (negate) {
+			code.add(')');
+		}
+		return true;
 	}
 
 	private static boolean isBooleanConditionArg(InsnArg arg) {
