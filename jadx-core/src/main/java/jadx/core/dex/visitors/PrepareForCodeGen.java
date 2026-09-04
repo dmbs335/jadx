@@ -97,6 +97,7 @@ public class PrepareForCodeGen extends AbstractVisitor {
 			}
 			removeInstructions(block);
 			checkInline(block);
+			addArrayPutCasts(mth, block);
 			collapseMarkedFloatIdentityConversions(mth, block);
 			removeParenthesis(block);
 			restoreSameCodeVarIncrementOrder(block);
@@ -2015,6 +2016,45 @@ public class PrepareForCodeGen extends AbstractVisitor {
 				case ARRAY_LENGTH:
 					verifyNullCast(mth, insn.getArg(0));
 					break;
+			}
+		}
+	}
+
+	/**
+	 * Preserve a verifier-level array supertype which can disappear after MOVE inlining. For example,
+	 * storing an {@code Object} through an {@code Object[]} alias of a {@code Number[]} is valid
+	 * bytecode and performs the component check at runtime, but {@code Number[] = Object} is not valid
+	 * Java source. Casting only the receiver to {@code Object[]} restores both compilation and the
+	 * runtime {@link ArrayStoreException} behavior.
+	 */
+	private static void addArrayPutCasts(MethodNode mth, BlockNode block) {
+		for (InsnNode insn : block.getInstructions()) {
+			if (insn.getType() != InsnType.APUT) {
+				continue;
+			}
+			InsnArg arrayArg = insn.getArg(0);
+			InsnArg valueArg = insn.getArg(2);
+			ArgType arrayType = arrayArg.getType();
+			ArgType valueType = valueArg.getType();
+			if (!arrayType.isTypeKnown() || !arrayType.isArray()
+					|| !valueType.isTypeKnown() || valueArg.isZeroConst()) {
+				continue;
+			}
+			ArgType elementType = arrayType.getArrayElement();
+			if ((!elementType.isObject() && !elementType.isArray())
+					|| (!valueType.isObject() && !valueType.isArray())
+					|| mth.root().getTypeCompare().compareTypes(elementType, valueType).isWiderOrEqual()) {
+				continue;
+			}
+			ArgType objectArray = ArgType.array(ArgType.OBJECT);
+			IndexInsnNode castInsn = new IndexInsnNode(InsnType.CAST, objectArray, 1);
+			castInsn.addArg(arrayArg.duplicate());
+			castInsn.add(AFlag.SYNTHETIC);
+			castInsn.add(AFlag.EXPLICIT_CAST);
+			InsnArg castArg = InsnArg.wrapInsnIntoArg(castInsn);
+			castArg.setType(objectArray);
+			if (insn.replaceArg(arrayArg, castArg)) {
+				InsnRemover.unbindArgUsage(mth, arrayArg);
 			}
 		}
 	}
