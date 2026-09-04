@@ -566,6 +566,10 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 		if (!part1Parent.replaceSubBlock(part1Region, replaceRegion)) {
 			return false;
 		}
+		// Region post-processing ran before this synthetic switch was created. Re-run the standard
+		// exit reconstruction so a case which reaches code after the switch cannot accidentally
+		// fall through into a terminal sibling case.
+		SwitchRegionMaker.insertBreaks(mth, replaceRegion);
 		if (!data.getSharedCaseTail().isEmpty()) {
 			Region parentRegion = (Region) part1Parent;
 			normalizeSharedTailExits(mth, part1Region, data.getSharedCaseTail());
