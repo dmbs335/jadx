@@ -487,9 +487,6 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		boolean thenProtected = containsProtectedBlock(thenRegion, tb);
 		boolean elseProtected = containsProtectedBlock(elseRegion, tb);
 		if (thenProtected && elseProtected) {
-			if (isResourceSuppressionTry(tb)) {
-				return false;
-			}
 			return splitMixedProtectedBranch(parent, ifRegion, tb);
 		}
 		if (!thenProtected && !elseProtected) {
@@ -500,8 +497,11 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			return false;
 		}
 		IContainer continuation = thenProtected ? elseRegion : thenRegion;
-		if (!isResourceSuppressionTry(tb)
-				&& !containsExplicitThrow(List.of(continuation))) {
+		boolean resourceSuppressionTry = isResourceSuppressionTry(tb);
+		boolean continuationThrows = containsExplicitThrow(List.of(continuation));
+		if (resourceSuppressionTry ? continuationThrows : !continuationThrows) {
+			// A TWR body throw can sit outside a compiler-split protected range while still
+			// requiring the generated cleanup path. Moving it after the catch skips cleanup.
 			return false;
 		}
 		if (!thenProtected) {
@@ -540,6 +540,7 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		List<IContainer> mixedBlocks = ((Region) mixedRegion).getSubBlocks();
 		List<IContainer> trailingBlocks = mixedBlocks.subList(splitIndex, mixedBlocks.size());
 		if (!containsExplicitThrow(trailingBlocks)
+				&& !(isResourceSuppressionTry(tb) && containsAbruptExit(trailingBlocks))
 				&& !(hasFinallyTailBoundary(tb)
 						&& !isInsideLoop(parent)
 						&& containsAbruptExit(trailingBlocks))) {
