@@ -87,7 +87,11 @@ public class FixSwitchOverEnum extends AbstractVisitor {
 		if (regionRefAttr == null) {
 			return false;
 		}
-		if (!swInsn.replaceArg(arg, invVar)) {
+		// replaceArg unbinds the discarded ordinal/map wrapper recursively. Keep the
+		// replacement in a separate tree, otherwise a nested selector invocation is
+		// marked REMOVE/DONT_GENERATE while still referenced by the rewritten switch.
+		InsnArg replacement = invVar.duplicate();
+		if (!swInsn.replaceArg(arg, replacement)) {
 			return false;
 		}
 		Map<Object, Object> replaceMap = new HashMap<>();
