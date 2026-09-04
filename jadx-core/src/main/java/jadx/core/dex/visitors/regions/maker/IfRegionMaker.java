@@ -651,6 +651,14 @@ final class IfRegionMaker {
 		if (inheritedLoopBreak != null) {
 			return inheritedLoopBreak;
 		}
+		IfInfo phiDefault = restructurePhiDefaultBranch(block, info, thenBlock, elseBlock);
+		if (phiDefault != null) {
+			return phiDefault;
+		}
+		IfInfo phiSelection = restructureSharedPhiSelection(block, info, thenBlock, elseBlock);
+		if (phiSelection != null) {
+			return phiSelection;
+		}
 		// A short-circuit branch can jump to an enclosing region exit while its sibling reaches a
 		// shared terminal tail. Select the inherited exit before ordinary branch ownership checks,
 		// otherwise the shared tail is emitted after the IF and also runs on the exiting path.
@@ -1682,6 +1690,63 @@ final class IfRegionMaker {
 	}
 
 	/**
+	 * Restore a default-value branch when its carrier was selected as the local out. If the sibling
+	 * can also reach a distinct carrier of the immediately following PHI, the default assignment is
+	 * conditional: move the out to the PHI and release the carrier as this IF's else branch.
+	 */
+	private @Nullable IfInfo restructurePhiDefaultBranch(
+			BlockNode block, IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		BlockNode carrier = info.getOutBlock();
+		if (carrier == null || carrier.getPredecessors().size() < 2) {
+			return null;
+		}
+		BlockNode sibling;
+		if (thenBlock == carrier && elseBlock != carrier) {
+			sibling = elseBlock;
+		} else if (elseBlock == carrier && thenBlock != carrier) {
+			sibling = thenBlock;
+		} else {
+			return null;
+		}
+		if (sibling == null
+				|| carrier.getCleanSuccessors().size() != 1
+				|| !isLinearReadOnlyPath(carrier, carrier.getCleanSuccessors().get(0))) {
+			return null;
+		}
+		BlockNode phiJoin = carrier.getCleanSuccessors().get(0);
+		PhiListAttr phiList = phiJoin.get(AType.PHI_LIST);
+		if (phiList == null || phiList.getList().isEmpty()) {
+			return null;
+		}
+		boolean alternativeCarrier = false;
+		for (BlockNode pred : phiJoin.getPredecessors()) {
+			if (pred == carrier || !isPathExists(sibling, pred)) {
+				continue;
+			}
+			for (PhiInsn phi : phiList.getList()) {
+				if (phi.getArgByBlock(carrier) != null && phi.getArgByBlock(pred) != null) {
+					alternativeCarrier = true;
+					break;
+				}
+			}
+			if (alternativeCarrier) {
+				break;
+			}
+		}
+		Set<BlockNode> releasedExit = Set.of(carrier);
+		boolean allPathsReachJoin = allPathsReachOwnedOut(sibling, phiJoin, releasedExit,
+				regionMaker.getStack(), new HashSet<>(), new HashSet<>(), 0);
+		if (!alternativeCarrier || !allPathsReachJoin) {
+			return null;
+		}
+		info.setOutBlock(phiJoin);
+		if (regionMaker.getStack().containsExit(carrier)) {
+			dualInheritedExitBranches.put(block, releasedExit);
+		}
+		return info;
+	}
+
+	/**
 	 * Keep a merged short-circuit condition when its successful side enters a PHI join shared by
 	 * sibling switch paths and its other side is an inherited case boundary. The normal out-block
 	 * search rejects both starts: the join has foreign predecessors, while the boundary belongs to
@@ -2319,6 +2384,53 @@ final class IfRegionMaker {
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * A nested boolean selection can share its true/false carrier blocks with a sibling condition.
+	 * Both carriers belong to this IF and converge at its local PHI. Preserve them as the two branches;
+	 * if one is already an enclosing region exit, temporarily release it from that role.
+	 */
+	private @Nullable IfInfo restructureSharedPhiSelection(
+			BlockNode block, IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		BlockNode out = info.getOutBlock();
+		if (out == null || thenBlock == null || elseBlock == null
+				|| thenBlock == out || elseBlock == out) {
+			return null;
+		}
+		boolean thenInherited = regionMaker.getStack().containsExit(thenBlock);
+		boolean elseInherited = regionMaker.getStack().containsExit(elseBlock);
+		if (thenInherited && elseInherited
+				|| thenBlock.getPredecessors().size() < 2 && elseBlock.getPredecessors().size() < 2
+				|| !isLinearReadOnlyPath(thenBlock, out)
+				|| !isLinearReadOnlyPath(elseBlock, out)) {
+			return null;
+		}
+		BlockNode thenPred = findDirectJoinPredecessor(thenBlock, out);
+		BlockNode elsePred = findDirectJoinPredecessor(elseBlock, out);
+		PhiListAttr phiList = out.get(AType.PHI_LIST);
+		if (thenPred == null || elsePred == null || thenPred == elsePred
+				|| phiList == null || phiList.getList().isEmpty()) {
+			return null;
+		}
+		boolean carriesSelection = false;
+		for (PhiInsn phi : phiList.getList()) {
+			RegisterArg thenArg = phi.getArgByBlock(thenPred);
+			RegisterArg elseArg = phi.getArgByBlock(elsePred);
+			if ((thenArg == null) != (elseArg == null)) {
+				return null;
+			}
+			if (thenArg != null) {
+				carriesSelection = true;
+			}
+		}
+		if (!carriesSelection) {
+			return null;
+		}
+		if (thenInherited || elseInherited) {
+			dualInheritedExitBranches.put(block, Set.of(thenInherited ? thenBlock : elseBlock));
+		}
+		return info;
 	}
 
 	private @Nullable IfInfo restructureDirectScopeExit(IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {

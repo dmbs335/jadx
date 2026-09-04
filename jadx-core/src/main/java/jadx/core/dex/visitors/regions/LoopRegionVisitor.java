@@ -253,7 +253,9 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 
 		ForEachLoop forEachLoop = new ForEachLoop(iterVar, len.getArg(0));
 		forEachLoop.injectFakeInsns(loopRegion);
-		if (InsnUtils.dontGenerateIfNotUsed(len)) {
+		// A discarded loop condition can still own the wrapped length instruction. Removing the
+		// nested instruction alone leaves its arguments in the tree but drops their SSA uses.
+		if (InsnUtils.dontGenerateIfNotUsed(len) && !len.contains(AFlag.WRAPPED)) {
 			if (lenBlock != null && lenBlock.contains(AFlag.DUPLICATED)) {
 				InsnRemover remover = new InsnRemover(mth);
 				remover.addWithoutUnbind(len);
