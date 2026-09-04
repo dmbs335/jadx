@@ -1696,6 +1696,12 @@ final class IfRegionMaker {
 	 */
 	private @Nullable IfInfo restructurePhiDefaultBranch(
 			BlockNode block, IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		// A coroutine pre-header is a method-level merge for initial and resumed execution. Treating
+		// one of its state carriers as a local PHI default pulls the shared loop into the resume IF and
+		// forces RegionMaker to emit the loop again for the initial state.
+		if (mth.get(AType.COROUTINE_LOOP_PRE_HEADER) != null) {
+			return null;
+		}
 		BlockNode carrier = info.getOutBlock();
 		if (carrier == null || carrier.getPredecessors().size() < 2) {
 			return null;

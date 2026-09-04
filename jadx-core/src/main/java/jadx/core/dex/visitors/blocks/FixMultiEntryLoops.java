@@ -24430,6 +24430,7 @@ public class FixMultiEntryLoops {
 		loopHeader.updateCleanSuccessors();
 
 		mth.addAttr(new CoroutineLoopPreHeaderAttr(loopPreHeader));
+		mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
 		mth.addDebugComment(
 				"Split try-protected Deferred Boolean resume tail before iterator loop: "
 						+ loopHeader);
