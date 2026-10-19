@@ -348,13 +348,3 @@ class AnalysisFingerprintTest {
 		return -1;
 	}
 }
-
-@Deprecated
-class PassReloadFixture {
-	@Deprecated
-	int value;
-}
-
-class a {
-	int a;
-}

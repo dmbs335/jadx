@@ -39,7 +39,7 @@ class CheckRegionsTest {
 		BlockNode emittedTwice = block(1);
 		assertThat(CheckRegions.findRemainingUnsafeDuplications(
 				List.of(collapsed, emittedTwice), Map.of(collapsed, 1, emittedTwice, 2)))
-				.containsExactly(emittedTwice);
+						.containsExactly(emittedTwice);
 		assertThat(CheckRegions.findRemainingUnsafeDuplications(
 				List.of(collapsed), Map.of(collapsed, 1))).isEmpty();
 	}

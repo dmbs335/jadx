@@ -80,6 +80,7 @@ public class TestSemanticRoundTripCorpus4 extends IntegrationTest {
 		}
 	}
 
+	@SuppressWarnings("checkstyle:FallThrough")
 	public static class LabeledStringSwitchFlow {
 		private int run(String[] values) {
 			int score = 0;

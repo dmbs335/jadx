@@ -4198,9 +4198,9 @@ public class FixMultiEntryLoops {
 									mth, reportedEdges.get(0).getStart()))
 					&& reportedEdges.get(0).getStart().getSuccessors().contains(loopHeader);
 			if ((!singleSuspendIteratorLoop
-						&& !protectedByteChannelCopyLoop
-						&& (reportedEdges.size() < 2
-								|| loopHeader.getPredecessors().size() < 4))
+					&& !protectedByteChannelCopyLoop
+					&& (reportedEdges.size() < 2
+							|| loopHeader.getPredecessors().size() < 4))
 					|| loopHeader.get(AType.PHI_LIST) != null
 					|| (!protectedByteChannelCopyLoop
 							&& loopHeader.getSuccessors().size() != 1)
@@ -5371,7 +5371,7 @@ public class FixMultiEntryLoops {
 						|| isObfuscatedLabeledSuspendCheck(mth, block))
 				.collect(Collectors.toCollection(LinkedHashSet::new));
 		if (normalizeCompleteUnprotectedCoroutineCompletions(
-						mth, multiEntryLoops, suspendChecks)) {
+				mth, multiEntryLoops, suspendChecks)) {
 			return true;
 		}
 		int suspendChecksCount = suspendChecks.size();
@@ -5804,9 +5804,8 @@ public class FixMultiEntryLoops {
 		boolean namedLabel = labelField.getName().equals("label");
 		// Named-label loops without a channel iterator can require typed resume restores
 		// rather than this register-only whole-state rewrite.
-		if (namedLabel && completions.stream().noneMatch(completion ->
-				containsChannelIteratorSuspendPredicateInvoke(
-						completion.suspendCheck.getPredecessors().get(0)))) {
+		if (namedLabel && completions.stream().noneMatch(completion -> containsChannelIteratorSuspendPredicateInvoke(
+				completion.suspendCheck.getPredecessors().get(0)))) {
 			return false;
 		}
 		completions.sort(
@@ -6041,7 +6040,7 @@ public class FixMultiEntryLoops {
 		boolean hasOrdinaryIteratorTraversal = blocks.stream()
 				.anyMatch(
 						block -> containsNonSuspendInvokeNamed(
-						block, "hasNext"));
+								block, "hasNext"));
 		if (suspendChecks.size() < 2
 				|| hasIteratorSuspend && !channelIteratorStateMachine
 				|| hasOrdinaryIteratorTraversal
@@ -6292,13 +6291,12 @@ public class FixMultiEntryLoops {
 					BlockNode suspendCall = completion.suspendCheck.getPredecessors().get(0);
 					RegisterArg continuationArg = findSuspendCallContinuationArg(
 							findLastResultInvoke(suspendCall));
-					if (continuationArg == null || suspendCall.getInstructions().stream().noneMatch(insn ->
-							insn instanceof IndexInsnNode
-									&& insn.getType() == InsnType.IPUT
-									&& ((IndexInsnNode) insn).getIndex().equals(completion.labelField)
-									&& insn.getArgsCount() == 2
-									&& insn.getArg(1) instanceof RegisterArg
-									&& ((RegisterArg) insn.getArg(1)).getRegNum() == continuationArg.getRegNum())) {
+					if (continuationArg == null || suspendCall.getInstructions().stream().noneMatch(insn -> insn instanceof IndexInsnNode
+							&& insn.getType() == InsnType.IPUT
+							&& ((IndexInsnNode) insn).getIndex().equals(completion.labelField)
+							&& insn.getArgsCount() == 2
+							&& insn.getArg(1) instanceof RegisterArg
+							&& ((RegisterArg) insn.getArg(1)).getRegNum() == continuationArg.getRegNum())) {
 						return false;
 					}
 					directContinuationArgs[i] = continuationArg;
@@ -8366,8 +8364,7 @@ public class FixMultiEntryLoops {
 				&& isCoroutineResultProloguePut(insns.get(0))
 				&& insns.get(0).getArgsCount() == 2
 				&& insns.get(0).getArg(0) instanceof RegisterArg
-				&& ((RegisterArg) insns.get(0).getArg(0)).getRegNum()
-						== completion.resumeResultArg.getRegNum()
+				&& ((RegisterArg) insns.get(0).getArg(0)).getRegNum() == completion.resumeResultArg.getRegNum()
 				&& insns.get(1) instanceof InvokeNode
 				&& insns.get(1).getResult() != null
 				&& insns.get(2).getType() == InsnType.IGET
@@ -9218,9 +9215,9 @@ public class FixMultiEntryLoops {
 						&& hasActionDirectEntry
 						&& (protectedForwardAction
 								|| isTryProtectedTwoStateIteratorAction(
-									mth,
-									hasNextCompletion,
-									actionCompletion));
+										mth,
+										hasNextCompletion,
+										actionCompletion));
 		if (!hasActionDirectEntry
 				|| unprotectedIteratorAction && !hasIteratorHeaderEntry
 				|| protectedActionOnlyEntry && !protectedActionOnly) {
@@ -9589,8 +9586,8 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		if (mth.getBasicBlocks().stream()
-						.filter(block -> containsInvoke(block, "next"))
-						.count() != 1) {
+				.filter(block -> containsInvoke(block, "next"))
+				.count() != 1) {
 			return false;
 		}
 		BlockNode initialEntry = ListUtils.filterOnlyOne(
@@ -16811,8 +16808,7 @@ public class FixMultiEntryLoops {
 					|| decision.getInstructions().size()
 							+ (decisionPrefix == null
 									? 0
-									: decisionPrefix.getInstructions().size())
-							!= decisionCopy.getInstructions().size()) {
+									: decisionPrefix.getInstructions().size()) != decisionCopy.getInstructions().size()) {
 				rollbackCopiedTwoBlockTail(
 						mth, resumeTail, sharedEffect, effectCopy, decisionCopy);
 				rollbackCoroutineExitPreHeader(
@@ -19810,8 +19806,7 @@ public class FixMultiEntryLoops {
 		CoroutineStateEntry stateEntry = findCoroutineLabelStateEntry(resume, labelField);
 		ResumeStateBranch stateBranch = findResumeStateBranchThroughRestore(resume, stateEntry);
 		if (continuationArg == null
-				|| ((RegisterArg) labelPut.getArg(1)).getRegNum()
-						!= continuationArg.getRegNum()
+				|| ((RegisterArg) labelPut.getArg(1)).getRegNum() != continuationArg.getRegNum()
 				|| stateBranch == null
 				|| stateBranch.stateKey != 1) {
 			return false;
@@ -22241,10 +22236,9 @@ public class FixMultiEntryLoops {
 				|| callerCheck.getSuccessors().size() != 2) {
 			return false;
 		}
-		BlockNode frameMove = ListUtils.filterOnlyOne(callerCheck.getSuccessors(), block ->
-				block.getInstructions().size() == 1
-						&& block.getInstructions().get(0).getType() == InsnType.MOVE
-						&& block.getSuccessors().size() == 1);
+		BlockNode frameMove = ListUtils.filterOnlyOne(callerCheck.getSuccessors(), block -> block.getInstructions().size() == 1
+				&& block.getInstructions().get(0).getType() == InsnType.MOVE
+				&& block.getSuccessors().size() == 1);
 		BlockNode terminal = ListUtils.filterOnlyOne(callerCheck.getSuccessors(), block -> block != frameMove);
 		if (frameMove == null || terminal == null || !reachesExitOnLinearPath(terminal, 2)) {
 			return false;
@@ -22265,12 +22259,12 @@ public class FixMultiEntryLoops {
 				|| !BlockUtils.checkLastInsnType(initialEntry.getPredecessors().get(0), InsnType.SWITCH)) {
 			return false;
 		}
-		BlockNode stackTraceCall = ListUtils.filterOnlyOne(frameCheck.getSuccessors(), block ->
-				findResultInvoke(block, "getStackTraceElement") != null
+		BlockNode stackTraceCall =
+				ListUtils.filterOnlyOne(frameCheck.getSuccessors(), block -> findResultInvoke(block, "getStackTraceElement") != null
 						&& block.getSuccessors().size() == 1);
 		if (stackTraceCall == null || frameCheck.getSuccessors().stream()
-					.filter(block -> block != stackTraceCall)
-					.noneMatch(block -> reachesExitOnLinearPath(block, 2))) {
+				.filter(block -> block != stackTraceCall)
+				.noneMatch(block -> reachesExitOnLinearPath(block, 2))) {
 			return false;
 		}
 		BlockNode skipCheck = stackTraceCall.getSuccessors().get(0);
@@ -22291,8 +22285,8 @@ public class FixMultiEntryLoops {
 						.noneMatch(block -> reachesExitOnLinearPath(block, 1))) {
 			return false;
 		}
-		BlockNode directBridge = ListUtils.filterOnlyOne(suspendCheck.getSuccessors(), block ->
-				ListUtils.isSingleElement(block.getSuccessors(), callerAdvance)
+		BlockNode directBridge = ListUtils.filterOnlyOne(suspendCheck.getSuccessors(),
+				block -> ListUtils.isSingleElement(block.getSuccessors(), callerAdvance)
 						&& !block.getInstructions().isEmpty()
 						&& block.getInstructions().size() <= 2
 						&& block.getInstructions().stream().allMatch(insn -> insn.getType() == InsnType.MOVE));
@@ -23651,7 +23645,8 @@ public class FixMultiEntryLoops {
 
 	/**
 	 * Kotlin can merge the initial and resumed suspend states immediately before a source loop
-	 * header. A directly completed delay or supplied suspend callback then reaches that header without passing through the
+	 * header. A directly completed delay or supplied suspend callback then reaches that header without
+	 * passing through the
 	 * state dispatcher, so exception-protected bodies make the otherwise structured loop appear to
 	 * have a second entry.
 	 *
@@ -27231,8 +27226,7 @@ public class FixMultiEntryLoops {
 		}
 		if (completion == null
 				|| completion.stateKey != 1
-				|| completion.directSuccess.get(AType.TRY_BLOCK)
-						!= suspendCall.get(AType.TRY_BLOCK)
+				|| completion.directSuccess.get(AType.TRY_BLOCK) != suspendCall.get(AType.TRY_BLOCK)
 				|| !completion.directSuccess.getPredecessors().contains(suspendCheck)
 				|| !isPathExists(completion.directSuccess, suspendCall)) {
 			return false;
@@ -27362,10 +27356,14 @@ public class FixMultiEntryLoops {
 									insn -> insn.getType() == InsnType.CONST && insn.getArg(0).isZeroLiteral())
 							&& block.getInstructions().stream().allMatch(
 									insn -> insn.getType() == InsnType.CONST || insn.getType() == InsnType.GOTO));
-			BlockNode trueResult = falseResult == null ? null : ListUtils.filterOnlyOne(
-					resultGuard.getSuccessors(), block -> block != falseResult);
-			BlockNode incompleteGuard = falseResult == null ? null : ListUtils.filterOnlyOne(
-					falseResult.getPredecessors(), block -> block != resultGuard);
+			BlockNode trueResult = falseResult == null
+					? null
+					: ListUtils.filterOnlyOne(
+							resultGuard.getSuccessors(), block -> block != falseResult);
+			BlockNode incompleteGuard = falseResult == null
+					? null
+					: ListUtils.filterOnlyOne(
+							falseResult.getPredecessors(), block -> block != resultGuard);
 			BlockNode handlerValue = handlerEntry.getSuccessors().get(0);
 			if (falseResult == null || trueResult == null || incompleteGuard == null
 					|| falseResult.getSuccessors().size() != 1 || trueResult.getSuccessors().size() != 1
@@ -27384,8 +27382,10 @@ public class FixMultiEntryLoops {
 					block -> containsInvoke(block, "remove") && block.getSuccessors().size() == 1);
 			BlockNode loopHeader = ListUtils.filterOnlyOne(removeDecision.getSuccessors(),
 					block -> block != removal && containsInvoke(block, "hasNext"));
-			BlockNode initialEntry = loopHeader == null ? null : ListUtils.filterOnlyOne(
-					loopHeader.getPredecessors(), block -> block != removeDecision && block != removal);
+			BlockNode initialEntry = loopHeader == null
+					? null
+					: ListUtils.filterOnlyOne(
+							loopHeader.getPredecessors(), block -> block != removeDecision && block != removal);
 			if (removal == null || loopHeader == null || initialEntry == null
 					|| !ListUtils.isSingleElement(removal.getSuccessors(), loopHeader)
 					|| !ListUtils.isSingleElement(initialEntry.getSuccessors(), loopHeader)

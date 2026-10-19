@@ -45,7 +45,8 @@ public enum PrimitiveType {
 			ArgType[] types = new ArgType[primitives.length];
 			for (PrimitiveType primitive : primitives) {
 				types[primitive.ordinal()] = primitive == ARRAY
-						? ArgType.OBJECT_ARRAY : ArgType.object(primitive.boxClassName);
+						? ArgType.OBJECT_ARRAY
+						: ArgType.object(primitive.boxClassName);
 			}
 			return types;
 		}

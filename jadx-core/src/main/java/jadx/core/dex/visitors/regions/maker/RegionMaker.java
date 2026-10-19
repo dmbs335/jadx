@@ -165,7 +165,6 @@ public class RegionMaker {
 		return region;
 	}
 
-
 	private void restoreLinearSyntheticMoveBlocks(Region rootRegion) {
 		List<BlockNode> blocks = mth.getBasicBlocks();
 		for (int i = 0, count = blocks.size(); i < count; i++) {
@@ -297,7 +296,6 @@ public class RegionMaker {
 		region.add(block);
 		return true;
 	}
-
 
 	static boolean isSafeRecursiveLeafDuplication(BlockNode block) {
 		block.updateCleanSuccessors();

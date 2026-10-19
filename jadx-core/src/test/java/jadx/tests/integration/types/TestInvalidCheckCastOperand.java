@@ -21,9 +21,12 @@ public class TestInvalidCheckCastOperand extends SmaliTest {
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.contains("Primitive value used as check-cast operand: int")
-				.contains("Method not decompiled: types.TestInvalidCheckCastOperand.invalidUnrelatedClasses(java.lang.Integer):java.lang.String")
-				.contains("Method not decompiled: types.TestInvalidCheckCastOperand.invalidFinalToInterface(java.lang.Integer):java.lang.CharSequence")
-				.contains("Method not decompiled: types.TestInvalidCheckCastOperand.invalidInterfaceToFinal(java.lang.CharSequence):java.lang.Integer")
+				.contains(
+						"Method not decompiled: types.TestInvalidCheckCastOperand.invalidUnrelatedClasses(java.lang.Integer):java.lang.String")
+				.contains(
+						"Method not decompiled: types.TestInvalidCheckCastOperand.invalidFinalToInterface(java.lang.Integer):java.lang.CharSequence")
+				.contains(
+						"Method not decompiled: types.TestInvalidCheckCastOperand.invalidInterfaceToFinal(java.lang.CharSequence):java.lang.Integer")
 				.contains("Method not decompiled: types.TestInvalidCheckCastOperand.invalidArrayToObject(int[]):java.lang.String")
 				.contains("Method not decompiled: types.TestInvalidCheckCastOperand.invalidObjectToArray(java.lang.String):int[]")
 				.contains("Method not decompiled: types.TestInvalidCheckCastOperand.invalidCrossDimension(int[]):java.lang.Object[][]")

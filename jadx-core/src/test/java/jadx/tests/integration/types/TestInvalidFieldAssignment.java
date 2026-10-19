@@ -26,8 +26,10 @@ public class TestInvalidFieldAssignment extends SmaliTest {
 				.contains("Method not decompiled: types.TestInvalidFieldAssignment.stringToNumber():void")
 				.contains("Method not decompiled: types.TestInvalidFieldAssignment.intToString():void")
 				.contains("Method not decompiled: types.TestInvalidFieldAssignment.objectToString():void")
-				.contains("Method not decompiled: types.TestInvalidFieldAssignment.stringToInstanceNumber(types.TestInvalidFieldAssignment):void")
-				.contains("Method not decompiled: types.TestInvalidFieldAssignment.intToInstanceString(types.TestInvalidFieldAssignment):void")
+				.contains(
+						"Method not decompiled: types.TestInvalidFieldAssignment.stringToInstanceNumber(types.TestInvalidFieldAssignment):void")
+				.contains(
+						"Method not decompiled: types.TestInvalidFieldAssignment.intToInstanceString(types.TestInvalidFieldAssignment):void")
 				.contains("any = getString();")
 				.contains("any = getInt();")
 				.contains("text = getString();");

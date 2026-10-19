@@ -115,10 +115,12 @@ public class TestSemanticRoundTripCorpus8 extends IntegrationTest {
 			return marker;
 		}
 
+		@SuppressWarnings("checkstyle:InterfaceIsType")
 		private interface Parent {
 			int VALUE = mark(1);
 		}
 
+		@SuppressWarnings("checkstyle:InterfaceIsType")
 		private interface Child extends Parent {
 			int VALUE = mark(2);
 		}
@@ -233,7 +235,7 @@ public class TestSemanticRoundTripCorpus8 extends IntegrationTest {
 					} else if (branch == 1) {
 						expected = (mask & 1) != 0 ? -5 : (mask & 2) != 0
 								? (mask & 8) != 0 ? -567 : 50567
-									: (mask & 4) != 0 ? -568 : 10568;
+								: (mask & 4) != 0 ? -568 : 10568;
 					} else {
 						expected = -10000;
 					}

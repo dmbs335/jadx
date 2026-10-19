@@ -67,7 +67,7 @@ public class TestSplitProtectedRethrow extends SmaliTest {
 						expected = "0";
 					} else if (protectedFailure) {
 						expected = mode == 0 ? (occurrence == 1 ? "01H" : "011H")
-							: failureLocation == 2 ? "2H" : "21H";
+								: failureLocation == 2 ? "2H" : "21H";
 					} else {
 						expected = mode == 0 ? "011" : "21";
 					}

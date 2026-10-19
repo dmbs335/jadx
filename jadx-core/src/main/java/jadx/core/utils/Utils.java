@@ -474,7 +474,7 @@ public class Utils {
 	 * load factor. Passing the expected mapping count directly to the constructor causes another
 	 * resize after the map reaches 75% of that value.
 	 */
-	public static <K, V> HashMap<K, V> newHashMap(int expectedSize) {
+	public static <K, V> Map<K, V> newHashMap(int expectedSize) {
 		if (expectedSize < 0) {
 			throw new IllegalArgumentException("Negative expected size: " + expectedSize);
 		}

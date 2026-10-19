@@ -101,8 +101,8 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 					|| isSharedNestedSwitchCatch(mth, tryBlock)
 					|| isRepeatedSingleSiteSwitchCatch(mth, tryBlock)
 					|| (canSplitProtectedScope(mth.getRegion(), tryBlock)
-					&& (isSimpleNestedSingleSiteCatch(tryBlock)
-							|| hasIndependentRepeatableRethrow(mth, tryBlocks, tryBlock))));
+							&& (isSimpleNestedSingleSiteCatch(tryBlock)
+									|| hasIndependentRepeatableRethrow(mth, tryBlocks, tryBlock))));
 		}
 		if (peeledProtectedEntries) {
 			for (TryCatchBlockAttr tryBlock : tryBlocks) {
@@ -134,8 +134,6 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			}
 		}
 	}
-
-
 
 	/**
 	 * A catch-all protecting a typed try's body may be wrapped around the typed catch when its
@@ -917,7 +915,6 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		return extractTrailingRegion(nestedBody, getTrailingUnprotectedSplitIndex(nestedBody, catchAllBlock));
 	}
 
-
 	private static void collectMixedNormalTailRegions(IContainer container, TryCatchBlockAttr catchAllBlock,
 			TryCatchBlockAttr typedBlock, List<Region> candidates) {
 		if (!(container instanceof IRegion)) {
@@ -965,7 +962,8 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 					}
 					CatchAttr attr = inner.get(AType.EXC_CATCH);
 					return (attr == null ? protectedBlock : attr.getHandlers().containsAll(tb.getHandlers()))
-							? null : Boolean.TRUE;
+							? null
+							: Boolean.TRUE;
 				});
 				if (unsafe != null) {
 					return false;
@@ -1049,8 +1047,7 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		ExceptionHandler handler = tryBlock.getHandlers().get(0);
 		if (handler.isFinally() || handler.getHandlerRegion() == null
 				|| handlerExitKinds(handler.getHandlerRegion(), new IdentityHashMap<>(),
-						Collections.newSetFromMap(new IdentityHashMap<>()))
-						!= (HANDLER_THROW | HANDLER_FALL_THROUGH)) {
+						Collections.newSetFromMap(new IdentityHashMap<>())) != (HANDLER_THROW | HANDLER_FALL_THROUGH)) {
 			return false;
 		}
 		List<LoopInfo> handlerLoops = mth.getAllLoopsForBlock(handler.getHandlerBlock());
@@ -1210,24 +1207,24 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			return false;
 		}
 		try {
-		if (region instanceof SwitchRegion) {
-			int protectedCases = 0;
-			Set<IContainer> countedCases = Collections.newSetFromMap(new IdentityHashMap<>());
-			for (SwitchRegion.CaseInfo caseInfo : ((SwitchRegion) region).getCases()) {
-				IContainer caseContainer = caseInfo.getContainer();
-				if (countedCases.add(caseContainer) && containsProtectedCaseBlock(caseContainer, protectedBlocks)
-						&& ++protectedCases > 1) {
+			if (region instanceof SwitchRegion) {
+				int protectedCases = 0;
+				Set<IContainer> countedCases = Collections.newSetFromMap(new IdentityHashMap<>());
+				for (SwitchRegion.CaseInfo caseInfo : ((SwitchRegion) region).getCases()) {
+					IContainer caseContainer = caseInfo.getContainer();
+					if (countedCases.add(caseContainer) && containsProtectedCaseBlock(caseContainer, protectedBlocks)
+							&& ++protectedCases > 1) {
+						return true;
+					}
+				}
+			}
+			for (IContainer child : region.getSubBlocks()) {
+				if (child instanceof IRegion
+						&& hasProtectedBlocksInDifferentSwitchCases((IRegion) child, protectedBlocks, active)) {
 					return true;
 				}
 			}
-		}
-		for (IContainer child : region.getSubBlocks()) {
-			if (child instanceof IRegion
-					&& hasProtectedBlocksInDifferentSwitchCases((IRegion) child, protectedBlocks, active)) {
-				return true;
-			}
-		}
-		return false;
+			return false;
 		} finally {
 			active.remove(region);
 		}
@@ -2378,7 +2375,8 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 						return null;
 					}
 					CatchAttr attr = inner.get(AType.EXC_CATCH);
-					boolean matches = attr == null ? protectedBlock
+					boolean matches = attr == null
+							? protectedBlock
 							: hasExpectedHandlers(attr, tb);
 					return matches ? null : Boolean.TRUE;
 				});
@@ -2444,7 +2442,8 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 
 	/**
 	 * Only split along existing sequence/branch boundaries. A protected condition or selector
-	 * with an unprotected branch would require restructuring the branch itself; do not partially rewrite
+	 * with an unprotected branch would require restructuring the branch itself; do not partially
+	 * rewrite
 	 * such a tree. Existing finally/cleanup reconstruction still owns those cases.
 	 */
 	static boolean canSplitProtectedScope(IContainer container, TryCatchBlockAttr tb) {
@@ -2598,7 +2597,10 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		return true;
 	}
 
-	/** A following sibling catch-all site is not protected by this descriptor just because it is reachable. */
+	/**
+	 * A following sibling catch-all site is not protected by this descriptor just because it is
+	 * reachable.
+	 */
 	private static boolean hasFollowingUnprotectedTry(
 			IRegion region, TryCatchBlockAttr tb, BlockNode dominator) {
 		if (!tb.isAllHandler() || tb.getBlocks().size() != 1) {

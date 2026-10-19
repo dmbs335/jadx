@@ -18,7 +18,7 @@ abstract class ExpectedConstructorErrorTest extends SmaliTest {
 		assertThat(classes.stream()
 				.flatMap(cls -> cls.getMethods().stream())
 				.anyMatch(mth -> mth.contains(AType.JADX_ERROR)))
-				.as("expected an explicit constructor decompilation error")
-				.isTrue();
+						.as("expected an explicit constructor decompilation error")
+						.isTrue();
 	}
 }

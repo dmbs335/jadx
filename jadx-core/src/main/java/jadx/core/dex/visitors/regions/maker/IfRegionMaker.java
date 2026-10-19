@@ -141,8 +141,8 @@ final class IfRegionMaker {
 		List<BlockNode> reusedConditions = sharedSwitchCondition || CoroutineMethodUtils.hasKnownContinuationParameter(mth)
 				&& mth.getLoopsCount() == 0
 				&& !mth.getExceptionHandlers().iterator().hasNext()
-				? regionMaker.getReusedMergedIfConditions(block)
-				: List.of();
+						? regionMaker.getReusedMergedIfConditions(block)
+						: List.of();
 		reusedConditions.forEach(b -> b.remove(AFlag.ADDED_TO_REGION));
 		IfInfo mergedIf;
 		try {
@@ -1368,7 +1368,7 @@ final class IfRegionMaker {
 		for (BlockNode exit : regionMaker.getStack().getExits()) {
 			if (exit == info.getOutBlock()
 					|| !isCoroutineResumeJoin(exit)
-						&& !isSingleFieldCoroutineResumeJoin(exit, labelField)) {
+							&& !isSingleFieldCoroutineResumeJoin(exit, labelField)) {
 				continue;
 			}
 			boolean thenReachesExit = isPathExists(thenBlock, exit);

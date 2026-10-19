@@ -10,6 +10,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestInlineAssignInCopiedCondition extends IntegrationTest {
 
 	public static class TestCls {
+		@SuppressWarnings("checkstyle:InnerAssignment")
 		public String test(Data data) {
 			Value value;
 			if (data == null || (value = data.getValue()) == null) {

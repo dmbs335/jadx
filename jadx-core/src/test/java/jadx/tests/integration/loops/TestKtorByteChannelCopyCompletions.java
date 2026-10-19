@@ -28,7 +28,9 @@ public class TestKtorByteChannelCopyCompletions extends SmaliTest {
 				.code()
 				.contains("Incompatible local assignment type: int for io.ktor.utils.io.ByteWriteChannel")
 				.contains("Incompatible local assignment type: long for io.ktor.utils.io.ByteReadChannel")
-				.contains("Method not decompiled: io.ktor.utils.io.ByteReadChannelOperationsKt.copyTo(io.ktor.utils.io.ByteReadChannel, io.ktor.utils.io.ByteWriteChannel, kotlin.coroutines.Continuation")
-				.contains("Method not decompiled: io.ktor.utils.io.ByteReadChannelOperationsKt.copyTo(io.ktor.utils.io.ByteReadChannel, io.ktor.utils.io.ByteWriteChannel, long, kotlin.coroutines.Continuation");
+				.contains(
+						"Method not decompiled: io.ktor.utils.io.ByteReadChannelOperationsKt.copyTo(io.ktor.utils.io.ByteReadChannel, io.ktor.utils.io.ByteWriteChannel, kotlin.coroutines.Continuation")
+				.contains(
+						"Method not decompiled: io.ktor.utils.io.ByteReadChannelOperationsKt.copyTo(io.ktor.utils.io.ByteReadChannel, io.ktor.utils.io.ByteWriteChannel, long, kotlin.coroutines.Continuation");
 	}
 }

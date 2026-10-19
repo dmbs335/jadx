@@ -13,9 +13,9 @@ import java.util.function.Supplier;
 
 import org.junit.jupiter.api.Test;
 
+import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.RaungTest;
 import jadx.tests.api.compiler.TestCompiler;
-import jadx.core.dex.nodes.ClassNode;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
@@ -223,7 +223,7 @@ public class TestLambdaInstance3 extends RaungTest {
 		}
 	}
 
-	@SuppressWarnings({ "rawtypes", "unchecked" })
+	@SuppressWarnings({ "rawtypes", "unchecked", "checkstyle:IllegalType" })
 	public static class CovariantBridgeLambdaRawListCast {
 		private final java.util.ArrayList values = new java.util.ArrayList();
 
@@ -716,7 +716,8 @@ public class TestLambdaInstance3 extends RaungTest {
 			Class<?> generated = compiler.getClass("java8.TestCls");
 			Object instance = Proxy.newProxyInstance(generated.getClassLoader(), new Class<?>[] { generated },
 					(proxy, method, args) -> method.getName().equals("get")
-							? "value" : InvocationHandler.invokeDefault(proxy, method, args));
+							? "value"
+							: InvocationHandler.invokeDefault(proxy, method, args));
 			Object value = generated.getMethod("test").invoke(instance);
 			org.assertj.core.api.Assertions.assertThat(value).isInstanceOf(Memoized.class);
 			org.assertj.core.api.Assertions.assertThat(generated.isInstance(value)).isTrue();

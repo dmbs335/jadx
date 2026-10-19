@@ -457,8 +457,7 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 		}
 		if (container instanceof TryCatchRegion) {
 			IContainer tryBody = ((TryCatchRegion) container).getTryRegion();
-			if (RegionUtils.isRegionContainsBlock(tryBody, assignBlock)
-					!= RegionUtils.isRegionContainsBlock(tryBody, useBlock)) {
+			if (RegionUtils.isRegionContainsBlock(tryBody, assignBlock) != RegionUtils.isRegionContainsBlock(tryBody, useBlock)) {
 				return true;
 			}
 		}

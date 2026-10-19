@@ -76,8 +76,8 @@ public class TestClassFieldSnapshot extends SmaliTest {
 		Thread thread = new Thread(() -> {
 			try {
 				action.run();
-			} catch (Throwable th) {
-				failure.compareAndSet(null, th);
+			} catch (Throwable ex) {
+				failure.compareAndSet(null, ex);
 			}
 		}, name);
 		thread.setDaemon(true);

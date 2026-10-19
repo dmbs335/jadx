@@ -761,7 +761,8 @@ public final class FinishTypeInference extends AbstractVisitor {
 		ArgType declaredType = InsnUtils.getDeclaredResultType(vars.get(0).getAssignInsn());
 		return declaredType != null && (declaredType.isObject() || declaredType.isArray())
 				&& !declaredType.isGenericType()
-				? declaredType : null;
+						? declaredType
+						: null;
 	}
 
 	/**

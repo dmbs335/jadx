@@ -19,6 +19,7 @@ class ResourceOutputRegistryTest {
 	}
 
 	@Test
+	@SuppressWarnings("checkstyle:AvoidEscapedUnicodeCharacters")
 	void separatesUnicodeNormalizationEquivalentPaths() {
 		String composed = "assets/caf\u00e9.json";
 		String decomposed = "assets/cafe\u0301.json";

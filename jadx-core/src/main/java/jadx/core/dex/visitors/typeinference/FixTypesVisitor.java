@@ -22,6 +22,7 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.IncompleteFieldTypeConflictAttr;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
+import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.BaseInvokeNode;
@@ -40,7 +41,6 @@ import jadx.core.dex.instructions.args.PrimitiveType;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.instructions.mods.TernaryInsn;
-import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IMethodDetails;
 import jadx.core.dex.nodes.InsnNode;
@@ -1710,6 +1710,26 @@ public final class FixTypesVisitor extends AbstractVisitor {
 		switch (useInsn.getType()) {
 			case RETURN:
 				return ArgType.INT.equals(mth.getReturnType());
+			case IF:
+				// A comparison with zero or a known int must not narrow the same SSA
+				// value when another use consumes all its bits.
+				InsnArg other;
+				if (useInsn.getArg(0) == use) {
+					other = useInsn.getArg(1);
+				} else if (useInsn.getArg(1) == use) {
+					other = useInsn.getArg(0);
+				} else {
+					return false;
+				}
+				if (other.isZeroLiteral()) {
+					return true;
+				}
+				ArgType otherType = other instanceof RegisterArg ? getKnownMoveSourceType((RegisterArg) other) : other.getType();
+				return ArgType.INT.equals(otherType) || ArgType.BOOLEAN.equals(otherType);
+			case CAST:
+				// DEX int-to-* conversions consume the complete integer bit pattern,
+				// not the boolean interpretation inferred from another operand.
+				return useInsn.getArg(0) == use && ArgType.INT.equals(use.getInitType());
 			case SPUT:
 			case IPUT:
 				if (useInsn.getArg(0) != use || !(useInsn instanceof IndexInsnNode)) {

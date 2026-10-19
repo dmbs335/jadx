@@ -146,7 +146,14 @@ public class ConditionGen extends InsnGen {
 			return;
 		}
 		if (firstBoolean != secondBoolean) {
-			throw new CodegenException("Unsupported mixed boolean condition " + op.getSymbol());
+			InsnArg numericArg = firstBoolean ? secondArg : firstArg;
+			if (!ArgType.INT.equals(getExpressionArgType(numericArg))) {
+				throw new CodegenException("Unsupported mixed boolean condition " + op.getSymbol());
+			}
+			addBooleanAsIntOrArg(code, firstArg, firstBoolean);
+			code.add(' ').add(op.getSymbol()).add(' ');
+			addBooleanAsIntOrArg(code, secondArg, secondBoolean);
+			return;
 		}
 		boolean castReference = checkReferenceComparison(firstArg, secondArg, op);
 
@@ -165,6 +172,16 @@ public class ConditionGen extends InsnGen {
 		}
 	}
 
+	private void addBooleanAsIntOrArg(ICodeWriter code, InsnArg arg, boolean booleanAsInt) throws CodegenException {
+		if (booleanAsInt) {
+			code.add('(');
+			addArg(code, arg, isArgWrapNeeded(arg));
+			code.add(" ? 1 : 0)");
+		} else if (!addLambdaObjectOperandIfNeeded(code, arg)) {
+			addArg(code, arg, isArgWrapNeeded(arg));
+		}
+	}
+
 	private boolean checkReferenceComparison(InsnArg firstArg, InsnArg secondArg, IfOp op) throws CodegenException {
 		if (fallback) {
 			return false;
@@ -173,7 +190,8 @@ public class ConditionGen extends InsnGen {
 		ArgType secondType = getExpressionArgType(secondArg);
 		if (op != IfOp.EQ && op != IfOp.NE) {
 			if (isKnownReferenceType(firstType) || isKnownReferenceType(secondType)) {
-				throw new CodegenException("Invalid reference relational comparison: " + firstType + " " + op.getSymbol() + " " + secondType);
+				throw new CodegenException(
+						"Invalid reference relational comparison: " + firstType + " " + op.getSymbol() + " " + secondType);
 			}
 			return false;
 		}

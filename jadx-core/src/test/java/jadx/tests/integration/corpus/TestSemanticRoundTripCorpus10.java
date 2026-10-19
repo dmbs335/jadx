@@ -80,8 +80,7 @@ public class TestSemanticRoundTripCorpus10 extends IntegrationTest {
 	public static class LabeledBreakFinallyFlow {
 		private String run() {
 			StringBuilder trace = new StringBuilder();
-			outer:
-			for (int i = 0; i < 2; i++) {
+			outer: for (int i = 0; i < 2; i++) {
 				try {
 					for (int j = 0; j < 2; j++) {
 						try {

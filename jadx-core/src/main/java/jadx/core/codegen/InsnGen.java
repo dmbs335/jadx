@@ -1621,7 +1621,8 @@ public class InsnGen {
 					return;
 				}
 			} else if (root.getTypeCompare().compareTypes(actual, expected).isNarrowOrEqual()
-				|| root.getTypeCompare().compareTypes(actual, expected) == jadx.core.dex.visitors.typeinference.TypeCompareEnum.UNKNOWN) {
+					|| root.getTypeCompare().compareTypes(actual,
+							expected) == jadx.core.dex.visitors.typeinference.TypeCompareEnum.UNKNOWN) {
 				return;
 			}
 		} else {
@@ -1935,7 +1936,8 @@ public class InsnGen {
 		ArgType arrayType = ((FilledNewArrayNode) insn).getArrayType();
 		IMethodDetails details = root.getMethodUtils().getMethodDetails(invokeInsn);
 		List<ArgType> paramTypes = details == null
-				? invokeInsn.getCallMth().getArgumentsTypes() : details.getArgTypes();
+				? invokeInsn.getCallMth().getArgumentsTypes()
+				: details.getArgTypes();
 		ArgType paramArrayType = paramTypes.isEmpty() ? null : paramTypes.get(paramTypes.size() - 1);
 		if (paramArrayType != null && paramArrayType.isArray()
 				&& !paramArrayType.getArrayElement().isGenericType()

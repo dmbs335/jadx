@@ -12,8 +12,8 @@ import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IContainer;
-import jadx.core.dex.nodes.InsnContainer;
 import jadx.core.dex.nodes.IRegion;
+import jadx.core.dex.nodes.InsnContainer;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.SwitchRegion;
@@ -24,8 +24,8 @@ import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.trycatch.TryCatchBlockAttr;
 import jadx.core.utils.BlockUtils;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static jadx.core.dex.visitors.blocks.BlockSplitter.connect;
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ProcessTryCatchRegionsTest {
 	private static final AtomicInteger BLOCK_IDS = new AtomicInteger();

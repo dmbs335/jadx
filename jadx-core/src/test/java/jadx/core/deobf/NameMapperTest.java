@@ -24,6 +24,7 @@ public class NameMapperTest {
 	}
 
 	@Test
+	@SuppressWarnings("checkstyle:AvoidEscapedUnicodeCharacters")
 	public void matchesJavaIdentifierPatternForUnicodeAndMalformedUtf16() {
 		String[] edgeCases = {
 				"\uD835\uDC9Cname",

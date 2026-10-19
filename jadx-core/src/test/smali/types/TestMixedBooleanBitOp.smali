@@ -106,3 +106,167 @@
     invoke-direct {v1, v0}, Ltypes/TestMixedBooleanBitOp;-><init>(I)V
     return-object v1
 .end method
+
+.method public static widenOrIntBoolean(IZ)J
+    .locals 3
+
+    or-int v0, p0, p1
+
+    int-to-long v1, v0
+
+    return-wide v1
+.end method
+
+.method public static narrowOrIntBoolean(IZ)B
+    .locals 2
+
+    or-int v0, p0, p1
+
+    int-to-byte v1, v0
+
+    return v1
+.end method
+
+.method public static floatOrIntBoolean(IZ)F
+    .locals 2
+
+    or-int v0, p0, p1
+
+    int-to-float v1, v0
+
+    return v1
+.end method
+
+.method public static storeAndWidenOrIntBoolean(IZ[I)J
+    .locals 3
+
+    or-int v0, p0, p1
+
+    aput v0, p2, p0
+
+    int-to-long v1, v0
+
+    return-wide v1
+.end method
+
+.method public static branchAndWidenOrIntBoolean(IZ)J
+    .locals 3
+
+    or-int v0, p0, p1
+
+    if-eqz v0, :zero
+
+    int-to-long v1, v0
+
+    return-wide v1
+
+    :zero
+    const-wide/16 v1, 0x0
+
+    return-wide v1
+.end method
+
+.method public static compareAndWidenOrIntBoolean(IZ)J
+    .locals 3
+
+    or-int v0, p0, p1
+
+    if-eq v0, p0, :zero
+
+    int-to-long v1, v0
+
+    return-wide v1
+
+    :zero
+    const-wide/16 v1, 0x0
+
+    return-wide v1
+.end method
+
+.method public static reverseCompareAndWidenOrIntBoolean(IZ)J
+    .locals 3
+
+    or-int v0, p0, p1
+
+    if-eq p0, v0, :zero
+
+    int-to-long v1, v0
+
+    return-wide v1
+
+    :zero
+    const-wide/16 v1, 0x0
+
+    return-wide v1
+.end method
+
+.method public static booleanCompareAndWidenOrIntBoolean(IZ)J
+    .locals 3
+
+    or-int v0, p0, p1
+
+    if-eq v0, p1, :zero
+
+    int-to-long v1, v0
+
+    return-wide v1
+
+    :zero
+    const-wide/16 v1, 0x0
+
+    return-wide v1
+.end method
+
+.method public static reverseBooleanCompareAndWidenOrIntBoolean(IZ)J
+    .locals 3
+
+    or-int v0, p0, p1
+
+    if-eq p1, v0, :zero
+
+    int-to-long v1, v0
+
+    return-wide v1
+
+    :zero
+    const-wide/16 v1, 0x0
+
+    return-wide v1
+.end method
+
+.method public static relationalCompareAndWidenOrIntBoolean(IZ)J
+    .locals 3
+
+    or-int v0, p0, p1
+
+    if-lt v0, p0, :negative
+
+    int-to-long v1, v0
+
+    return-wide v1
+
+    :negative
+    const-wide/16 v1, -0x1
+
+    return-wide v1
+.end method
+
+.method public static charOrIntBoolean(IZ)C
+    .locals 2
+
+    or-int v0, p0, p1
+
+    int-to-char v1, v0
+
+    return v1
+.end method
+
+.method public static doubleOrIntBoolean(IZ)D
+    .locals 3
+
+    or-int v0, p0, p1
+
+    int-to-double v1, v0
+
+    return-wide v1
+.end method

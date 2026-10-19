@@ -7,10 +7,11 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import kotlin.coroutines.Continuation;
+
 import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.SmaliTest;
 import jadx.tests.api.compiler.TestCompiler;
-import kotlin.coroutines.Continuation;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;

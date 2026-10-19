@@ -16,8 +16,8 @@ public class TestInsnsBeforeThis extends SmaliTest {
 		assertThat(classes.stream().flatMap(cls -> cls.getMethods().stream())
 				.filter(mth -> mth.contains(AType.JADX_ERROR))
 				.toList())
-				.hasSize(1)
-				.allMatch(mth -> mth.isConstructor());
+						.hasSize(1)
+						.allMatch(mth -> mth.isConstructor());
 	}
 	// @formatter:off
 	/*

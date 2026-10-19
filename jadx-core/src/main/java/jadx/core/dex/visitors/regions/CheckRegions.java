@@ -51,7 +51,8 @@ public class CheckRegions extends AbstractVisitor {
 		// check if all blocks included in regions
 		Set<BlockNode> blocksInRegions = new HashSet<>();
 		Map<BlockNode, Integer> regionBlockUses = mth.contains(AType.UNSAFE_REGION_DUPLICATION)
-				? new HashMap<>() : null;
+				? new HashMap<>()
+				: null;
 		DepthRegionTraversal.traverse(mth, new AbstractRegionVisitor() {
 			@Override
 			public void processBlock(MethodNode mth, IBlock container) {
@@ -151,7 +152,6 @@ public class CheckRegions extends AbstractVisitor {
 				&& !loopHeader.contains(AFlag.ALLOW_MULTIPLE_INSNS_LOOP_COND)
 				&& loopHeader.getInstructions().size() != 1;
 	}
-
 
 	private static void reportRemainingUnsafeDuplications(MethodNode mth, Map<BlockNode, Integer> regionBlockUses) {
 		var unsafeAttr = mth.get(AType.UNSAFE_REGION_DUPLICATION);
@@ -467,7 +467,8 @@ public class CheckRegions extends AbstractVisitor {
 				} else {
 					useBlock = BlockUtils.getBlockByInsn(mth, parentInsn);
 				}
-				if (useBlock == null || sourceBlock != null && !isAssignmentAvailableAtUse(sourceBlock, sourceAssign, useBlock, parentInsn)) {
+				if (useBlock == null
+						|| sourceBlock != null && !isAssignmentAvailableAtUse(sourceBlock, sourceAssign, useBlock, parentInsn)) {
 					return false;
 				}
 			}

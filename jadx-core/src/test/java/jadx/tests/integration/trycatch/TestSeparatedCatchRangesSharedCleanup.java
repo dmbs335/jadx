@@ -5,6 +5,7 @@ import java.lang.reflect.Method;
 import org.junit.jupiter.api.Test;
 
 import jadx.tests.api.SmaliTest;
+
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 

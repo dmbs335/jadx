@@ -21,7 +21,7 @@ public class DepthRegionTraversal {
 
 	private static final int ITERATIVE_LIMIT_MULTIPLIER = 5;
 	private static final int CONTAINER_STACK_POOL_LIMIT = 4;
-	private static final ThreadLocal<ArrayDeque<ArrayList<IContainer>>> CONTAINER_STACK_POOL =
+	private static final ThreadLocal<ArrayDeque<List<IContainer>>> CONTAINER_STACK_POOL =
 			ThreadLocal.withInitial(ArrayDeque::new);
 
 	private DepthRegionTraversal() {
@@ -113,7 +113,7 @@ public class DepthRegionTraversal {
 	private static final IContainer LEAVE_REGION_MARK = new InsnContainer(Collections.emptyList());
 
 	private static void traverseInternal(MethodNode mth, IRegionVisitor visitor, IContainer startContainer) {
-		ArrayList<IContainer> stack = acquireContainerStack();
+		List<IContainer> stack = acquireContainerStack();
 		try {
 			stack.add(startContainer);
 			while (true) {
@@ -141,14 +141,14 @@ public class DepthRegionTraversal {
 		}
 	}
 
-	private static ArrayList<IContainer> acquireContainerStack() {
-		ArrayList<IContainer> stack = CONTAINER_STACK_POOL.get().pollFirst();
+	private static List<IContainer> acquireContainerStack() {
+		List<IContainer> stack = CONTAINER_STACK_POOL.get().pollFirst();
 		return stack != null ? stack : new ArrayList<>();
 	}
 
-	private static void releaseContainerStack(ArrayList<IContainer> stack) {
+	private static void releaseContainerStack(List<IContainer> stack) {
 		stack.clear();
-		ArrayDeque<ArrayList<IContainer>> pool = CONTAINER_STACK_POOL.get();
+		ArrayDeque<List<IContainer>> pool = CONTAINER_STACK_POOL.get();
 		if (pool.size() < CONTAINER_STACK_POOL_LIMIT) {
 			pool.addFirst(stack);
 		}

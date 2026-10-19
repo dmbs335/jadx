@@ -8,9 +8,6 @@ import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 
-import jadx.core.dex.nodes.ClassNode;
-import jadx.tests.api.SmaliTest;
-import jadx.tests.api.compiler.TestCompiler;
 import kotlin.ResultKt;
 import kotlin.Unit;
 import kotlin.coroutines.Continuation;
@@ -18,6 +15,10 @@ import kotlin.coroutines.CoroutineContext;
 import kotlin.coroutines.EmptyCoroutineContext;
 import kotlin.coroutines.intrinsics.IntrinsicsKt;
 import kotlinx.coroutines.Deferred;
+
+import jadx.core.dex.nodes.ClassNode;
+import jadx.tests.api.SmaliTest;
+import jadx.tests.api.compiler.TestCompiler;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
@@ -144,6 +145,7 @@ public class TestCoroutineIteratorSuspendTryLoop extends SmaliTest {
 		}
 	}
 
+	@SuppressWarnings("checkstyle:EqualsHashCode")
 	private static final class ThrowingHash {
 		@Override
 		public int hashCode() {

@@ -370,7 +370,8 @@ final class LoopRegionMaker {
 			}
 		}
 		return join != null && join.get(AType.PHI_LIST) != null && join.getPredecessors().size() == 2
-				? join : null;
+				? join
+				: null;
 	}
 
 	/*

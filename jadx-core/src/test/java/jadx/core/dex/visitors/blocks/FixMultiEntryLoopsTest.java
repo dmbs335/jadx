@@ -66,10 +66,10 @@ class FixMultiEntryLoopsTest {
 		assertThat(unreachable).containsExactly(orphanEntry, orphanLoop, unrelatedOrphan);
 		assertThat(FixMultiEntryLoops.collectOrphanedDirectPaths(
 				List.of(enter, live, orphanEntry, orphanLoop, unrelatedOrphan), enter, Set.of(orphanEntry)))
-				.containsExactly(orphanEntry, orphanLoop);
+						.containsExactly(orphanEntry, orphanLoop);
 		assertThat(FixMultiEntryLoops.collectOrphanedDirectPaths(
 				List.of(enter, live, orphanEntry, orphanLoop, unrelatedOrphan), enter, Set.of(live)))
-				.isEmpty();
+						.isEmpty();
 	}
 
 	@Test

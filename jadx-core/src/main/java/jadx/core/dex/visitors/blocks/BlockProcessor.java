@@ -148,7 +148,6 @@ public class BlockProcessor extends AbstractVisitor {
 		updateCleanSuccessors(mth);
 	}
 
-
 	/**
 	 * Check the minimum invariants required before any later CFG pass can safely run. This is kept
 	 * independent of dominance data so it can also validate a recovery pass which failed while

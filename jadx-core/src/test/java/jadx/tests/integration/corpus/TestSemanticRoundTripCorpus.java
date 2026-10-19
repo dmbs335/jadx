@@ -279,6 +279,7 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	@SuppressWarnings("checkstyle:FallThrough")
 	public static class EnumFallThroughFlow {
 		private enum Phase {
 			NEW,
@@ -907,6 +908,7 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	@SuppressWarnings("checkstyle:FallThrough")
 	public static class SwitchFallThroughCatchFlow {
 		private int run(int mode) {
 			int acc = 1;
@@ -1989,6 +1991,7 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		}
 	}
 
+	@SuppressWarnings("checkstyle:InnerAssignment")
 	public static class BooleanAssignmentOrderFlow {
 		private int state;
 		private int value;

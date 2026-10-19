@@ -21,7 +21,8 @@ public class TestInvalidReferenceCompare extends SmaliTest {
 		assertThat(cls).code()
 				.contains("Invalid reference relational comparison: java.lang.String < java.lang.String")
 				.contains("Incompatible reference and primitive comparison: java.lang.String and int")
-				.contains("Method not decompiled: types.TestInvalidReferenceCompare.relationalStrings(java.lang.String, java.lang.String):boolean")
+				.contains(
+						"Method not decompiled: types.TestInvalidReferenceCompare.relationalStrings(java.lang.String, java.lang.String):boolean")
 				.contains("Method not decompiled: types.TestInvalidReferenceCompare.relationalStringZero(java.lang.String):boolean")
 				.contains("Method not decompiled: types.TestInvalidReferenceCompare.referenceAndPrimitive(java.lang.String, int):boolean")
 				.contains("return ((Object) str) == num;")

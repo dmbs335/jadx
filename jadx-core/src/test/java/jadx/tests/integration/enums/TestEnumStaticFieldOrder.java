@@ -16,6 +16,7 @@ public class TestEnumStaticFieldOrder extends IntegrationTest {
 		MANY,
 		OTHER;
 
+		@SuppressWarnings("checkstyle:ConstantName")
 		public static final Companion companion = new Companion();
 
 		public static final class Companion {

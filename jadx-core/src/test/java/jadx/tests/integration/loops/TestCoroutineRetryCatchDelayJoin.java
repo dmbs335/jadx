@@ -8,9 +8,6 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
-import jadx.core.dex.nodes.ClassNode;
-import jadx.tests.api.SmaliTest;
-import jadx.tests.api.compiler.TestCompiler;
 import kotlin.ResultKt;
 import kotlin.Unit;
 import kotlin.coroutines.Continuation;
@@ -18,8 +15,13 @@ import kotlin.coroutines.intrinsics.IntrinsicsKt;
 import kotlin.jvm.functions.Function2;
 import kotlin.jvm.functions.Function3;
 
+import jadx.core.dex.nodes.ClassNode;
+import jadx.tests.api.SmaliTest;
+import jadx.tests.api.compiler.TestCompiler;
+
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
+@SuppressWarnings("checkstyle:IllegalThrows")
 public class TestCoroutineRetryCatchDelayJoin extends SmaliTest {
 	private static final RuntimeException REQUEST_FAILURE = new RuntimeException("request");
 	private static final RuntimeException DELAY_FAILURE = new RuntimeException("delay");

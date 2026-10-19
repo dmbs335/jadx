@@ -27,17 +27,25 @@ public class TestInvalidInstanceOfOperand extends SmaliTest {
 				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidUnrelatedClasses(java.lang.Number):boolean")
 				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidObjectArrays(java.lang.String[]):boolean")
 				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidPrimitiveArrays(int[]):boolean")
-				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidNestedObjectArrays(java.lang.String[][]):boolean")
+				.contains(
+						"Method not decompiled: types.TestInvalidInstanceOfOperand.invalidNestedObjectArrays(java.lang.String[][]):boolean")
 				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidNestedPrimitiveArray(int[][]):boolean")
 				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidFinalToInterface(java.lang.Integer):boolean")
-				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidInterfaceToFinal(java.lang.CharSequence):boolean")
-				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidFinalToInterfaceArray(java.lang.Integer[]):boolean")
-				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidInterfaceToFinalArray(java.lang.CharSequence[]):boolean")
+				.contains(
+						"Method not decompiled: types.TestInvalidInstanceOfOperand.invalidInterfaceToFinal(java.lang.CharSequence):boolean")
+				.contains(
+						"Method not decompiled: types.TestInvalidInstanceOfOperand.invalidFinalToInterfaceArray(java.lang.Integer[]):boolean")
+				.contains(
+						"Method not decompiled: types.TestInvalidInstanceOfOperand.invalidInterfaceToFinalArray(java.lang.CharSequence[]):boolean")
 				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidPrimitiveToNestedArray(int[]):boolean")
-				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidObjectToNestedArray(java.lang.String[]):boolean")
-				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidNestedArrayToFinalObject(java.lang.Object[][]):boolean")
-				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidClassArrayToNestedPrimitive(java.lang.Number[]):boolean")
-				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidObjectToPrimitiveArray(java.lang.String):boolean")
+				.contains(
+						"Method not decompiled: types.TestInvalidInstanceOfOperand.invalidObjectToNestedArray(java.lang.String[]):boolean")
+				.contains(
+						"Method not decompiled: types.TestInvalidInstanceOfOperand.invalidNestedArrayToFinalObject(java.lang.Object[][]):boolean")
+				.contains(
+						"Method not decompiled: types.TestInvalidInstanceOfOperand.invalidClassArrayToNestedPrimitive(java.lang.Number[]):boolean")
+				.contains(
+						"Method not decompiled: types.TestInvalidInstanceOfOperand.invalidObjectToPrimitiveArray(java.lang.String):boolean")
 				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidPrimitiveArrayToObject(int[]):boolean")
 				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidNonFinalClassToArray(java.lang.Number):boolean")
 				.contains("Method not decompiled: types.TestInvalidInstanceOfOperand.invalidArrayToInterface(int[]):boolean")
