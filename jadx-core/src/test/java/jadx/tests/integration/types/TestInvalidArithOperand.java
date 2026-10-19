@@ -32,6 +32,7 @@ public class TestInvalidArithOperand extends SmaliTest {
 				.contains("Method not decompiled: types.TestInvalidArithOperand.addInvokeInteger(int):int")
 				.contains("Method not decompiled: types.TestInvalidArithOperand.addBoxedParam(java.lang.Integer, int):int")
 				.contains("Method not decompiled: types.TestInvalidArithOperand.addMovedBoxedParam(java.lang.Integer, int):int")
+				.contains("? 1 : 0) &")
 				.contains("return num.intValue() + i;")
 				.contains("return getInteger().intValue() + i;")
 				.contains("return iArr[i] + i2;")

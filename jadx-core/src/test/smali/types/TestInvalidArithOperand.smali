@@ -162,3 +162,10 @@
     add-int/2addr v0, p1
     return v0
 .end method
+
+.method public static andBooleanInt(ZI)I
+    .locals 1
+
+    and-int v0, p0, p1
+    return v0
+.end method

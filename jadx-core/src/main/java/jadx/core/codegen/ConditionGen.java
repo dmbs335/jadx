@@ -148,9 +148,15 @@ public class ConditionGen extends InsnGen {
 		if (firstBoolean != secondBoolean) {
 			throw new CodegenException("Unsupported mixed boolean condition " + op.getSymbol());
 		}
-		checkReferenceComparison(firstArg, secondArg);
+		boolean castReference = checkReferenceComparison(firstArg, secondArg, op);
 
-		if (!addLambdaObjectOperandIfNeeded(code, firstArg)) {
+		if (castReference) {
+			code.add("((Object) ");
+			if (!addLambdaObjectOperandIfNeeded(code, firstArg)) {
+				addArg(code, firstArg, isArgWrapNeeded(firstArg));
+			}
+			code.add(')');
+		} else if (!addLambdaObjectOperandIfNeeded(code, firstArg)) {
 			addArg(code, firstArg, isArgWrapNeeded(firstArg));
 		}
 		code.add(' ').add(op.getSymbol()).add(' ');
@@ -159,18 +165,36 @@ public class ConditionGen extends InsnGen {
 		}
 	}
 
-	private void checkReferenceComparison(InsnArg firstArg, InsnArg secondArg) throws CodegenException {
-		if (fallback || firstArg.isZeroLiteral() || secondArg.isZeroLiteral()) {
-			return;
+	private boolean checkReferenceComparison(InsnArg firstArg, InsnArg secondArg, IfOp op) throws CodegenException {
+		if (fallback) {
+			return false;
 		}
 		ArgType firstType = getExpressionArgType(firstArg);
 		ArgType secondType = getExpressionArgType(secondArg);
-		if (firstType != null && secondType != null && firstType.isObject() && secondType.isObject()
-				&& !firstType.isGenericType() && !secondType.isGenericType()
-				&& isKnownFinalClassType(firstType) && isKnownFinalClassType(secondType)
-				&& root.getTypeCompare().compareTypes(firstType, secondType).isConflict()) {
-			throw new CodegenException("Incompatible reference comparison: " + firstType + " and " + secondType);
+		if (op != IfOp.EQ && op != IfOp.NE) {
+			if (isKnownReferenceType(firstType) || isKnownReferenceType(secondType)) {
+				throw new CodegenException("Invalid reference relational comparison: " + firstType + " " + op.getSymbol() + " " + secondType);
+			}
+			return false;
 		}
+		if (firstArg.isZeroLiteral() || secondArg.isZeroLiteral()) {
+			return false;
+		}
+		if ((isKnownReferenceType(firstType) && isKnownPrimitiveType(secondType))
+				|| (isKnownPrimitiveType(firstType) && isKnownReferenceType(secondType))) {
+			throw new CodegenException("Incompatible reference and primitive comparison: " + firstType + " and " + secondType);
+		}
+		return isKnownReferenceType(firstType) && isKnownReferenceType(secondType)
+				&& !firstType.isGenericType() && !secondType.isGenericType()
+				&& isDefinitelyIncompatibleReferenceTypes(firstType, secondType);
+	}
+
+	private static boolean isKnownReferenceType(ArgType type) {
+		return type != null && type.isTypeKnown() && (type.isObject() || type.isArray());
+	}
+
+	private static boolean isKnownPrimitiveType(ArgType type) {
+		return type != null && type.isTypeKnown() && type.isPrimitive();
 	}
 
 	/**

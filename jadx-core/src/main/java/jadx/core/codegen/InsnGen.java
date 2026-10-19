@@ -2162,7 +2162,13 @@ public class InsnGen {
 			checkArithOperand(insn.getArg(0), insn.getOp());
 			checkArithOperand(insn.getArg(1), insn.getOp());
 		}
+		boolean firstBoolean = ArgType.BOOLEAN.equals(getExpressionArgType(insn.getArg(0)));
+		boolean secondBoolean = ArgType.BOOLEAN.equals(getExpressionArgType(insn.getArg(1)));
+		boolean mixedBooleanBitOp = insn.getOp().isBitOp() && firstBoolean != secondBoolean;
 		if (insn.contains(AFlag.ARITH_ONEARG)) {
+			if (!isFallback() && mixedBooleanBitOp) {
+				throw new CodegenException("Unsupported mixed boolean compound bit operation: " + insn.getOp());
+			}
 			makeArithOneArg(insn, code);
 			return;
 		}
@@ -2171,13 +2177,23 @@ public class InsnGen {
 		if (wrap) {
 			code.add('(');
 		}
-		addArg(code, insn.getArg(0));
+		addNumericBitwiseArg(code, insn.getArg(0), mixedBooleanBitOp && firstBoolean);
 		code.add(' ');
 		code.add(insn.getOp().getSymbol());
 		code.add(' ');
-		addArg(code, insn.getArg(1));
+		addNumericBitwiseArg(code, insn.getArg(1), mixedBooleanBitOp && secondBoolean);
 		if (wrap) {
 			code.add(')');
+		}
+	}
+
+	private void addNumericBitwiseArg(ICodeWriter code, InsnArg arg, boolean booleanAsInt) throws CodegenException {
+		if (booleanAsInt) {
+			code.add('(');
+			addArg(code, arg);
+			code.add(" ? 1 : 0)");
+		} else {
+			addArg(code, arg);
 		}
 	}
 
@@ -2268,7 +2284,7 @@ public class InsnGen {
 		return clspCls != null && clspCls.isInterface();
 	}
 
-	private boolean isDefinitelyIncompatibleObjectTypes(ArgType source, ArgType target) {
+	boolean isDefinitelyIncompatibleObjectTypes(ArgType source, ArgType target) {
 		if (!source.isObject() || !target.isObject()
 				|| !root.getTypeCompare().compareTypes(source, target).isConflict()) {
 			return false;
@@ -2313,7 +2329,7 @@ public class InsnGen {
 				|| (source.isObject() && target.isArray() && isDefinitelyIncompatibleArrayObjectTypes(source));
 	}
 
-	private boolean isDefinitelyIncompatibleReferenceTypes(ArgType source, ArgType target) {
+	boolean isDefinitelyIncompatibleReferenceTypes(ArgType source, ArgType target) {
 		return isDefinitelyIncompatibleObjectTypes(source, target)
 				|| isDefinitelyIncompatibleArrayTypes(source, target)
 				|| isDefinitelyIncompatibleArrayAndObjectTypes(source, target);

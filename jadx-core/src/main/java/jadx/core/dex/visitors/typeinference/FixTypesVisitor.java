@@ -24,6 +24,7 @@ import jadx.core.dex.attributes.nodes.IncompleteFieldTypeConflictAttr;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArithOp;
+import jadx.core.dex.instructions.BaseInvokeNode;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.IndexInsnNode;
@@ -39,6 +40,7 @@ import jadx.core.dex.instructions.args.PrimitiveType;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.instructions.mods.TernaryInsn;
+import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IMethodDetails;
 import jadx.core.dex.nodes.InsnNode;
@@ -1637,6 +1639,10 @@ public final class FixTypesVisitor extends AbstractVisitor {
 		if (splitIntBooleanPhiUses(mth, var)) {
 			return true;
 		}
+		if (isNumericBitwiseResult(mth, var)) {
+			markVarAsInt(var);
+			return true;
+		}
 		boolean assigned = false;
 		for (ITypeBound bound : typeInfo.getBounds()) {
 			ArgType boundType = bound.getType();
@@ -1668,6 +1674,61 @@ public final class FixTypesVisitor extends AbstractVisitor {
 			}
 		}
 		return fixed;
+	}
+
+	private static boolean isNumericBitwiseResult(MethodNode mth, SSAVar var) {
+		InsnNode assignInsn = var.getAssignInsn();
+		if (!(assignInsn instanceof ArithNode)
+				|| !((ArithNode) assignInsn).getOp().isBitOp()
+				|| var.getUseList().isEmpty()) {
+			return false;
+		}
+		boolean intOperand = false;
+		for (InsnArg arg : assignInsn.getArguments()) {
+			ArgType type = arg instanceof RegisterArg ? getKnownMoveSourceType((RegisterArg) arg) : arg.getType();
+			if (ArgType.INT.equals(type)) {
+				intOperand = true;
+				break;
+			}
+		}
+		if (!intOperand) {
+			return false;
+		}
+		for (RegisterArg use : var.getUseList()) {
+			InsnNode useInsn = use.getParentInsn();
+			if (!isIntBitwiseResultUse(mth, useInsn, use)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean isIntBitwiseResultUse(MethodNode mth, InsnNode useInsn, RegisterArg use) {
+		if (useInsn == null) {
+			return false;
+		}
+		switch (useInsn.getType()) {
+			case RETURN:
+				return ArgType.INT.equals(mth.getReturnType());
+			case SPUT:
+			case IPUT:
+				if (useInsn.getArg(0) != use || !(useInsn instanceof IndexInsnNode)) {
+					return false;
+				}
+				Object field = ((IndexInsnNode) useInsn).getIndex();
+				return field instanceof FieldInfo && ArgType.INT.equals(((FieldInfo) field).getType());
+			case INVOKE:
+			case CONSTRUCTOR:
+				if (!(useInsn instanceof BaseInvokeNode)) {
+					return false;
+				}
+				BaseInvokeNode invoke = (BaseInvokeNode) useInsn;
+				int argIndex = useInsn.getArgList().indexOf(use) - invoke.getFirstArgOffset();
+				List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+				return argIndex >= 0 && argIndex < argTypes.size() && ArgType.INT.equals(argTypes.get(argIndex));
+			default:
+				return false;
+		}
 	}
 
 	private static void markVarAsBoolean(SSAVar var) {

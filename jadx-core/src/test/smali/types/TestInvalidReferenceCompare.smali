@@ -58,3 +58,53 @@
     const/4 v0, 0x1
     return v0
 .end method
+
+.method public static relationalStrings(Ljava/lang/String;Ljava/lang/String;)Z
+    .locals 1
+    if-lt p0, p1, :less
+    const/4 v0, 0x0
+    return v0
+    :less
+    const/4 v0, 0x1
+    return v0
+.end method
+
+.method public static relationalStringZero(Ljava/lang/String;)Z
+    .locals 1
+    if-gez p0, :nonnegative
+    const/4 v0, 0x0
+    return v0
+    :nonnegative
+    const/4 v0, 0x1
+    return v0
+.end method
+
+.method public static referenceAndPrimitive(Ljava/lang/String;I)Z
+    .locals 1
+    if-eq p0, p1, :equal
+    const/4 v0, 0x0
+    return v0
+    :equal
+    const/4 v0, 0x1
+    return v0
+.end method
+
+.method public static unrelatedClasses(Ljava/lang/Number;Ljava/lang/Thread;)Z
+    .locals 1
+    if-ne p0, p1, :different
+    const/4 v0, 0x0
+    return v0
+    :different
+    const/4 v0, 0x1
+    return v0
+.end method
+
+.method public static unrelatedArrays([I[J)Z
+    .locals 1
+    if-eq p0, p1, :equal
+    const/4 v0, 0x0
+    return v0
+    :equal
+    const/4 v0, 0x1
+    return v0
+.end method
