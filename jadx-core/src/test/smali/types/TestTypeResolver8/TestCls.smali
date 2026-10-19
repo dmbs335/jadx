@@ -52,7 +52,7 @@
 
     invoke-direct {v0, v1}, Ltypes/TestCls$B;-><init>(Ltypes/TestCls$A;)V
 
-    move v1, v0
+    move-object v1, v0
 
     :cond_a
     invoke-direct {p0, v1}, Ltypes/TestCls;->use(Ltypes/TestCls$B;)V

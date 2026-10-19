@@ -18,9 +18,9 @@ public class DexInsnInfo {
 		INSN_INFO = arr;
 		register(arr, DexOpcodes.NOP, Opcode.NOP, DexInsnFormat.FORMAT_10X);
 
-		register(arr, DexOpcodes.MOVE, Opcode.MOVE, DexInsnFormat.FORMAT_12X);
-		register(arr, DexOpcodes.MOVE_FROM16, Opcode.MOVE, DexInsnFormat.FORMAT_22X);
-		register(arr, DexOpcodes.MOVE_16, Opcode.MOVE, DexInsnFormat.FORMAT_32X);
+		register(arr, DexOpcodes.MOVE, Opcode.MOVE_NARROW, DexInsnFormat.FORMAT_12X);
+		register(arr, DexOpcodes.MOVE_FROM16, Opcode.MOVE_NARROW, DexInsnFormat.FORMAT_22X);
+		register(arr, DexOpcodes.MOVE_16, Opcode.MOVE_NARROW, DexInsnFormat.FORMAT_32X);
 
 		register(arr, DexOpcodes.MOVE_WIDE, Opcode.MOVE_WIDE, DexInsnFormat.FORMAT_12X);
 		register(arr, DexOpcodes.MOVE_WIDE_FROM16, Opcode.MOVE_WIDE, DexInsnFormat.FORMAT_22X);
@@ -114,37 +114,37 @@ public class DexInsnInfo {
 		register(arr, DexOpcodes.APUT_CHAR, Opcode.APUT_CHAR, DexInsnFormat.FORMAT_23X);
 		register(arr, DexOpcodes.APUT_SHORT, Opcode.APUT_SHORT, DexInsnFormat.FORMAT_23X);
 
-		register(arr, DexOpcodes.IGET, Opcode.IGET, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IGET_WIDE, Opcode.IGET, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IGET_OBJECT, Opcode.IGET, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IGET_BOOLEAN, Opcode.IGET, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IGET_BYTE, Opcode.IGET, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IGET_CHAR, Opcode.IGET, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IGET_SHORT, Opcode.IGET, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IGET, Opcode.IGET_NARROW, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IGET_WIDE, Opcode.IGET_WIDE, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IGET_OBJECT, Opcode.IGET_OBJECT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IGET_BOOLEAN, Opcode.IGET_BOOLEAN, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IGET_BYTE, Opcode.IGET_BYTE, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IGET_CHAR, Opcode.IGET_CHAR, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IGET_SHORT, Opcode.IGET_SHORT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
 
-		register(arr, DexOpcodes.IPUT, Opcode.IPUT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IPUT_WIDE, Opcode.IPUT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IPUT_OBJECT, Opcode.IPUT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IPUT_BOOLEAN, Opcode.IPUT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IPUT_BYTE, Opcode.IPUT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IPUT_CHAR, Opcode.IPUT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.IPUT_SHORT, Opcode.IPUT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IPUT, Opcode.IPUT_NARROW, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IPUT_WIDE, Opcode.IPUT_WIDE, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IPUT_OBJECT, Opcode.IPUT_OBJECT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IPUT_BOOLEAN, Opcode.IPUT_BOOLEAN, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IPUT_BYTE, Opcode.IPUT_BYTE, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IPUT_CHAR, Opcode.IPUT_CHAR, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.IPUT_SHORT, Opcode.IPUT_SHORT, DexInsnFormat.FORMAT_22C, InsnIndexType.FIELD_REF);
 
-		register(arr, DexOpcodes.SGET, Opcode.SGET, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SGET_WIDE, Opcode.SGET, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SGET_OBJECT, Opcode.SGET, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SGET_BOOLEAN, Opcode.SGET, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SGET_BYTE, Opcode.SGET, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SGET_CHAR, Opcode.SGET, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SGET_SHORT, Opcode.SGET, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SGET, Opcode.SGET_NARROW, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SGET_WIDE, Opcode.SGET_WIDE, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SGET_OBJECT, Opcode.SGET_OBJECT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SGET_BOOLEAN, Opcode.SGET_BOOLEAN, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SGET_BYTE, Opcode.SGET_BYTE, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SGET_CHAR, Opcode.SGET_CHAR, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SGET_SHORT, Opcode.SGET_SHORT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
 
-		register(arr, DexOpcodes.SPUT, Opcode.SPUT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SPUT_WIDE, Opcode.SPUT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SPUT_OBJECT, Opcode.SPUT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SPUT_BOOLEAN, Opcode.SPUT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SPUT_BYTE, Opcode.SPUT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SPUT_CHAR, Opcode.SPUT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
-		register(arr, DexOpcodes.SPUT_SHORT, Opcode.SPUT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SPUT, Opcode.SPUT_NARROW, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SPUT_WIDE, Opcode.SPUT_WIDE, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SPUT_OBJECT, Opcode.SPUT_OBJECT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SPUT_BOOLEAN, Opcode.SPUT_BOOLEAN, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SPUT_BYTE, Opcode.SPUT_BYTE, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SPUT_CHAR, Opcode.SPUT_CHAR, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
+		register(arr, DexOpcodes.SPUT_SHORT, Opcode.SPUT_SHORT, DexInsnFormat.FORMAT_21C, InsnIndexType.FIELD_REF);
 
 		register(arr, DexOpcodes.INVOKE_VIRTUAL, Opcode.INVOKE_VIRTUAL, DexInsnFormat.FORMAT_35C, InsnIndexType.METHOD_REF);
 		register(arr, DexOpcodes.INVOKE_SUPER, Opcode.INVOKE_SUPER, DexInsnFormat.FORMAT_35C, InsnIndexType.METHOD_REF);

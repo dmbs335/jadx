@@ -7,6 +7,7 @@ import jadx.api.plugins.input.data.ICodeReader;
 import jadx.api.plugins.input.data.IMethodProto;
 import jadx.api.plugins.input.data.IMethodRef;
 import jadx.api.plugins.input.insns.InsnData;
+import jadx.api.plugins.input.insns.Opcode;
 import jadx.api.plugins.input.insns.custom.IArrayPayload;
 import jadx.api.plugins.input.insns.custom.ICustomPayload;
 import jadx.api.plugins.input.insns.custom.ISwitchPayload;
@@ -100,9 +101,11 @@ public class InsnDecoder {
 			}
 
 			case MOVE:
-				return insn(InsnType.MOVE,
-						InsnArg.reg(insn, 0, ArgType.NARROW),
-						InsnArg.reg(insn, 1, ArgType.NARROW));
+			case MOVE_NARROW:
+				MoveNode narrowMove = new MoveNode(insn.getOpcode());
+				narrowMove.setResult(InsnArg.reg(insn, 0, ArgType.NARROW));
+				narrowMove.addArg(InsnArg.reg(insn, 1, ArgType.NARROW));
+				return narrowMove;
 
 			case MOVE_MULTI:
 				int len = insn.getRegsCount();
@@ -113,14 +116,16 @@ public class InsnDecoder {
 				return mmv;
 
 			case MOVE_WIDE:
-				return insn(InsnType.MOVE,
-						InsnArg.reg(insn, 0, ArgType.WIDE),
-						InsnArg.reg(insn, 1, ArgType.WIDE));
+				MoveNode wideMove = new MoveNode(insn.getOpcode());
+				wideMove.setResult(InsnArg.reg(insn, 0, ArgType.WIDE));
+				wideMove.addArg(InsnArg.reg(insn, 1, ArgType.WIDE));
+				return wideMove;
 
 			case MOVE_OBJECT:
-				return insn(InsnType.MOVE,
-						InsnArg.reg(insn, 0, ArgType.UNKNOWN_OBJECT),
-						InsnArg.reg(insn, 1, ArgType.UNKNOWN_OBJECT));
+				MoveNode objectMove = new MoveNode(insn.getOpcode());
+				objectMove.setResult(InsnArg.reg(insn, 0, ArgType.UNKNOWN_OBJECT));
+				objectMove.addArg(InsnArg.reg(insn, 1, ArgType.UNKNOWN_OBJECT));
+				return objectMove;
 
 			case ADD_INT:
 				return arith(insn, ArithOp.ADD, ArgType.INT);
@@ -385,27 +390,59 @@ public class InsnDecoder {
 				return checkCastInsn;
 
 			case IGET:
+			case IGET_NARROW:
+			case IGET_WIDE:
+			case IGET_OBJECT:
+			case IGET_BOOLEAN:
+			case IGET_BYTE:
+			case IGET_CHAR:
+			case IGET_SHORT:
 				FieldInfo igetFld = FieldInfo.fromRef(root, insn.getIndexAsField());
+				validateFieldOpcode(insn.getOpcode(), igetFld.getType());
 				InsnNode igetInsn = new IndexInsnNode(InsnType.IGET, igetFld, 1);
 				igetInsn.setResult(InsnArg.reg(insn, 0, tryResolveFieldType(igetFld)));
 				igetInsn.addArg(InsnArg.reg(insn, 1, igetFld.getDeclClass().getType()));
 				return igetInsn;
 
 			case IPUT:
+			case IPUT_NARROW:
+			case IPUT_WIDE:
+			case IPUT_OBJECT:
+			case IPUT_BOOLEAN:
+			case IPUT_BYTE:
+			case IPUT_CHAR:
+			case IPUT_SHORT:
 				FieldInfo iputFld = FieldInfo.fromRef(root, insn.getIndexAsField());
+				validateFieldOpcode(insn.getOpcode(), iputFld.getType());
 				InsnNode iputInsn = new FieldPutNode(InsnType.IPUT, iputFld, 2);
 				iputInsn.addArg(InsnArg.reg(insn, 0, tryResolveFieldType(iputFld)));
 				iputInsn.addArg(InsnArg.reg(insn, 1, iputFld.getDeclClass().getType()));
 				return iputInsn;
 
 			case SGET:
+			case SGET_NARROW:
+			case SGET_WIDE:
+			case SGET_OBJECT:
+			case SGET_BOOLEAN:
+			case SGET_BYTE:
+			case SGET_CHAR:
+			case SGET_SHORT:
 				FieldInfo sgetFld = FieldInfo.fromRef(root, insn.getIndexAsField());
+				validateFieldOpcode(insn.getOpcode(), sgetFld.getType());
 				InsnNode sgetInsn = new IndexInsnNode(InsnType.SGET, sgetFld, 0);
 				sgetInsn.setResult(InsnArg.reg(insn, 0, tryResolveFieldType(sgetFld)));
 				return sgetInsn;
 
 			case SPUT:
+			case SPUT_NARROW:
+			case SPUT_WIDE:
+			case SPUT_OBJECT:
+			case SPUT_BOOLEAN:
+			case SPUT_BYTE:
+			case SPUT_CHAR:
+			case SPUT_SHORT:
 				FieldInfo sputFld = FieldInfo.fromRef(root, insn.getIndexAsField());
+				validateFieldOpcode(insn.getOpcode(), sputFld.getType());
 				InsnNode sputInsn = new FieldPutNode(InsnType.SPUT, sputFld, 1);
 				sputInsn.addArg(InsnArg.reg(insn, 0, tryResolveFieldType(sputFld)));
 				return sputInsn;
@@ -552,6 +589,67 @@ public class InsnDecoder {
 		}
 		CodeFeaturesAttr.add(method, CodeFeature.NEW_ARRAY);
 		return newArr;
+	}
+
+	private static void validateFieldOpcode(Opcode opcode, ArgType fieldType) throws DecodeException {
+		if (!fieldType.isTypeKnown()) {
+			return;
+		}
+		boolean compatible;
+		switch (opcode) {
+			case IGET:
+			case IPUT:
+			case SGET:
+			case SPUT:
+				return; // Generic input plugins do not expose the DEX field opcode variant.
+			case IGET_NARROW:
+			case IPUT_NARROW:
+			case SGET_NARROW:
+			case SPUT_NARROW:
+				compatible = ArgType.INT.equals(fieldType) || ArgType.FLOAT.equals(fieldType);
+				break;
+			case IGET_WIDE:
+			case IPUT_WIDE:
+			case SGET_WIDE:
+			case SPUT_WIDE:
+				compatible = ArgType.LONG.equals(fieldType) || ArgType.DOUBLE.equals(fieldType);
+				break;
+			case IGET_OBJECT:
+			case IPUT_OBJECT:
+			case SGET_OBJECT:
+			case SPUT_OBJECT:
+				compatible = fieldType.isObject() || fieldType.isArray();
+				break;
+			case IGET_BOOLEAN:
+			case IPUT_BOOLEAN:
+			case SGET_BOOLEAN:
+			case SPUT_BOOLEAN:
+				compatible = ArgType.BOOLEAN.equals(fieldType);
+				break;
+			case IGET_BYTE:
+			case IPUT_BYTE:
+			case SGET_BYTE:
+			case SPUT_BYTE:
+				compatible = ArgType.BYTE.equals(fieldType);
+				break;
+			case IGET_CHAR:
+			case IPUT_CHAR:
+			case SGET_CHAR:
+			case SPUT_CHAR:
+				compatible = ArgType.CHAR.equals(fieldType);
+				break;
+			case IGET_SHORT:
+			case IPUT_SHORT:
+			case SGET_SHORT:
+			case SPUT_SHORT:
+				compatible = ArgType.SHORT.equals(fieldType);
+				break;
+			default:
+				throw new DecodeException("Unexpected field opcode: " + opcode);
+		}
+		if (!compatible) {
+			throw new DecodeException("Field opcode " + opcode + " does not match declared field type " + fieldType);
+		}
 	}
 
 	private ArgType tryResolveFieldType(FieldInfo igetFld) {

@@ -259,6 +259,11 @@ public class SSAVar implements Comparable<SSAVar> {
 		return codeVar;
 	}
 
+	@Nullable
+	public CodeVar getCodeVarOrNull() {
+		return codeVar;
+	}
+
 	public void setCodeVar(@NotNull CodeVar codeVar) {
 		this.codeVar = codeVar;
 		codeVar.addSsaVar(this);

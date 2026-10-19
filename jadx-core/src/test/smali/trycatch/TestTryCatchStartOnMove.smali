@@ -7,7 +7,7 @@
     .registers 5
 
     :try_start
-    move v3, p0
+    move-object v3, p0
     invoke-static {v3}, Ltrycatch/TestTryCatchStartOnMove;->call(Ljava/lang/String;)V
     :try_end
     .catch Ljava/lang/Exception; {:try_start .. :try_end} :catch

@@ -189,6 +189,45 @@ public class InsnUtils {
 		return null;
 	}
 
+	/**
+	 * Follow only a linear alias chain. A phi or ternary has path-dependent sources, so
+	 * finding one incompatible producer is not enough to reject a move opcode.
+	 */
+	public static @Nullable ArgType findUnambiguousDeclaredSourceType(InsnArg arg) {
+		Set<SSAVar> visited = new HashSet<>();
+		InsnArg current = arg;
+		while (true) {
+			InsnNode sourceInsn;
+			if (current instanceof RegisterArg) {
+				SSAVar sVar = ((RegisterArg) current).getSVar();
+				if (sVar == null || !visited.add(sVar)) {
+					return null;
+				}
+				sourceInsn = sVar.getAssignInsn();
+				if (sourceInsn == null) {
+					return sVar.getAssign().getInitType();
+				}
+			} else if (current.isInsnWrap()) {
+				sourceInsn = current.unwrap();
+			} else {
+				return null;
+			}
+			ArgType declaredType = getDeclaredResultType(sourceInsn);
+			if (declaredType == null && sourceInsn instanceof NewArrayNode) {
+				declaredType = ((NewArrayNode) sourceInsn).getArrayType();
+			} else if (declaredType == null && sourceInsn instanceof FilledNewArrayNode) {
+				declaredType = ((FilledNewArrayNode) sourceInsn).getArrayType();
+			}
+			if (declaredType != null) {
+				return declaredType;
+			}
+			if (sourceInsn.getType() != InsnType.MOVE || sourceInsn.getArgsCount() != 1) {
+				return null;
+			}
+			current = sourceInsn.getArg(0);
+		}
+	}
+
 	/** Keep a malformed comparison intact so code generation can report its opcode/type mismatch. */
 	public static boolean hasIncompatibleCmpSources(InsnNode insn) {
 		return insn instanceof CmpInsnNode && ((CmpInsnNode) insn).getInvalidSourceType() != null;

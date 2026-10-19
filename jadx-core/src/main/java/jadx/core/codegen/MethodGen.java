@@ -211,8 +211,8 @@ public class MethodGen {
 			}
 			SSAVar ssaVar = mthArg.getSVar();
 			CodeVar var;
-			if (ssaVar == null) {
-				// abstract or interface methods
+			if (ssaVar == null || classGen.isFallbackMode() && ssaVar.getCodeVarOrNull() == null) {
+				// Abstract methods and failed analysis may not have an SSA code variable.
 				var = CodeVar.fromMthArg(mthArg, classGen.isFallbackMode());
 			} else {
 				var = ssaVar.getCodeVar();
@@ -248,7 +248,7 @@ public class MethodGen {
 			}
 			code.add(' ');
 			String varName = nameGen.assignArg(var);
-			if (code.isMetadataSupported() && ssaVar != null /* for fallback mode */) {
+			if (code.isMetadataSupported() && ssaVar != null && ssaVar.getCodeVarOrNull() != null) {
 				code.attachDefinition(VarNode.get(mth, var));
 			}
 			code.add(varName);

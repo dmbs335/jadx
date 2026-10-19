@@ -3,6 +3,7 @@ package jadx.core.dex.visitors;
 import java.util.List;
 import java.util.function.Predicate;
 
+import jadx.api.plugins.input.insns.Opcode;
 import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArrayPutNode;
@@ -11,6 +12,7 @@ import jadx.core.dex.instructions.FieldPutNode;
 import jadx.core.dex.instructions.FilledNewArrayNode;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.InvokeNode;
+import jadx.core.dex.instructions.MoveNode;
 import jadx.core.dex.instructions.NumericCastNode;
 import jadx.core.dex.instructions.ReturnNode;
 import jadx.core.dex.instructions.SwitchInsn;
@@ -53,6 +55,8 @@ public class ValidateNumericOpcodeTypes extends AbstractVisitor {
 					validateInvoke((InvokeNode) insn);
 				} else if (insn instanceof ReturnNode) {
 					validateReturn(mth, (ReturnNode) insn);
+				} else if (insn instanceof MoveNode) {
+					validateMove(mth, (MoveNode) insn);
 				} else if (insn instanceof FilledNewArrayNode) {
 					validateFilledNewArray((FilledNewArrayNode) insn);
 				} else if (insn instanceof SwitchInsn) {
@@ -61,6 +65,17 @@ public class ValidateNumericOpcodeTypes extends AbstractVisitor {
 					validateIf((IfNode) insn);
 				}
 			}
+		}
+	}
+
+	private static void validateMove(MethodNode mth, MoveNode insn) {
+		if (insn.getMoveOpcode() == Opcode.MOVE) {
+			return; // Generic input carries no DEX move category to validate.
+		}
+		ArgType invalidType = InsnUtils.findUnambiguousDeclaredSourceType(insn.getArg(0));
+		if (invalidType != null && !insn.isOpcodeCompatible(invalidType)) {
+			mth.addError("Move opcode " + insn.getMoveOpcode() + " does not match source type " + invalidType
+					+ " at " + InsnUtils.formatOffset(insn.getOffset()), null);
 		}
 	}
 
