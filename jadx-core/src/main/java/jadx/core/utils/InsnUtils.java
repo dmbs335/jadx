@@ -20,9 +20,11 @@ import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.CmpInsnNode;
 import jadx.core.dex.instructions.ConstClassNode;
 import jadx.core.dex.instructions.ConstStringNode;
+import jadx.core.dex.instructions.FilledNewArrayNode;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeNode;
+import jadx.core.dex.instructions.NewArrayNode;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
@@ -96,13 +98,31 @@ public class InsnUtils {
 		if (insn instanceof InvokeNode) {
 			return ((InvokeNode) insn).getCallMth().getReturnType();
 		}
+		if (insn instanceof ConstStringNode) {
+			return ArgType.STRING;
+		}
+		if (insn instanceof ConstClassNode) {
+			return ArgType.CLASS;
+		}
+		if (insn instanceof IndexInsnNode && insn.getType() == InsnType.NEW_INSTANCE
+				&& ((IndexInsnNode) insn).getIndex() instanceof ArgType) {
+			return (ArgType) ((IndexInsnNode) insn).getIndex();
+		}
 		if (insn != null && insn.getType() == InsnType.CONST && insn.getResult() != null) {
 			return insn.getResult().getInitType();
 		}
-		if (insn != null && (insn.getType() == InsnType.ARITH || insn.getType() == InsnType.NEG)
+		if (insn != null && (insn.getType() == InsnType.ARITH || insn.getType() == InsnType.NEG
+				|| insn.getType() == InsnType.NOT)
 				&& insn.getResult() != null) {
 			ArgType resultType = insn.getResult().getInitType();
 			return resultType.isTypeKnown() ? resultType : null;
+		}
+		if (insn != null && (insn.getType() == InsnType.ARRAY_LENGTH
+				|| insn.getType() == InsnType.CMP_L || insn.getType() == InsnType.CMP_G)) {
+			return ArgType.INT;
+		}
+		if (insn != null && insn.getType() == InsnType.INSTANCE_OF) {
+			return ArgType.BOOLEAN;
 		}
 		if (insn instanceof IndexInsnNode
 				&& (insn.getType() == InsnType.IGET || insn.getType() == InsnType.SGET)
@@ -144,6 +164,18 @@ public class InsnUtils {
 				continue;
 			}
 			ArgType declaredType = getDeclaredResultType(sourceInsn);
+			if (declaredType == null && sourceInsn instanceof NewArrayNode) {
+				declaredType = ((NewArrayNode) sourceInsn).getArrayType();
+			} else if (declaredType == null && sourceInsn instanceof FilledNewArrayNode) {
+				declaredType = ((FilledNewArrayNode) sourceInsn).getArrayType();
+			}
+			if (declaredType == null && sourceInsn != null && sourceInsn.getResult() != null
+					&& sourceInsn.getType() != InsnType.MOVE
+					&& sourceInsn.getType() != InsnType.PHI
+					&& sourceInsn.getType() != InsnType.TERNARY) {
+				// The original result type is still informative even when a later use has narrowed SSA.
+				declaredType = sourceInsn.getResult().getInitType();
+			}
 			if (declaredType != null && matches.test(declaredType)) {
 				return declaredType;
 			}
@@ -160,6 +192,30 @@ public class InsnUtils {
 	/** Keep a malformed comparison intact so code generation can report its opcode/type mismatch. */
 	public static boolean hasIncompatibleCmpSources(InsnNode insn) {
 		return insn instanceof CmpInsnNode && ((CmpInsnNode) insn).getInvalidSourceType() != null;
+	}
+
+	public static @Nullable ArgType getArithOpcodeOperandType(ArithNode insn, int index) {
+		ArgType opcodeType = insn.getOpcodeType();
+		if (opcodeType == null) {
+			return null;
+		}
+		if (index == 1 && (insn.getOp() == ArithOp.SHL || insn.getOp() == ArithOp.SHR
+				|| insn.getOp() == ArithOp.USHR)) {
+			return ArgType.INT;
+		}
+		return opcodeType;
+	}
+
+	public static boolean isIncompatibleArithPrimitive(ArgType sourceType, ArgType expectedType) {
+		if (sourceType == null || !sourceType.isTypeKnown() || !sourceType.isPrimitive()) {
+			return false;
+		}
+		if (ArgType.INT.equals(expectedType)) {
+			return !ArgType.INT.equals(sourceType) && !ArgType.BYTE.equals(sourceType)
+					&& !ArgType.SHORT.equals(sourceType) && !ArgType.CHAR.equals(sourceType)
+					&& !ArgType.BOOLEAN.equals(sourceType);
+		}
+		return !expectedType.equals(sourceType);
 	}
 
 	public static ArgType getDeclaredArrayType(InsnArg arrayArg) {

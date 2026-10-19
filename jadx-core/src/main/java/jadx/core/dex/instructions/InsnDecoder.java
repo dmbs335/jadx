@@ -139,7 +139,7 @@ public class InsnDecoder {
 				return new ArithNode(ArithOp.SUB,
 						InsnArg.reg(insn, 0, ArgType.INT),
 						InsnArg.lit(insn, ArgType.INT),
-						InsnArg.reg(insn, 1, ArgType.INT));
+						InsnArg.reg(insn, 1, ArgType.INT), ArgType.INT);
 
 			case SUB_LONG:
 				return arith(insn, ArithOp.SUB, ArgType.LONG);

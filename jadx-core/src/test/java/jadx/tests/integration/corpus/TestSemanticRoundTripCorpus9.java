@@ -616,6 +616,73 @@ public class TestSemanticRoundTripCorpus9 extends IntegrationTest {
 		}
 	}
 
+	public static class VolatileReadBeforeCallFlow {
+		private volatile int state;
+
+		private int mutate() {
+			state = 7;
+			return 2;
+		}
+
+		private int plain() {
+			state = 1;
+			int result = state + mutate();
+			return result * 10 + state;
+		}
+
+		private int postfix() {
+			state = 1;
+			int result = state++ + mutate();
+			return result * 10 + state;
+		}
+
+		private int compound() {
+			state = 1;
+			state += mutate();
+			return state;
+		}
+
+		public void check() {
+			if (plain() != 37 || postfix() != 37 || compound() != 3) {
+				throw new AssertionError("volatile read/write must precede later call");
+			}
+		}
+	}
+
+	public static class ArrayReadBeforeCallFlow {
+		private int[] values;
+		private int trace;
+
+		private int mutate() {
+			trace++;
+			values[0] = 7;
+			return 2;
+		}
+
+		private int readBeforeMutation() {
+			values = new int[] { 1 };
+			trace = 0;
+			int result = values[0] + mutate();
+			return result * 100 + values[0] * 10 + trace;
+		}
+
+		private int nullReadBeforeCall() {
+			values = null;
+			trace = 0;
+			try {
+				return values[0] + mutate();
+			} catch (NullPointerException e) {
+				return trace;
+			}
+		}
+
+		public void check() {
+			if (readBeforeMutation() != 371 || nullReadBeforeCall() != 0) {
+				throw new AssertionError("array read or failure must precede later call");
+			}
+		}
+	}
+
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testBoundReferenceReceiverFlow() {
 		getClassNode(BoundReferenceReceiverFlow.class);
@@ -719,5 +786,15 @@ public class TestSemanticRoundTripCorpus9 extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.D8_J11, TestProfile.JAVA8, TestProfile.JAVA11 })
 	public void testStringConcatBeforeCallFlow() {
 		getClassNode(StringConcatBeforeCallFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testVolatileReadBeforeCallFlow() {
+		getClassNode(VolatileReadBeforeCallFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testArrayReadBeforeCallFlow() {
+		getClassNode(ArrayReadBeforeCallFlow.class);
 	}
 }

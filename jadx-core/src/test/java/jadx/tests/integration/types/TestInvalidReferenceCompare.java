@@ -12,7 +12,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestInvalidReferenceCompare extends SmaliTest {
 	@Override
 	protected void runChecks(List<ClassNode> classes) {
-		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(3);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(6);
 	}
 
 	@Test
@@ -25,6 +25,9 @@ public class TestInvalidReferenceCompare extends SmaliTest {
 						"Method not decompiled: types.TestInvalidReferenceCompare.relationalStrings(java.lang.String, java.lang.String):boolean")
 				.contains("Method not decompiled: types.TestInvalidReferenceCompare.relationalStringZero(java.lang.String):boolean")
 				.contains("Method not decompiled: types.TestInvalidReferenceCompare.referenceAndPrimitive(java.lang.String, int):boolean")
+				.contains("Method not decompiled: types.TestInvalidReferenceCompare.relationalNewArray(int):boolean")
+				.contains("Method not decompiled: types.TestInvalidReferenceCompare.relationalException(int):boolean")
+				.contains("Method not decompiled: types.TestInvalidReferenceCompare.equalsNewArrayAndInt(int):boolean")
 				.contains("return ((Object) str) == num;")
 				.contains("return ((Object) getString()) != getInteger();")
 				.contains("return ((Object) number) != thread;")

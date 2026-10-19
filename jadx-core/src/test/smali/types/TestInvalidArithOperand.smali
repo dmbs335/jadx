@@ -169,3 +169,52 @@
     and-int v0, p0, p1
     return v0
 .end method
+
+.method public static addFloatInt(FI)I
+    .locals 1
+
+    add-int v0, p0, p1
+    return v0
+.end method
+
+.method public static addLongInt(JI)I
+    .locals 1
+
+    add-int v0, p0, p2
+    return v0
+.end method
+
+.method public static addBooleanInt(ZI)I
+    .locals 1
+
+    add-int v0, p0, p1
+    return v0
+.end method
+
+.method public static addIntFloat(IF)F
+    .locals 1
+
+    add-float v0, p0, p1
+    return v0
+.end method
+
+.method public static addIntLong(IJ)J
+    .locals 2
+
+    add-long v0, p0, p1
+    return-wide v0
+.end method
+
+.method public static validLongShift(JI)J
+    .locals 2
+
+    shl-long v0, p0, p2
+    return-wide v0
+.end method
+
+.method public static addFloatTwoAddr(FI)I
+    .locals 0
+
+    add-int/2addr p0, p1
+    return p0
+.end method

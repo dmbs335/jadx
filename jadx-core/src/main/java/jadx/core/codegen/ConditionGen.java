@@ -20,6 +20,7 @@ import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.regions.conditions.Compare;
 import jadx.core.dex.regions.conditions.IfCondition;
 import jadx.core.dex.regions.conditions.IfCondition.Mode;
+import jadx.core.utils.InsnUtils;
 import jadx.core.utils.exceptions.CodegenException;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
@@ -189,9 +190,14 @@ public class ConditionGen extends InsnGen {
 		ArgType firstType = getExpressionArgType(firstArg);
 		ArgType secondType = getExpressionArgType(secondArg);
 		if (op != IfOp.EQ && op != IfOp.NE) {
-			if (isKnownReferenceType(firstType) || isKnownReferenceType(secondType)) {
+			ArgType firstSourceType = InsnUtils.findDeclaredSourceType(firstArg, ConditionGen::isKnownReferenceType);
+			ArgType secondSourceType = InsnUtils.findDeclaredSourceType(secondArg, ConditionGen::isKnownReferenceType);
+			if (isKnownReferenceType(firstType) || isKnownReferenceType(secondType)
+					|| firstSourceType != null || secondSourceType != null) {
 				throw new CodegenException(
-						"Invalid reference relational comparison: " + firstType + " " + op.getSymbol() + " " + secondType);
+						"Invalid reference relational comparison: "
+								+ (firstSourceType != null ? firstSourceType : firstType) + " " + op.getSymbol() + " "
+								+ (secondSourceType != null ? secondSourceType : secondType));
 			}
 			return false;
 		}
@@ -230,6 +236,10 @@ public class ConditionGen extends InsnGen {
 		InsnNode cmpInsn = firstArg.unwrap();
 		InsnType cmpType = cmpInsn.getType();
 		if (cmpType != InsnType.CMP_L && cmpType != InsnType.CMP_G) {
+			return false;
+		}
+		if (InsnUtils.hasIncompatibleCmpSources(cmpInsn)) {
+			// Keep malformed comparisons intact so InsnGen reports the opcode/source mismatch.
 			return false;
 		}
 		ArgType cmpArgType = cmpInsn.getArg(0).getType();

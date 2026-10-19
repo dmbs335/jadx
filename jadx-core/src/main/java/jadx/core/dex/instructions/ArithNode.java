@@ -19,9 +19,9 @@ public class ArithNode extends InsnNode {
 		ArgType argType = fixArgType(op, type);
 		switch (insn.getRegsCount()) {
 			case 2:
-				return new ArithNode(op, resArg, InsnArg.reg(insn, 0, argType), InsnArg.reg(insn, 1, argType));
+				return new ArithNode(op, resArg, InsnArg.reg(insn, 0, argType), InsnArg.reg(insn, 1, argType), type);
 			case 3:
-				return new ArithNode(op, resArg, InsnArg.reg(insn, 1, argType), InsnArg.reg(insn, 2, argType));
+				return new ArithNode(op, resArg, InsnArg.reg(insn, 1, argType), InsnArg.reg(insn, 2, argType), type);
 			default:
 				throw new JadxRuntimeException("Unexpected registers count in " + insn);
 		}
@@ -33,9 +33,9 @@ public class ArithNode extends InsnNode {
 		LiteralArg litArg = InsnArg.lit(insn, argType);
 		switch (insn.getRegsCount()) {
 			case 1:
-				return new ArithNode(op, resArg, InsnArg.reg(insn, 0, argType), litArg);
+				return new ArithNode(op, resArg, InsnArg.reg(insn, 0, argType), litArg, type);
 			case 2:
-				return new ArithNode(op, resArg, InsnArg.reg(insn, 1, argType), litArg);
+				return new ArithNode(op, resArg, InsnArg.reg(insn, 1, argType), litArg, type);
 			default:
 				throw new JadxRuntimeException("Unexpected registers count in " + insn);
 		}
@@ -56,10 +56,18 @@ public class ArithNode extends InsnNode {
 	}
 
 	private final ArithOp op;
+	private final @Nullable ArgType opcodeType;
+	private @Nullable ArgType invalidSourceType;
+	private @Nullable ArgType invalidExpectedType;
 
 	public ArithNode(ArithOp op, @Nullable RegisterArg res, InsnArg a, InsnArg b) {
+		this(op, res, a, b, null);
+	}
+
+	public ArithNode(ArithOp op, @Nullable RegisterArg res, InsnArg a, InsnArg b, @Nullable ArgType opcodeType) {
 		super(InsnType.ARITH, 2);
 		this.op = op;
+		this.opcodeType = opcodeType;
 		setResult(res);
 		addArg(a);
 		addArg(b);
@@ -79,6 +87,23 @@ public class ArithNode extends InsnNode {
 
 	public ArithOp getOp() {
 		return op;
+	}
+
+	public @Nullable ArgType getOpcodeType() {
+		return opcodeType;
+	}
+
+	public @Nullable ArgType getInvalidSourceType() {
+		return invalidSourceType;
+	}
+
+	public @Nullable ArgType getInvalidExpectedType() {
+		return invalidExpectedType;
+	}
+
+	public void setInvalidSourceType(ArgType sourceType, ArgType expectedType) {
+		this.invalidSourceType = sourceType;
+		this.invalidExpectedType = expectedType;
 	}
 
 	@Override
@@ -111,7 +136,9 @@ public class ArithNode extends InsnNode {
 
 	@Override
 	public InsnNode copy() {
-		ArithNode copy = new ArithNode(op, null, getArg(0).duplicate(), getArg(1).duplicate());
+		ArithNode copy = new ArithNode(op, null, getArg(0).duplicate(), getArg(1).duplicate(), opcodeType);
+		copy.invalidSourceType = invalidSourceType;
+		copy.invalidExpectedType = invalidExpectedType;
 		return copyCommonParams(copy);
 	}
 

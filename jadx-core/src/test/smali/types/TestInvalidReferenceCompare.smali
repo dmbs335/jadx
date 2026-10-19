@@ -108,3 +108,44 @@
     const/4 v0, 0x1
     return v0
 .end method
+
+.method public static relationalNewArray(I)Z
+    .locals 2
+    const/4 v0, 0x1
+    new-array v0, v0, [I
+    if-lt v0, p0, :less
+    const/4 v1, 0x0
+    return v1
+    :less
+    const/4 v1, 0x1
+    return v1
+.end method
+
+.method public static relationalException(I)Z
+    .locals 2
+    const/4 v0, 0x0
+    :try_start
+    throw v0
+    :try_end
+    .catchall {:try_start .. :try_end} :handler
+    :handler
+    move-exception v0
+    if-lt v0, p0, :less
+    const/4 v1, 0x0
+    return v1
+    :less
+    const/4 v1, 0x1
+    return v1
+.end method
+
+.method public static equalsNewArrayAndInt(I)Z
+    .locals 2
+    const/4 v0, 0x1
+    new-array v0, v0, [I
+    if-eq v0, p0, :equal
+    const/4 v1, 0x0
+    return v1
+    :equal
+    const/4 v1, 0x1
+    return v1
+.end method

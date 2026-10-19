@@ -2199,6 +2199,7 @@ public class InsnGen {
 						? ArgType.STRING.equals(getExpressionArgType(insn.getArg(0)))
 						: insn.getResult() != null && ArgType.STRING.equals(insn.getResult().getInitType()));
 		if (!stringConcat) {
+			checkArithOpcodeOperand(insn);
 			checkArithOperand(insn.getArg(0), insn.getOp());
 			checkArithOperand(insn.getArg(1), insn.getOp());
 		}
@@ -2284,6 +2285,17 @@ public class InsnGen {
 			}
 		}
 		throw new CodegenException("Invalid " + op + " operand type: " + type);
+	}
+
+	private void checkArithOpcodeOperand(ArithNode insn) throws CodegenException {
+		if (isFallback()) {
+			return;
+		}
+		ArgType invalidSourceType = insn.getInvalidSourceType();
+		if (invalidSourceType != null) {
+			throw new CodegenException("ARITH operand type " + invalidSourceType
+					+ " does not match opcode type " + insn.getInvalidExpectedType());
+		}
 	}
 
 	static ArgType getExpressionArgType(InsnArg arg) {

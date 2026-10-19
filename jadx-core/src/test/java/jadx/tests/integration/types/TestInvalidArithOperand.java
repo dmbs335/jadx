@@ -12,7 +12,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestInvalidArithOperand extends SmaliTest {
 	@Override
 	protected void runChecks(List<ClassNode> classes) {
-		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(13);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(18);
 	}
 
 	@Test
@@ -32,11 +32,19 @@ public class TestInvalidArithOperand extends SmaliTest {
 				.contains("Method not decompiled: types.TestInvalidArithOperand.addInvokeInteger(int):int")
 				.contains("Method not decompiled: types.TestInvalidArithOperand.addBoxedParam(java.lang.Integer, int):int")
 				.contains("Method not decompiled: types.TestInvalidArithOperand.addMovedBoxedParam(java.lang.Integer, int):int")
+				.contains("Method not decompiled: types.TestInvalidArithOperand.addFloatInt(float, int):int")
+				.contains("Method not decompiled: types.TestInvalidArithOperand.addFloatTwoAddr(float, int):int")
+				.contains("Method not decompiled: types.TestInvalidArithOperand.addLongInt(long, int):int")
+				.contains("Method not decompiled: types.TestInvalidArithOperand.addIntFloat(int, float):float")
+				.contains("Method not decompiled: types.TestInvalidArithOperand.addIntLong(int, long):long")
 				.contains("? 1 : 0) &")
+				.contains("? 1 : 0) +")
 				.contains("return num.intValue() + i;")
 				.contains("return getInteger().intValue() + i;")
 				.contains("return iArr[i] + i2;")
 				.contains("Invalid SUB operand type: java.lang.Object")
-				.contains("return i + i2;");
+				.contains("return i + i2;")
+				.contains("return j << i;")
+				.doesNotContain("Method not decompiled: types.TestInvalidArithOperand.validLongShift");
 	}
 }
