@@ -115,8 +115,10 @@ public class TypeGen {
 			case OBJECT:
 			case ARRAY:
 				if (lit != 0) {
-					LOG.warn("Wrong object literal: {} for type: {}", lit, type);
-					return Long.toString(lit);
+					if (fallback) {
+						return Long.toString(lit);
+					}
+					throw new JadxRuntimeException("Non-null numeric literal used as reference type: " + type);
 				}
 				return "null";
 

@@ -39,10 +39,12 @@ import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
+import jadx.core.dex.regions.TryCatchRegion;
 import jadx.core.dex.trycatch.CatchAttr;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.visitors.DepthTraversal;
 import jadx.core.dex.visitors.IDexTreeVisitor;
+import jadx.core.dex.visitors.regions.DepthRegionTraversal;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.CodegenException;
 import jadx.core.utils.exceptions.JadxOverflowException;
@@ -300,8 +302,32 @@ public class MethodGen {
 
 	public void addRegionInsns(ICodeWriter code) throws CodegenException {
 		try {
-			RegionGen regionGen = new RegionGen(this);
-			regionGen.makeRegion(code, mth.getRegion());
+			// Catch-all handlers are emitted last. If there is more than one in the same
+			// region, rendering would silently discard all but the last one. Check before
+			// writing any source so the error path contains only the fallback stub.
+			if (!mth.isNoExceptionHandlers()) {
+				TryCatchRegion ambiguous = DepthRegionTraversal.traversePartial(mth, (method, container) -> {
+					if (container instanceof TryCatchRegion) {
+						TryCatchRegion tryCatch = (TryCatchRegion) container;
+						return tryCatch.hasMultipleCatchAllHandlers() ? tryCatch : null;
+					}
+					return null;
+				});
+				if (ambiguous != null) {
+					throw new CodegenException("Multiple catch-all handlers in one try/catch region");
+				}
+			}
+			// Build each region body atomically. A late codegen error must not leave the
+			// already-rendered prefix in the published method next to the error stub.
+			JadxArgs args = mth.root().getArgs();
+			ICodeWriter tmpCode = args.getCodeWriterProvider().apply(args);
+			tmpCode.setIndent(code.getIndent());
+			new RegionGen(this).makeRegion(tmpCode, mth.getRegion());
+			if (mth.contains(AType.UNSAFE_REGION_DUPLICATION)
+					&& hasUnreachableStatementAfterAbrupt(tmpCode.getCodeStr())) {
+				throw new CodegenException("Unreachable code after abrupt statement in duplicated region");
+			}
+			code.add(tmpCode);
 		} catch (StackOverflowError | BootstrapMethodError e) {
 			mth.addError("Method code generation error", new JadxOverflowException("StackOverflow"));
 			CodeGenUtils.addErrors(code, mth);
@@ -314,6 +340,51 @@ public class MethodGen {
 			CodeGenUtils.addErrors(code, mth);
 			dumpInstructions(code);
 		}
+	}
+
+	static boolean hasUnreachableStatementAfterAbrupt(String source) {
+		boolean inBlockComment = false;
+		boolean previousAbrupt = false;
+		int previousIndent = -1;
+		for (String line : source.split("\\R")) {
+			String text = line.trim();
+			if (inBlockComment) {
+				if (text.contains("*/")) {
+					inBlockComment = false;
+				}
+				continue;
+			}
+			if (text.startsWith("/*")) {
+				inBlockComment = !text.contains("*/");
+				continue;
+			}
+			if (text.isEmpty() || text.startsWith("//")) {
+				continue;
+			}
+			int commentStart = text.indexOf("//");
+			if (commentStart != -1) {
+				text = text.substring(0, commentStart).trim();
+			}
+			int indent = line.length() - line.stripLeading().length();
+			if (previousAbrupt && indent == previousIndent && !isStatementBoundary(text)) {
+				return true;
+			}
+			previousAbrupt = isAbruptStatement(text);
+			previousIndent = indent;
+		}
+		return false;
+	}
+
+	private static boolean isAbruptStatement(String text) {
+		return text.equals("return;") || text.startsWith("return ") && text.endsWith(";")
+				|| text.equals("throw;") || text.startsWith("throw ") && text.endsWith(";")
+				|| text.equals("continue;") || text.startsWith("continue ") && text.endsWith(";")
+				|| text.equals("break;") || text.startsWith("break ") && text.endsWith(";");
+	}
+
+	private static boolean isStatementBoundary(String text) {
+		return text.startsWith("}") || text.startsWith("case ") || text.startsWith("default:")
+				|| text.endsWith(":");
 	}
 
 	private void addSimpleMethodCode(ICodeWriter code) {
@@ -364,7 +435,7 @@ public class MethodGen {
 				}
 			}
 			if (helper.isNeedEndGoto(block)) {
-				code.startLine("goto ").add(getLabelName(block.getSuccessors().get(0)));
+				code.startLine("goto ").add(getLabelName(helper.getEndGotoTarget(block)));
 			}
 		}
 	}

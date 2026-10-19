@@ -1,5 +1,6 @@
 package jadx.core.dex.visitors.regions.maker;
 
+import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -63,8 +64,15 @@ public class SynchronizedRegionMaker {
 
 		BlockNode body = getNextBlock(block);
 		if (body == null) {
-			mth.addWarn("Unexpected end of synchronized block");
+			mth.addError("Unexpected end of synchronized block", null);
 			return null;
+		}
+		if (mth.getExitBlock() != null
+				&& hasPathToMethodExitWithoutMonitorExit(body, mth.getExitBlock(), exits)) {
+			// Java's synchronized statement releases the monitor on every exit. If the
+			// original CFG can leave the method without MONITOR_EXIT, emitting that
+			// statement silently changes the bytecode's monitor lifetime.
+			mth.addError("Synchronized block reaches method exit without monitor-exit", null);
 		}
 		BlockNode exit = null;
 		Set<BlockNode> equivalentExitAliases = new LinkedHashSet<>();
@@ -154,6 +162,31 @@ public class SynchronizedRegionMaker {
 		return continuation;
 	}
 
+	private static boolean hasPathToMethodExitWithoutMonitorExit(
+			BlockNode body, BlockNode methodExit, Set<BlockNode> monitorExits) {
+		Set<BlockNode> visited = new HashSet<>();
+		ArrayDeque<BlockNode> pending = new ArrayDeque<>();
+		pending.add(body);
+		while (!pending.isEmpty()) {
+			BlockNode block = pending.removeLast();
+			if (!visited.add(block) || monitorExits.contains(block)) {
+				continue;
+			}
+			if (block == methodExit) {
+				return true;
+			}
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null && lastInsn.getType() == InsnType.THROW) {
+				// A throw inside a protected synchronized body enters its exception
+				// handler, which can release the monitor before method exit. The CFG's
+				// synthetic direct edge to the exit is not a normal-return path.
+				continue;
+			}
+			pending.addAll(block.getCleanSuccessors());
+		}
+		return false;
+	}
+
 	private static void insertExplicitContinue(BlockNode block, LoopInfo loop) {
 		BlockNode current = block;
 		Set<BlockNode> visited = new HashSet<>();
@@ -212,10 +245,10 @@ public class SynchronizedRegionMaker {
 	}
 
 	/**
-	 * Select a cleanup continuation shared by several monitor exits while allowing other exits to
-	 * terminate directly. This shape appears after equivalent {@code finally} tails are merged:
-	 * early-return paths still return in the synchronized body, but the non-terminal paths converge
-	 * on one cleanup which must be emitted after the synchronized block.
+	 * Select the unique continuation after a monitor exit while allowing other exits to terminate
+	 * directly. This also covers equivalent {@code finally} tails merged by the compiler:
+	 * early-return paths stay in the synchronized body, but non-terminal work must be emitted
+	 * after the monitor has been released.
 	 */
 	private static @Nullable BlockNode selectSharedPostMonitorExit(
 			MethodNode mth, Set<BlockNode> exits, Set<BlockNode> equivalentExitAliases) {
@@ -239,7 +272,7 @@ public class SynchronizedRegionMaker {
 				equivalentExitAliases.add(next);
 			}
 		}
-		if (nonTerminalExitCount < 2) {
+		if (nonTerminalExitCount == 0) {
 			equivalentExitAliases.clear();
 			return null;
 		}
@@ -290,6 +323,12 @@ public class SynchronizedRegionMaker {
 		while (block != null && visited.size() < 8 && visited.add(block)) {
 			if (BlockUtils.containsExitInsn(block) || BlockUtils.isExitBlock(mth, block)) {
 				return true;
+			}
+			if (block != start && block.getInstructions().stream()
+					.anyMatch(insn -> insn.getType() != InsnType.MOVE && insn.getType() != InsnType.CONST)) {
+				// Reaching a return eventually is not enough: work after MONITOR_EXIT
+				// (for example an executor call) must stay outside synchronized.
+				return false;
 			}
 			List<BlockNode> successors = block.getCleanSuccessors();
 			if (successors.size() != 1) {

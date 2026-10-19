@@ -56,26 +56,27 @@ public class SimpleModeHelper {
 					if (!block.contains(AFlag.EXC_BOTTOM_SPLITTER)) {
 						startLabel.set(block.getId());
 					}
-					if (prev.getSuccessors().size() == 1 && !mth.isPreExitBlock(prev)) {
-						endGoto.set(prev.getId());
-					}
 				}
 			}
 			InsnNode lastInsn = BlockUtils.getLastInsn(block);
 			if (lastInsn instanceof TargetInsnNode) {
 				processTargetInsn(block, lastInsn, nextBlock);
+			} else if (!mth.isPreExitBlock(block) && block.getSuccessors().size() == 1) {
+				BlockNode successor = block.getSuccessors().get(0);
+				if (!Objects.equals(nextBlock, successor)) {
+					startLabel.set(successor.getId());
+					endGoto.set(block.getId());
+				}
 			}
 			if (block.contains(AType.EXC_HANDLER)) {
 				startLabel.set(block.getId());
-			}
-			if (nextBlock == null && !mth.isPreExitBlock(block)) {
-				endGoto.set(block.getId());
 			}
 			prev = block;
 		}
 		if (mth.isVoidReturn()) {
 			int last = blocksList.size() - 1;
-			if (blocksList.get(last).contains(AFlag.RETURN)) {
+			BlockNode trailingReturn = blocksList.get(last);
+			if (trailingReturn.contains(AFlag.RETURN) && !startLabel.get(trailingReturn.getId())) {
 				// remove trailing return
 				blocksList.remove(last);
 			}
@@ -126,6 +127,13 @@ public class SimpleModeHelper {
 			} else {
 				startLabel.set(thenBlock.getId());
 			}
+			// The DFS order does not always place the false branch immediately after the if.
+			// Emit it explicitly instead of letting execution fall through to an unrelated block.
+			BlockNode elseBlock = ifInsn.getElseBlock();
+			if (!Objects.equals(next, elseBlock)) {
+				startLabel.set(elseBlock.getId());
+				endGoto.set(block.getId());
+			}
 			ifInsn.normalize();
 		} else {
 			for (BlockNode successor : block.getSuccessors()) {
@@ -140,6 +148,14 @@ public class SimpleModeHelper {
 
 	public boolean isNeedEndGoto(BlockNode block) {
 		return endGoto.get(block.getId());
+	}
+
+	public BlockNode getEndGotoTarget(BlockNode block) {
+		InsnNode lastInsn = BlockUtils.getLastInsn(block);
+		if (lastInsn instanceof IfNode) {
+			return ((IfNode) lastInsn).getElseBlock();
+		}
+		return block.getSuccessors().get(0);
 	}
 
 	// DFS sort blocks to reduce goto count

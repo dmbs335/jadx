@@ -14,6 +14,8 @@ import jadx.api.plugins.input.insns.InsnData;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.LineAttrNode;
+import jadx.core.dex.instructions.ArithNode;
+import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
@@ -268,17 +270,30 @@ public class InsnNode extends LineAttrNode {
 			case CONST_CLASS:
 			case CAST:
 			case MOVE:
-			case ARITH:
 			case NEG:
 			case CMP_L:
 			case CMP_G:
-			case CHECK_CAST:
 			case INSTANCE_OF:
-			case FILL_ARRAY:
 			case FILLED_NEW_ARRAY:
-			case NEW_ARRAY:
-			case STR_CONCAT:
 				return true;
+
+			case ARITH:
+				ArithOp op = ((ArithNode) this).getOp();
+				// Integer division/remainder can throw, so moving them across a call
+				// changes both the exception and side-effect order.
+				return op != ArithOp.DIV && op != ArithOp.REM;
+
+			case CHECK_CAST:
+				// A failed reference cast throws ClassCastException. Moving it across
+				// an observable operation changes the exception and side-effect order.
+				return false;
+
+			case NEW_ARRAY:
+			case FILL_ARRAY:
+			case STR_CONCAT:
+				// A negative dimension, null array, or user-defined toString() can
+				// throw (and the latter can have side effects). Preserve evaluation order.
+				return false;
 
 			case SGET:
 			case IGET:

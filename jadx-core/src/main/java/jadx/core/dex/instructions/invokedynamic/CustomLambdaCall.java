@@ -1,5 +1,6 @@
 package jadx.core.dex.instructions.invokedynamic;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import org.jetbrains.annotations.NotNull;
@@ -23,10 +24,12 @@ import jadx.core.dex.instructions.args.NamedArg;
 import jadx.core.dex.instructions.mods.ConstructorInsn;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
-import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public class CustomLambdaCall {
+	private static final int FLAG_SERIALIZABLE = 1;
+	private static final int FLAG_MARKERS = 2;
+	private static final int FLAG_BRIDGES = 4;
 
 	/**
 	 * Expect LambdaMetafactory.metafactory method
@@ -57,11 +60,76 @@ public class CustomLambdaCall {
 			throw new JadxRuntimeException("Not yet supported");
 		}
 		InvokeCustomNode resNode = buildMethodCall(mth, insn, isRange, values, callMthHandle);
+		resNode.setLambdaInterfaces(readLambdaInterfaces(values, resNode.getCallMth().getReturnType()));
+		if (resNode.getLambdaInterfaces().contains(ArgType.object("java.io.Serializable"))) {
+			hideGeneratedLambdaDeserializer(mth);
+		}
 		int resReg = insn.getResultReg();
 		if (resReg != -1) {
 			resNode.setResult(InsnArg.reg(resReg, mth.getReturnType()));
 		}
 		return resNode;
+	}
+
+	private static void hideGeneratedLambdaDeserializer(MethodNode mth) {
+		ArgType serializedLambda = ArgType.object("java.lang.invoke.SerializedLambda");
+		for (MethodNode method : mth.getParentClass().getMethods()) {
+			if (method.getName().equals("$deserializeLambda$")
+					&& method.getAccessFlags().isSynthetic()
+					&& method.getAccessFlags().isStatic()
+					&& method.getReturnType().equals(ArgType.OBJECT)
+					&& method.getArgTypes().equals(List.of(serializedLambda))) {
+				method.add(AFlag.DONT_GENERATE);
+			}
+		}
+	}
+
+	private static List<ArgType> readLambdaInterfaces(List<EncodedValue> values, ArgType primary) {
+		IMethodHandle bootstrap = (IMethodHandle) values.get(0).getValue();
+		if (!bootstrap.getMethodRef().getName().equals("altMetafactory")) {
+			return List.of();
+		}
+		if (values.size() <= 6 || values.get(6).getType() != EncodedType.ENCODED_INT) {
+			throw new JadxRuntimeException("Invalid altMetafactory flags");
+		}
+		int flags = (int) values.get(6).getValue();
+		if ((flags & ~(FLAG_SERIALIZABLE | FLAG_MARKERS | FLAG_BRIDGES)) != 0) {
+			throw new JadxRuntimeException("Unsupported altMetafactory flags: " + flags);
+		}
+		if ((flags & (FLAG_SERIALIZABLE | FLAG_MARKERS)) == 0) {
+			return List.of();
+		}
+		List<ArgType> interfaces = new ArrayList<>();
+		interfaces.add(primary);
+		if ((flags & FLAG_MARKERS) != 0) {
+			if (values.size() <= 7 || values.get(7).getType() != EncodedType.ENCODED_INT) {
+				throw new JadxRuntimeException("Invalid altMetafactory marker count");
+			}
+			int count = (int) values.get(7).getValue();
+			if (count < 0 || count > values.size() - 8) {
+				throw new JadxRuntimeException("Invalid altMetafactory marker count: " + count);
+			}
+			for (int i = 0; i < count; i++) {
+				EncodedValue marker = values.get(8 + i);
+				if (marker.getType() != EncodedType.ENCODED_TYPE || !(marker.getValue() instanceof String)) {
+					throw new JadxRuntimeException("Invalid altMetafactory marker type");
+				}
+				ArgType type = ArgType.parse((String) marker.getValue());
+				if (!type.isObject()) {
+					throw new JadxRuntimeException("Invalid altMetafactory marker: " + type);
+				}
+				if (!interfaces.contains(type)) {
+					interfaces.add(type);
+				}
+			}
+		}
+		if ((flags & FLAG_SERIALIZABLE) != 0) {
+			ArgType serializable = ArgType.object("java.io.Serializable");
+			if (!interfaces.contains(serializable)) {
+				interfaces.add(serializable);
+			}
+		}
+		return interfaces.size() > 1 ? interfaces : List.of();
 	}
 
 	@NotNull
@@ -80,6 +148,8 @@ public class CustomLambdaCall {
 		IMethodProto implProto = (IMethodProto) values.get(3).getValue();
 		MethodInfo implMthInfo = MethodInfo.fromMethodProto(root, implCls, implName, implProto);
 		invokeCustomNode.setImplMthInfo(implMthInfo);
+		IMethodProto instantiatedProto = (IMethodProto) values.get(5).getValue();
+		invokeCustomNode.setInstantiatedMthInfo(MethodInfo.fromMethodProto(root, implCls, implName, instantiatedProto));
 
 		MethodInfo callMthInfo = MethodInfo.fromRef(root, callMthHandle.getMethodRef());
 		InvokeNode invokeNode = buildInvokeNode(methodHandleType, invokeCustomNode, callMthInfo);
@@ -102,8 +172,7 @@ public class CustomLambdaCall {
 			}
 		}
 		if (!invokeCustomNode.isInlineInsn()) {
-			IMethodProto effectiveMthProto = (IMethodProto) values.get(5).getValue();
-			List<ArgType> args = Utils.collectionMap(effectiveMthProto.getArgTypes(), ArgType::parse);
+			List<ArgType> args = invokeCustomNode.getInstantiatedMthInfo().getArgumentsTypes();
 			boolean sameArgs = args.equals(callMthInfo.getArgumentsTypes());
 			invokeCustomNode.setUseRef(sameArgs);
 		}

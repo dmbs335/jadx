@@ -28,6 +28,7 @@ import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IBlock;
+import jadx.core.dex.nodes.IBranchRegion;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
 import jadx.core.dex.nodes.InsnContainer;
@@ -37,6 +38,7 @@ import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.SwitchRegion;
 import jadx.core.dex.regions.SwitchRegion.CaseInfo;
 import jadx.core.dex.regions.TryCatchRegion;
+import jadx.core.dex.regions.conditions.IfRegion;
 import jadx.core.dex.regions.loops.LoopRegion;
 import jadx.core.dex.trycatch.CatchAttr;
 import jadx.core.dex.trycatch.ExceptionHandler;
@@ -313,13 +315,19 @@ public final class SwitchRegionMaker {
 		for (Map.Entry<BlockNode, List<Object>> entry : blocksMap.entrySet()) {
 			List<Object> keysList = entry.getValue();
 			BlockNode caseBlock = entry.getKey();
+			BlockNode next = fallThroughCases.get(caseBlock);
+			BlockNode regionStart = resolveTerminalCaseEntry(caseBlock, out, next);
 			Region caseRegion;
-			if (stack.containsExit(caseBlock)) {
+			if (regionStart != caseBlock) {
+				// The target is an exclusively owned terminal block. It can also be registered as
+				// an exit of an enclosing loop, in which case makeRegion would deliberately omit it.
+				caseRegion = new Region(stack.peekRegion());
+				caseRegion.add(regionStart);
+			} else if (stack.containsExit(caseBlock)) {
 				caseRegion = new Region(stack.peekRegion());
 			} else {
-				BlockNode next = fallThroughCases.get(caseBlock);
 				stack.addExit(next);
-				caseRegion = regionMaker.makeRegion(caseBlock);
+				caseRegion = regionMaker.makeRegion(regionStart);
 				stack.removeExit(next);
 				if (next != null) {
 					next.add(AFlag.FALL_THROUGH);
@@ -328,6 +336,46 @@ public final class SwitchRegionMaker {
 			}
 			sw.addCase(keysList, caseRegion);
 		}
+	}
+
+	/**
+	 * DEX producers can place an empty synthetic bridge between a switch target and an exclusively
+	 * owned return/throw block. Starting region construction at the bridge can stop immediately at
+	 * the switch exit and later turn the case into {@code break}, leaving the terminal instruction
+	 * outside every region. Skip only a bounded, linear and single-owner bridge chain; fall-through,
+	 * loop and exception-boundary paths must retain their original entry.
+	 */
+	static BlockNode resolveTerminalCaseEntry(
+			BlockNode caseBlock, @Nullable BlockNode switchOut, @Nullable BlockNode fallThrough) {
+		if (fallThrough != null || caseBlock == switchOut) {
+			return caseBlock;
+		}
+		BlockNode current = caseBlock;
+		for (int depth = 0; depth < 8; depth++) {
+			if (!current.contains(AFlag.SYNTHETIC)
+					|| !current.getInstructions().isEmpty()
+					|| current.contains(AFlag.LOOP_START)
+					|| current.contains(AFlag.LOOP_END)
+					|| current.contains(AFlag.EXC_TOP_SPLITTER)
+					|| current.contains(AFlag.EXC_BOTTOM_SPLITTER)
+					|| current.contains(AFlag.TRY_ENTER)
+					|| current.contains(AFlag.TRY_LEAVE)) {
+				return caseBlock;
+			}
+			List<BlockNode> successors = current.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return caseBlock;
+			}
+			BlockNode successor = successors.get(0);
+			if (successor == switchOut || successor.getPredecessors().size() != 1) {
+				return caseBlock;
+			}
+			if (BlockUtils.containsExitInsn(successor)) {
+				return successor;
+			}
+			current = successor;
+		}
+		return caseBlock;
 	}
 
 	/**
@@ -660,6 +708,16 @@ public final class SwitchRegionMaker {
 		return false;
 	}
 
+	private boolean allCasesFlowThroughLoopEnd(BlockNode switchBlock, BlockNode switchOut, BlockNode loopEnd) {
+		for (BlockNode caseBlock : switchBlock.getCleanSuccessors()) {
+			if (!hasPathToAnyAvoiding(caseBlock, Set.of(loopEnd), switchOut)
+					|| hasPathToAnyAvoiding(caseBlock, Set.of(switchOut), loopEnd)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	private boolean hasPathToAnyAvoiding(BlockNode start, Set<BlockNode> ends, BlockNode avoid) {
 		if (start == avoid) {
 			return false;
@@ -929,7 +987,12 @@ public final class SwitchRegionMaker {
 					List<BlockNode> outList = BlockUtils.bitSetToBlocks(mth, outs);
 					outList.remove(loopEnd);
 					BlockNode possibleOut = Utils.getOne(outList);
-					boolean canInsertContinue = canInsertContinueInSwitch(block, loop);
+					// When every normal case reaches an executable loop update before the other exit,
+					// a synthetic continue would bypass that update and leave unreachable code in the case.
+					boolean canInsertContinue = canInsertContinueInSwitch(block, loop)
+							&& (possibleOut == null
+									|| !hasAnyExecutableLoopTail(loopEnd)
+									|| !allCasesFlowThroughLoopEnd(block, possibleOut, loopEnd));
 					if (possibleOut != null && canInsertContinue && insertContinueInSwitch(block, possibleOut, loop)) {
 						outs.clear(loopEnd.getId());
 						out = possibleOut;
@@ -1225,6 +1288,30 @@ public final class SwitchRegionMaker {
 		DepthRegionTraversal.traverse(mth, caseContainer, new AbstractRegionVisitor() {
 			@Override
 			public void leaveRegion(MethodNode mth, IRegion region) {
+				if (region instanceof IfRegion && region.getParent() == caseContainer) {
+					insertMissingGuardBreak((IfRegion) region, caseBlocks, switchRegion);
+				}
+				if (region instanceof TryCatchRegion) {
+					for (IContainer catchRegion : ((TryCatchRegion) region).getCatchRegions().values()) {
+						if (catchRegion instanceof Region
+								&& !RegionUtils.hasExitBlock(catchRegion)
+								&& ((ProcessTryCatchRegions.hasSharedCatchExit(caseContainer,
+										((TryCatchRegion) region).getTryCatchBlock())
+										|| ProcessTryCatchRegions.hasTerminalCatchJoin(caseContainer,
+												((TryCatchRegion) region).getTryCatchBlock()))
+										|| (mth.getLoopsCount() == 0
+												&& hasCatchContinuationAtSwitchOut(catchRegion, switchRegion)))) {
+							((Region) catchRegion).getSubBlocks().add(buildBreakContainer(switchRegion));
+						} else if (catchRegion instanceof Region && mth.getLoopsCount() == 0) {
+							appendCatchTerminalReturn((TryCatchRegion) region, (Region) catchRegion);
+						}
+					}
+				}
+			}
+		});
+		DepthRegionTraversal.traverse(mth, caseContainer, new AbstractRegionVisitor() {
+			@Override
+			public void leaveRegion(MethodNode mth, IRegion region) {
 				boolean insertBreak = false;
 				if (region == caseContainer) {
 					// top region
@@ -1233,8 +1320,11 @@ public final class SwitchRegionMaker {
 					IContainer lastContainer = ListUtils.last(region.getSubBlocks());
 					if (lastContainer instanceof BlockNode) {
 						BlockNode lastBlock = (BlockNode) lastContainer;
-						for (BlockNode successor : lastBlock.getSuccessors()) {
-							if (!caseBlocks.contains(successor)) {
+						// A catch edge is not a switch-case fall-through. Its splitter can be
+						// outside the case even when the normal successor stays in the case.
+						for (BlockNode successor : lastBlock.getCleanSuccessors()) {
+							if (!caseBlocks.contains(successor)
+									&& !isCaseLoopBackEdge(region, caseContainer, successor)) {
 								insertBreak = true;
 								break;
 							}
@@ -1246,7 +1336,10 @@ public final class SwitchRegionMaker {
 				}
 				if (insertBreak
 						&& region instanceof Region
-						&& canAppendBreak(region)) {
+						&& canAppendBreak(region, switchRegion)) {
+					if (reachesSharedCatchRethrow(region, caseContainer)) {
+						return;
+					}
 					LoopInfo loopBack = resourceCleanupSwitch || structuredLoopBack
 							? findOwnedLoopBack(mth, region, structuredLoopBack)
 							: null;
@@ -1261,6 +1354,165 @@ public final class SwitchRegionMaker {
 				}
 			}
 		});
+	}
+
+	/**
+	 * A catch with a path to the shared post-switch continuation must not fall through
+	 * into the protected case's normal-success continuation. Other catch exits are not
+	 * switch breaks, so require the single CFG boundary to match the next emitted block.
+	 */
+	private static boolean hasCatchContinuationAtSwitchOut(
+			IContainer catchRegion, SwitchRegion switchRegion) {
+		if (catchRegion.contains(AFlag.FALL_THROUGH)
+				|| hasExitEdgeLeavingSwitch(catchRegion, switchRegion)) {
+			return false;
+		}
+		BlockNode switchOut = findNextBlockAfterRegion(switchRegion);
+		if (switchOut == null) {
+			return false;
+		}
+		Set<BlockNode> exits = ProcessTryCatchRegions.getCatchBoundaryTargets(catchRegion);
+		return exits.size() == 1
+				&& BlockUtils.followEmptyPath(exits.iterator().next()) == BlockUtils.followEmptyPath(switchOut);
+	}
+
+	private static void appendCatchTerminalReturn(TryCatchRegion tryCatchRegion, Region catchRegion) {
+		if (RegionUtils.hasExitBlock(catchRegion)) {
+			return;
+		}
+		Set<BlockNode> exits = ProcessTryCatchRegions.getCatchBoundaryTargets(catchRegion);
+		if (exits.size() != 1) {
+			return;
+		}
+		BlockNode terminalReturn = ExcHandlersRegionMaker.findTerminalReturnTail(exits.iterator().next());
+		if (terminalReturn == null || terminalReturn.contains(AType.PHI_LIST)) {
+			return;
+		}
+		BlockNode pathBlock = exits.iterator().next();
+		while (pathBlock != terminalReturn) {
+			if (pathBlock.contains(AType.PHI_LIST)) {
+				// A return through a value-merge needs case-local SSA reconstruction.
+				return;
+			}
+			pathBlock = pathBlock.getCleanSuccessors().get(0);
+		}
+		BlockNode normalContinuation = findNextBlockAfterRegion(tryCatchRegion);
+		if (normalContinuation == null
+				|| BlockUtils.followEmptyPath(normalContinuation) == terminalReturn) {
+			return;
+		}
+		InsnNode returnInsn = BlockUtils.getLastInsn(terminalReturn);
+		// The original return instruction keeps its SSA argument ownership. The catch
+		// reaches it through empty blocks, so no intermediate side effect is skipped.
+		catchRegion.getSubBlocks().add(new InsnContainer(returnInsn));
+	}
+
+	private static @Nullable BlockNode findNextBlockAfterRegion(IRegion region) {
+		IRegion child = region;
+		while (child.getParent() != null) {
+			IRegion parent = child.getParent();
+			List<IContainer> siblings = parent.getSubBlocks();
+			for (int i = siblings.indexOf(child) + 1; i > 0 && i < siblings.size(); i++) {
+				BlockNode first = RegionUtils.getFirstBlockNode(siblings.get(i));
+				if (first != null) {
+					return first;
+				}
+			}
+			child = parent;
+		}
+		return null;
+	}
+
+	private static boolean reachesSharedCatchRethrow(IRegion region, IContainer caseContainer) {
+		IBlock lastBlock = RegionUtils.getLastBlock(region);
+		if (!(lastBlock instanceof BlockNode)) {
+			return false;
+		}
+		BlockNode block = (BlockNode) lastBlock;
+		if (block.getCleanSuccessors().size() != 1
+				|| !isEmptyPathToThrow(block.getCleanSuccessors().get(0))) {
+			return false;
+		}
+		for (IRegion current = region; current != null && current != caseContainer; current = current.getParent()) {
+			IRegion parent = current.getParent();
+			if ((parent == null && current.contains(AType.EXC_HANDLER))
+					|| (parent instanceof TryCatchRegion
+							&& ((TryCatchRegion) parent).getCatchRegions().containsValue(current))) {
+				IContainer tail = ListUtils.last(current.getSubBlocks());
+				if (tail instanceof IBlock) {
+					InsnNode terminal = BlockUtils.getLastInsn((IBlock) tail);
+					return terminal != null && terminal.getType() == InsnType.THROW
+							&& tail.contains(AFlag.SYNTHETIC);
+				}
+				return false;
+			}
+		}
+		return false;
+	}
+
+	private static boolean isEmptyPathToThrow(BlockNode start) {
+		Set<BlockNode> visited = new HashSet<>();
+		BlockNode block = start;
+		while (visited.size() < 8 && visited.add(block)) {
+			List<InsnNode> insns = block.getInstructions().stream()
+					.filter(insn -> !insn.contains(AFlag.DONT_GENERATE)).toList();
+			if (!insns.isEmpty()) {
+				return insns.size() == 1 && insns.get(0).getType() == InsnType.THROW;
+			}
+			if (block.getCleanSuccessors().size() != 1) {
+				return false;
+			}
+			block = block.getCleanSuccessors().get(0);
+		}
+		return false;
+	}
+
+	private static void insertMissingGuardBreak(IfRegion ifRegion, BlockSet caseBlocks, SwitchRegion switchRegion) {
+		IContainer thenRegion = ifRegion.getThenRegion();
+		if (!(thenRegion instanceof Region) || !((Region) thenRegion).getSubBlocks().isEmpty()
+				|| ifRegion.getElseRegion() != null) {
+			return;
+		}
+		BlockNode conditionBlock = ListUtils.last(ifRegion.getConditionBlocks());
+		if (conditionBlock == null || conditionBlock.getSuccessors().size() != 2) {
+			return;
+		}
+		long outsideEdges = conditionBlock.getSuccessors().stream().filter(successor -> !caseBlocks.contains(successor)).count();
+		if (outsideEdges == 1) {
+			((Region) thenRegion).add(buildBreakContainer(switchRegion));
+		}
+	}
+
+	/**
+	 * A loop header (or its empty synthetic bridge) can be absent from the structured case
+	 * block set even though the back edge stays inside a loop owned by this case.
+	 * Such an edge must not become a switch break.
+	 */
+	private static boolean isCaseLoopBackEdge(IRegion region, IContainer caseContainer, BlockNode successor) {
+		IRegion current = region;
+		while (current != null && current != caseContainer) {
+			if (current instanceof LoopRegion
+					&& reachesLoopStartThroughEmptyBlocks(successor, ((LoopRegion) current).getInfo().getStart())) {
+				return true;
+			}
+			current = current.getParent();
+		}
+		return false;
+	}
+
+	private static boolean reachesLoopStartThroughEmptyBlocks(BlockNode block, BlockNode loopStart) {
+		Set<BlockNode> visited = new HashSet<>();
+		while (visited.size() < 8 && visited.add(block)) {
+			if (block == loopStart) {
+				return true;
+			}
+			if (block.getInstructions().stream().anyMatch(insn -> !insn.contains(AFlag.DONT_GENERATE))
+					|| block.getSuccessors().size() != 1) {
+				return false;
+			}
+			block = block.getSuccessors().get(0);
+		}
+		return false;
 	}
 
 	private static @Nullable LoopInfo findOwnedLoopBack(
@@ -1422,6 +1674,56 @@ public final class SwitchRegionMaker {
 		return !region.contains(AFlag.FALL_THROUGH)
 				&& !RegionUtils.hasExitBlock(region)
 				&& !RegionUtils.hasExitEdge(region);
+	}
+
+	private static boolean canAppendBreak(IRegion region, SwitchRegion targetSwitch) {
+		return !region.contains(AFlag.FALL_THROUGH)
+				&& !RegionUtils.hasExitBlock(region)
+				&& !hasExitEdgeLeavingSwitch(region, targetSwitch);
+	}
+
+	/**
+	 * A break in a nested switch exits only that switch. Counting it as an exit from the enclosing
+	 * case suppresses the enclosing switch's break and silently introduces case fall-through.
+	 */
+	private static boolean hasExitEdgeLeavingSwitch(IContainer container, SwitchRegion targetSwitch) {
+		if (container instanceof IBlock) {
+			InsnNode lastInsn = BlockUtils.getLastInsn((IBlock) container);
+			if (lastInsn != null && lastInsn.getType() == InsnType.BREAK) {
+				RegionRefAttr ref = lastInsn.get(AType.REGION_REF);
+				if (ref != null && isNestedSwitch(ref.getRegion(), targetSwitch)) {
+					return false;
+				}
+			}
+			return BlockUtils.containsExitInsn((IBlock) container);
+		}
+		if (container instanceof IBranchRegion) {
+			for (IContainer branch : ((IBranchRegion) container).getBranches()) {
+				if (branch == null || !hasExitEdgeLeavingSwitch(branch, targetSwitch)) {
+					return false;
+				}
+			}
+			return true;
+		}
+		if (container instanceof IRegion) {
+			IContainer last = ListUtils.last(((IRegion) container).getSubBlocks());
+			return last != null && hasExitEdgeLeavingSwitch(last, targetSwitch);
+		}
+		return false;
+	}
+
+	private static boolean isNestedSwitch(IRegion region, SwitchRegion targetSwitch) {
+		if (!(region instanceof SwitchRegion)) {
+			return false;
+		}
+		IRegion parent = region.getParent();
+		while (parent != null) {
+			if (parent == targetSwitch) {
+				return true;
+			}
+			parent = parent.getParent();
+		}
+		return false;
 	}
 
 	public static InsnContainer buildBreakContainer(SwitchRegion switchRegion) {

@@ -1,5 +1,6 @@
 package jadx.core.dex.visitors.regions.maker;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.HashSet;
@@ -10,6 +11,7 @@ import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.NamedArg;
@@ -24,9 +26,11 @@ import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.SwitchRegion;
+import jadx.core.dex.regions.loops.LoopRegion;
 import jadx.core.dex.trycatch.ExcHandlerAttr;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.trycatch.TryCatchBlockAttr;
+import jadx.core.dex.visitors.kotlin.CoroutineMethodUtils;
 import jadx.core.dex.visitors.regions.ProcessTryCatchRegions;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.RegionUtils;
@@ -52,6 +56,7 @@ public class ExcHandlersRegionMaker {
 
 	private @Nullable IRegion collectHandlerRegions() {
 		List<TryCatchBlockAttr> tcs = mth.getAll(AType.TRY_BLOCKS_LIST);
+		restoreSharedRetryTails(mth.getRegion());
 		for (TryCatchBlockAttr tc : tcs) {
 			List<BlockNode> blocks = new ArrayList<>(tc.getHandlersCount());
 			Set<BlockNode> splitters = new HashSet<>();
@@ -94,6 +99,141 @@ public class ExcHandlersRegionMaker {
 		return processHandlersOutBlocks(tcs);
 	}
 
+	private void restoreSharedRetryTails(IRegion region) {
+		for (IContainer child : new ArrayList<>(region.getSubBlocks())) {
+			if (child instanceof IRegion) {
+				restoreSharedRetryTails((IRegion) child);
+			}
+		}
+		if (!(region instanceof LoopRegion) || !((LoopRegion) region).isEndless()) {
+			return;
+		}
+		LoopInfo loop = ((LoopRegion) region).getInfo();
+		IContainer bodyContainer = ((LoopRegion) region).getBody();
+		if (!(bodyContainer instanceof Region)) {
+			return;
+		}
+		Region body = (Region) bodyContainer;
+		BlockNode end = loop.getEnd();
+		List<IContainer> children = body.getSubBlocks();
+		if (children.isEmpty() || children.get(children.size() - 1) != end) {
+			return;
+		}
+		BlockNode join = end;
+		Set<BlockNode> visited = new HashSet<>();
+		while (join.getPredecessors().size() == 1 && visited.add(join)) {
+			join = join.getPredecessors().get(0);
+		}
+		if (join == end || join.getPredecessors().size() < 2) {
+			return;
+		}
+		Set<BlockNode> handlerStarts = new HashSet<>();
+		for (BlockNode pred : join.getPredecessors()) {
+			BlockNode start = findMoveOnlyHandlerStart(pred, join);
+			if (start == null || !loop.getLoopBlocks().contains(start)) {
+				return;
+			}
+			handlerStarts.add(start);
+		}
+		if (handlerStarts.size() < 2) {
+			return;
+		}
+		if (BlockUtils.isPathExists(loop.getStart(), end) || BlockUtils.isPathExists(loop.getStart(), join)) {
+			return;
+		}
+		Set<IBlock> mainBlocks = new HashSet<>();
+		RegionUtils.getAllRegionBlocks(mth.getRegion(), mainBlocks);
+		if (!isSharedRetryTail(join, end, mth.getExitBlock(), mainBlocks)) {
+			return;
+		}
+		// The normal loop body terminates; only catch entry moves reach this common tail.
+		// Emit it once, outside the protected regions, before the already appended back edge.
+		RegionStack stack = regionMaker.getStack().clear();
+		stack.push(body);
+		stack.addExit(end);
+		stack.addExit(mth.getExitBlock());
+		Region sharedTail = regionMaker.makeRegion(join);
+		children.add(children.size() - 1, sharedTail);
+		stack.clear();
+	}
+
+	static boolean isSharedRetryTail(BlockNode start, BlockNode end, BlockNode methodExit, Set<IBlock> mainBlocks) {
+		Set<BlockNode> tail = new HashSet<>();
+		ArrayDeque<BlockNode> pending = new ArrayDeque<>();
+		pending.add(start);
+		boolean reachesEnd = false;
+		while (!pending.isEmpty()) {
+			BlockNode block = pending.removeFirst();
+			if (block == end) {
+				reachesEnd = true;
+				continue;
+			}
+			if (!tail.add(block)) {
+				continue;
+			}
+			if (block == methodExit || mainBlocks.contains(block)
+					|| block.contains(AType.EXC_CATCH) || block.contains(AType.EXC_HANDLER)
+					|| block.contains(AFlag.LOOP_START) || block.contains(AFlag.LOOP_END)
+					|| block.contains(AFlag.DONT_GENERATE) || block.contains(AFlag.REMOVE)) {
+				return false;
+			}
+			InsnNode last = BlockUtils.getLastInsn(block);
+			if (last != null && (last.getType() == InsnType.THROW || last.getType() == InsnType.RETURN)) {
+				if (last.contains(AFlag.DONT_GENERATE)) {
+					return false;
+				}
+				continue;
+			}
+			if (block.getCleanSuccessors().isEmpty()) {
+				return false;
+			}
+			pending.addAll(block.getCleanSuccessors());
+		}
+		if (!reachesEnd || !tail.containsAll(end.getPredecessors())) {
+			return false;
+		}
+		// No second entry or hidden cycle may be introduced into the emitted statement sequence.
+		for (BlockNode block : tail) {
+			if (block != start && !tail.containsAll(block.getPredecessors())) {
+				return false;
+			}
+		}
+		Set<BlockNode> emitted = new HashSet<>();
+		pending.add(start);
+		while (!pending.isEmpty()) {
+			BlockNode block = pending.removeFirst();
+			if (!emitted.add(block)) {
+				continue;
+			}
+			for (BlockNode next : block.getCleanSuccessors()) {
+				if (tail.contains(next) && next != start && emitted.containsAll(next.getPredecessors())) {
+					pending.add(next);
+				}
+			}
+		}
+		return emitted.size() == tail.size()
+				&& start.getPredecessors().stream().noneMatch(tail::contains);
+	}
+
+	static @Nullable BlockNode findMoveOnlyHandlerStart(BlockNode block, BlockNode next) {
+		Set<BlockNode> visited = new HashSet<>();
+		while (visited.add(block)) {
+			if (block.getCleanSuccessors().size() != 1 || block.getCleanSuccessors().get(0) != next
+					|| block.getInstructions().stream().anyMatch(insn -> insn.getType() != InsnType.MOVE)) {
+				return null;
+			}
+			if (block.contains(AType.EXC_HANDLER)) {
+				return block.get(AType.EXC_HANDLER).getHandler().isFinally() ? null : block;
+			}
+			if (block.getPredecessors().size() != 1) {
+				return null;
+			}
+			next = block;
+			block = block.getPredecessors().get(0);
+		}
+		return null;
+	}
+
 	/**
 	 * Search handlers successor blocks aren't included in any region.
 	 */
@@ -131,6 +271,13 @@ public class ExcHandlersRegionMaker {
 			regularSuccessorBlocks.removeAll(allRegionBlocks);
 			handlerOutBlocks.addAll(regularSuccessorBlocks);
 			for (IBlock successor : resourceSuccessorBlocks) {
+				if (successor instanceof BlockNode
+						&& mainRegionBlocks.contains(successor)
+						&& isSharedLoopTailJoin((BlockNode) successor, mainRegionBlocks)) {
+					// Both the normal try path and its handler reach this in-loop join.
+					// Detaching it to the method-level handler tail would move it past the loop return.
+					continue;
+				}
 				if (successor instanceof BlockNode) {
 					BlockNode successorBlock = (BlockNode) successor;
 					BlockNode terminalReturn = findTerminalReturnTail(successorBlock);
@@ -195,7 +342,29 @@ public class ExcHandlersRegionMaker {
 		return excOutRegion;
 	}
 
-	private static @Nullable BlockNode findTerminalReturnTail(BlockNode start) {
+	private boolean isSharedLoopTailJoin(BlockNode successor, Set<IBlock> mainRegionBlocks) {
+		LoopInfo loop = mth.getLoopForBlock(successor);
+		if (loop == null || successor.getPredecessors().size() < 2
+				|| successor.getPredecessors().stream().noneMatch(mainRegionBlocks::contains)
+				|| successor.getPredecessors().stream().allMatch(mainRegionBlocks::contains)) {
+			return false;
+		}
+		Set<BlockNode> visited = new HashSet<>();
+		BlockNode current = successor;
+		while (current != loop.getEnd() && visited.add(current)) {
+			if (current != successor && !current.getInstructions().isEmpty()) {
+				return false;
+			}
+			List<BlockNode> next = current.getCleanSuccessors();
+			if (next.size() != 1) {
+				return false;
+			}
+			current = next.get(0);
+		}
+		return current == loop.getEnd();
+	}
+
+	static @Nullable BlockNode findTerminalReturnTail(BlockNode start) {
 		Set<BlockNode> visited = new HashSet<>();
 		BlockNode block = start;
 		while (visited.add(block)) {
@@ -281,7 +450,11 @@ public class ExcHandlersRegionMaker {
 			dom = BlockUtils.getTopSplitterForHandler(start);
 		} else {
 			dom = start;
-			stack.addExits(exits);
+			for (BlockNode exit : exits) {
+				if (!isSharedConditionalCleanupRethrow(exit)) {
+					stack.addExit(exit);
+				}
+			}
 		}
 		if (dom.contains(AFlag.REMOVE)) {
 			return;
@@ -327,6 +500,11 @@ public class ExcHandlersRegionMaker {
 			if (inlineSwitchHandlerExits.contains(exit)) {
 				continue;
 			}
+			if (isSharedConditionalCleanupRethrow(exit)) {
+				// Every branch ends at the same throw. Stopping at this shared block
+				// would leave the later catch body without its cleanup and rethrow.
+				continue;
+			}
 			if ((!inLoop || BlockUtils.isPathExists(start, exit))
 					&& RegionUtils.isRegionContainsBlock(mth.getRegion(), exit)) {
 				stack.addExit(exit);
@@ -342,14 +520,24 @@ public class ExcHandlersRegionMaker {
 			hideSharedRethrow(sharedRethrowExit);
 		}
 		handler.setHandlerRegion(regionMaker.makeRegion(start));
+		appendSharedCoroutineRethrow(handler, handlerOutBlock);
+		if (appendSharedCleanupRethrow
+				&& containsSharedCleanupRethrow(handler.getHandlerRegion(), handlerOutBlock)) {
+			// Region construction already included this exact shared cleanup and throw.
+			// Appending it again emits an unreachable second cleanup and a stale rethrow.
+			appendSharedCleanupRethrow = false;
+		}
 		if (handlerOutBlock != null
 				&& handlerOutBlock.contains(AType.EXC_CATCH)
 				&& hasOnlyEmptyPath(start, handlerOutBlock)) {
 			appendSharedHandlerPrefix(handler, handlerOutBlock);
 		}
 		appendSharedTerminalReturn(handler);
-		for (InsnNode rethrowMove : rethrowMoves) {
-			rethrowMove.add(AFlag.DONT_GENERATE);
+		appendSharedSwitchContinuation(handler);
+		if (appendDirectRethrow || appendSharedCleanupRethrow && namedRethrowChain) {
+			for (InsnNode rethrowMove : rethrowMoves) {
+				rethrowMove.add(AFlag.DONT_GENERATE);
+			}
 		}
 		if (appendDirectRethrow) {
 			InsnNode rethrow = new InsnNode(InsnType.THROW, 1);
@@ -398,6 +586,75 @@ public class ExcHandlersRegionMaker {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * A suspend catch may return the suspension marker or reach a throw tail also used by its
+	 * resume state. The latter must be emitted in the catch without moving the shared tail away
+	 * from the resume case. Only a single forwarding move and a side-effect-free throw suffix
+	 * establish that throwing the caught value here is equivalent to following that edge.
+	 */
+	private void appendSharedCoroutineRethrow(ExceptionHandler handler, @Nullable BlockNode sharedTail) {
+		if (!CoroutineMethodUtils.isStateMachineBody(mth) || handler.isFinally()
+				|| handler.getArg() == null || sharedTail == null || handler.getHandlerRegion() == null
+				|| !isSharedTerminalRethrow(sharedTail)
+				|| RegionUtils.hasExitBlock(handler.getHandlerRegion())) {
+			return;
+		}
+		Set<IBlock> handlerBlocks = new HashSet<>();
+		RegionUtils.getAllRegionBlocks(handler.getHandlerRegion(), handlerBlocks);
+		BlockNode forwardingExit = null;
+		for (IBlock member : handlerBlocks) {
+			if (!(member instanceof BlockNode)) {
+				continue;
+			}
+			BlockNode block = (BlockNode) member;
+			InsnNode last = BlockUtils.getLastInsn(block);
+			if (last != null && (last.getType() == InsnType.RETURN || last.getType() == InsnType.THROW)) {
+				continue;
+			}
+			for (BlockNode successor : block.getCleanSuccessors()) {
+				if (handlerBlocks.contains(successor)) {
+					continue;
+				}
+				if (successor != sharedTail || forwardingExit != null || last == null
+						|| last.getType() != InsnType.MOVE || last.getArgsCount() != 1
+						|| !isSameForwardedArg(last.getArg(0), handler.getArg())) {
+					return;
+				}
+				forwardingExit = block;
+			}
+		}
+		if (forwardingExit == null) {
+			return;
+		}
+		RegisterArg forwardedResult = BlockUtils.getLastInsn(forwardingExit).getResult();
+		if (forwardedResult == null) {
+			return;
+		}
+		BlockNode tail = sharedTail;
+		Set<BlockNode> visited = new HashSet<>();
+		while (visited.size() < 8 && visited.add(tail)) {
+			List<InsnNode> insns = tail.getInstructions().stream()
+					.filter(insn -> !insn.contains(AFlag.DONT_GENERATE)).toList();
+			if (!insns.isEmpty()) {
+				if (insns.size() != 1 || insns.get(0).getType() != InsnType.THROW
+						|| insns.get(0).getArgsCount() != 1
+						|| !isSameForwardedArg(insns.get(0).getArg(0), forwardedResult)) {
+					return;
+				}
+				// Reuse the original terminal instruction. Its register stays attached to the
+				// SSA block tree, while the catch's forwarding move supplies its value.
+				InsnContainer rethrow = new InsnContainer(insns.get(0));
+				rethrow.add(AFlag.SYNTHETIC);
+				handler.getHandlerRegion().getSubBlocks().add(rethrow);
+				return;
+			}
+			if (tail.getCleanSuccessors().size() != 1) {
+				return;
+			}
+			tail = tail.getCleanSuccessors().get(0);
+		}
 	}
 
 	/**
@@ -460,6 +717,108 @@ public class ExcHandlersRegionMaker {
 		}
 	}
 
+	/**
+	 * A catch can continue through a linear tail which is also the body of a different
+	 * switch case. That case must keep its body, but omitting the catch edge silently
+	 * drops its side effects. Emit the same terminal sequence in the catch as well.
+	 * Keep this restricted to result-free calls and a literal return: duplicating
+	 * definitions or a branch would require remapping SSA and exception boundaries.
+	 */
+	private void appendSharedSwitchContinuation(ExceptionHandler handler) {
+		IRegion handlerRegion = handler.getHandlerRegion();
+		if (handler.isFinally() || handlerRegion == null) {
+			return;
+		}
+		Set<IBlock> handlerBlocks = new HashSet<>();
+		RegionUtils.getAllRegionBlocks(handlerRegion, handlerBlocks);
+		BlockNode boundary = null;
+		for (IBlock member : handlerBlocks) {
+			if (!(member instanceof BlockNode)) {
+				continue;
+			}
+			BlockNode block = (BlockNode) member;
+			InsnNode last = BlockUtils.getLastInsn(block);
+			if (last != null && (last.getType() == InsnType.RETURN || last.getType() == InsnType.THROW)) {
+				continue;
+			}
+			for (BlockNode successor : block.getCleanSuccessors()) {
+				if (handlerBlocks.contains(successor)) {
+					continue;
+				}
+				if (boundary != null && boundary != successor) {
+					return;
+				}
+				boundary = successor;
+			}
+		}
+		if (boundary == null || !isSiblingSwitchCaseContinuation(
+				mth.getRegion(), handler.getTryBlock().getBlocks(), boundary)) {
+			return;
+		}
+		List<IContainer> tail = new ArrayList<>();
+		Set<BlockNode> visited = new HashSet<>();
+		BlockNode block = boundary;
+		while (visited.size() < 8 && visited.add(block)) {
+			if (block.contains(AType.PHI_LIST) || block.contains(AFlag.LOOP_START)
+					|| block.contains(AFlag.LOOP_END) || block.contains(AFlag.REMOVE)) {
+				return;
+			}
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.contains(AFlag.DONT_GENERATE)) {
+					continue;
+				}
+				if (insn.getType() == InsnType.RETURN) {
+					if (insn.getArgsCount() != 1 || !insn.getArg(0).isLiteral()) {
+						return;
+					}
+					tail.add(new InsnContainer(insn));
+					handlerRegion.getSubBlocks().addAll(tail);
+					return;
+				}
+				if (insn.getType() != InsnType.INVOKE || insn.getResult() != null) {
+					return;
+				}
+			}
+			// Keep the original block (and its protected-range attributes) so a later
+			// try/catch pass can wrap this occurrence independently of the switch case.
+			tail.add(block);
+			if (block.getCleanSuccessors().size() != 1) {
+				return;
+			}
+			block = block.getCleanSuccessors().get(0);
+		}
+	}
+
+	private static boolean isSiblingSwitchCaseContinuation(
+			IRegion region, List<BlockNode> protectedBlocks, BlockNode continuation) {
+		if (region instanceof SwitchRegion) {
+			IContainer continuationCase = null;
+			for (SwitchRegion.CaseInfo caseInfo : ((SwitchRegion) region).getCases()) {
+				IContainer caseContainer = caseInfo.getContainer();
+				if (RegionUtils.isRegionContainsBlock(caseContainer, continuation)) {
+					continuationCase = caseContainer;
+					break;
+				}
+			}
+			if (continuationCase != null) {
+				for (SwitchRegion.CaseInfo caseInfo : ((SwitchRegion) region).getCases()) {
+					IContainer caseContainer = caseInfo.getContainer();
+					if (caseContainer != continuationCase && protectedBlocks.stream()
+							.anyMatch(block -> RegionUtils.isRegionContainsBlock(caseContainer, block))) {
+						return true;
+					}
+				}
+			}
+		}
+		for (IContainer child : region.getSubBlocks()) {
+			if (child instanceof IRegion
+					&& isSiblingSwitchCaseContinuation((IRegion) child, protectedBlocks, continuation)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private static void hideSharedRethrow(@Nullable BlockNode sharedRethrowExit) {
 		if (sharedRethrowExit == null || sharedRethrowExit.getCleanSuccessors().size() != 1) {
 			return;
@@ -506,6 +865,50 @@ public class ExcHandlersRegionMaker {
 		return false;
 	}
 
+	private boolean isSharedConditionalCleanupRethrow(BlockNode start) {
+		return isSharedConditionalCleanupRethrow(start, mth.getExitBlock());
+	}
+
+	static boolean isSharedConditionalCleanupRethrow(BlockNode start, BlockNode methodExit) {
+		if (start.getPredecessors().size() < 2 || start.getCleanSuccessors().size() != 1) {
+			return false;
+		}
+		BlockNode condition = start.getCleanSuccessors().get(0);
+		InsnNode conditionInsn = BlockUtils.getLastInsn(condition);
+		if (conditionInsn == null || conditionInsn.getType() != InsnType.IF
+				|| condition.getCleanSuccessors().size() != 2) {
+			return false;
+		}
+		List<BlockNode> branches = condition.getCleanSuccessors();
+		BlockNode direct = branches.get(0);
+		BlockNode optional = branches.get(1);
+		if (optional.getCleanSuccessors().size() != 1 || optional.getCleanSuccessors().get(0) != direct) {
+			optional = branches.get(0);
+			direct = branches.get(1);
+		}
+		if (optional == start || optional == condition || optional == direct
+				|| optional.getCleanSuccessors().size() != 1
+				|| optional.getCleanSuccessors().get(0) != direct
+				|| direct.getCleanSuccessors().size() != 1) {
+			return false;
+		}
+		BlockNode throwBlock = direct;
+		if (direct.getCleanSuccessors().get(0) != methodExit) {
+			// The conditional cleanup may invoke its callback in the join block and
+			// rethrow in a dedicated successor. Keep that entire suffix in each catch.
+			throwBlock = direct.getCleanSuccessors().get(0);
+			if (throwBlock == start || throwBlock == condition || throwBlock == optional
+					|| throwBlock.getPredecessors().size() != 1
+					|| throwBlock.getPredecessors().get(0) != direct
+					|| throwBlock.getCleanSuccessors().size() != 1
+					|| throwBlock.getCleanSuccessors().get(0) != methodExit) {
+				return false;
+			}
+		}
+		InsnNode terminal = BlockUtils.getLastInsn(throwBlock);
+		return terminal != null && terminal.getType() == InsnType.THROW;
+	}
+
 	private static boolean hasOnlyEmptyPath(BlockNode start, BlockNode target) {
 		BlockNode block = start;
 		Set<BlockNode> visited = new HashSet<>();
@@ -523,38 +926,75 @@ public class ExcHandlersRegionMaker {
 	}
 
 	private static void appendSharedHandlerPrefix(ExceptionHandler handler, BlockNode start) {
+		List<BlockNode> prefixBlocks = collectSharedHandlerPrefixBlocks(start);
+		if (prefixBlocks.isEmpty()) {
+			return;
+		}
 		List<InsnNode> sharedInsns = new ArrayList<>();
-		boolean complete = false;
-		BlockNode block = start;
-		Set<BlockNode> visited = new HashSet<>();
-		while (visited.size() < 8 && visited.add(block)) {
+		for (BlockNode block : prefixBlocks) {
 			for (InsnNode insn : block.getInstructions()) {
 				if (insn.contains(AFlag.DONT_GENERATE)) {
 					continue;
 				}
-				if (insn.getType() == InsnType.IF || insn.getType() == InsnType.SWITCH) {
-					return;
-				}
 				sharedInsns.add(insn);
 			}
+		}
+		if (!sharedInsns.isEmpty()) {
+			handler.getHandlerRegion().getSubBlocks().add(new InsnContainer(sharedInsns));
+			// InsnContainer represents these original blocks in the region tree. Record that fact so
+			// CheckRegions does not report their already-emitted instructions as lost CFG blocks.
+			prefixBlocks.forEach(block -> block.add(AFlag.ADDED_TO_REGION));
+		}
+	}
+
+	/**
+	 * Collect a short, branch-free handler suffix ending in an abrupt exit. Returning the original
+	 * instructions in an InsnContainer is safe only when every traversed block has one unambiguous
+	 * continuation and no condition needs structural reconstruction.
+	 */
+	static List<BlockNode> collectSharedHandlerPrefixBlocks(BlockNode start) {
+		List<BlockNode> blocks = new ArrayList<>();
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (visited.size() < 8 && visited.add(block)) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (!insn.contains(AFlag.DONT_GENERATE)
+						&& (insn.getType() == InsnType.IF || insn.getType() == InsnType.SWITCH)) {
+					return List.of();
+				}
+			}
+			blocks.add(block);
 			InsnNode lastInsn = BlockUtils.getLastInsn(block);
 			if (lastInsn != null
 					&& (lastInsn.getType() == InsnType.RETURN || lastInsn.getType() == InsnType.THROW)) {
-				complete = true;
-				break;
+				return blocks;
 			}
 			List<BlockNode> successors = block.getCleanSuccessors();
-			if (successors.isEmpty()) {
-				break;
-			}
 			if (successors.size() != 1) {
-				break;
+				return List.of();
 			}
 			block = successors.get(0);
 		}
-		if (complete && !sharedInsns.isEmpty()) {
-			handler.getHandlerRegion().getSubBlocks().add(new InsnContainer(sharedInsns));
+		return List.of();
+	}
+
+	private static boolean containsSharedCleanupRethrow(IRegion handlerRegion, BlockNode start) {
+		Set<BlockNode> visited = new HashSet<>();
+		BlockNode block = start;
+		while (visited.size() < 8 && visited.add(block)) {
+			if (!RegionUtils.isRegionContainsBlock(handlerRegion, block)) {
+				return false;
+			}
+			InsnNode last = BlockUtils.getLastInsn(block);
+			if (last != null && last.getType() == InsnType.THROW) {
+				return true;
+			}
+			if (block.getCleanSuccessors().size() != 1) {
+				return false;
+			}
+			block = block.getCleanSuccessors().get(0);
 		}
+		return false;
 	}
 
 	private static void appendSharedCleanupRethrow(ExceptionHandler handler, BlockNode start) {

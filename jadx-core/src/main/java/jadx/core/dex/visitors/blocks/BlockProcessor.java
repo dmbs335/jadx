@@ -65,7 +65,11 @@ public class BlockProcessor extends AbstractVisitor {
 			removeUnreachableBlocks(mth);
 			computeDominators(mth);
 		}
-		boolean earlyMultiEntryChange = FixMultiEntryLoops.processBeforeExceptionHandlers(mth);
+		boolean earlyMultiEntryChange = hasMultiEntryLoops && SplitEntryRetryNormalizer.process(mth);
+		if (earlyMultiEntryChange) {
+			computeDominators(mth);
+		}
+		earlyMultiEntryChange |= FixMultiEntryLoops.processBeforeExceptionHandlers(mth);
 		if (hasMultiEntryLoops) {
 			earlyMultiEntryChange |= FixMultiEntryLoops.processManyStateSwitchLoopReentryBeforeExceptionHandlers(mth);
 		}
@@ -143,6 +147,7 @@ public class BlockProcessor extends AbstractVisitor {
 
 		updateCleanSuccessors(mth);
 	}
+
 
 	/**
 	 * Check the minimum invariants required before any later CFG pass can safely run. This is kept
@@ -350,6 +355,11 @@ public class BlockProcessor extends AbstractVisitor {
 
 	private static boolean deduplicateBlockInsns(MethodNode mth, BlockNode block) {
 		if (block.contains(AFlag.LOOP_START) || block.contains(AFlag.LOOP_END)) {
+			if (hasProtectedInstructions(block)) {
+				// Moving incoming assignments into a protected block changes definite assignment at
+				// catch entry. Keep them on the incoming paths where they run before entering the try.
+				return false;
+			}
 			// search for same instruction at end of all predecessors blocks
 			List<BlockNode> predecessors = block.getPredecessors();
 			int predsCount = predecessors.size();
@@ -373,6 +383,13 @@ public class BlockProcessor extends AbstractVisitor {
 			}
 		}
 		return false;
+	}
+
+	static boolean hasProtectedInstructions(BlockNode block) {
+		// Before exception-handler processing, protection can still be attached to instructions only.
+		return block.contains(AType.EXC_CATCH) || block.contains(AFlag.TRY_ENTER)
+				|| block.getInstructions().stream()
+						.anyMatch(insn -> insn.contains(AType.EXC_CATCH) || insn.contains(AFlag.TRY_ENTER));
 	}
 
 	private static List<InsnNode> getLastInsns(BlockNode blockNode, int sameInsnCount) {

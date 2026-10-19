@@ -15,7 +15,6 @@ import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.visitors.regions.RegionMakerVisitor;
 import jadx.core.dex.visitors.typeinference.FinishTypeInference;
-import jadx.core.utils.BlockUtils;
 
 @JadxVisitor(
 		name = "AdjustForIfMergeVisitor",
@@ -74,7 +73,7 @@ public class AdjustForIfMergeVisitor extends AbstractVisitor {
 		return true;
 	}
 
-	private List<InsnNode> getMovableInstructions(BlockNode blk, BlockNode succ) {
+	static List<InsnNode> getMovableInstructions(BlockNode blk, BlockNode succ) {
 		// A 'movable instruction' is one that does not impact either codegen or the semantics of the
 		// following block, so it can be pushed through into the new synthetics.
 
@@ -92,11 +91,17 @@ public class AdjustForIfMergeVisitor extends AbstractVisitor {
 				RegisterArg target = insn.getResult();
 
 				List<RegisterArg> uses = target.getSVar().getUseList();
-				for (RegisterArg use : uses) {
-					if (BlockUtils.blockContains(succ, use.getParentInsn())) {
-						// the target is used inside the successor, so we can't cleanly do the assignment afterwards
-						continue;
-					}
+				boolean usedByRemainingBlock = uses.stream()
+						.anyMatch(use -> containsInsnIncludingWrapped(blk, use.getParentInsn()));
+				if (usedByRemainingBlock) {
+					// An instruction left in this block must still observe this assignment.
+					continue;
+				}
+				boolean usedByNextIf = uses.stream()
+						.anyMatch(use -> containsInsnIncludingWrapped(succ, use.getParentInsn()));
+				if (usedByNextIf) {
+					// The next condition needs the value before branching, not in its successors.
+					continue;
 				}
 
 				// we don't want to just push everything through, e.g.
@@ -112,6 +117,18 @@ public class AdjustForIfMergeVisitor extends AbstractVisitor {
 		}
 
 		return movableInstructions;
+	}
+
+	private static boolean containsInsnIncludingWrapped(BlockNode block, InsnNode target) {
+		if (target == null) {
+			return false;
+		}
+		for (InsnNode insn : block.getInstructions()) {
+			if (insn.visitInsns(nested -> nested == target ? Boolean.TRUE : null) != null) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private void doMove(MethodNode mth, BlockNode target, BlockNode bottomIf, List<InsnNode> movableInstructions) {

@@ -196,6 +196,7 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 
 	private void scanInstructions(MethodNode mth, boolean snapshot) throws JadxException {
 		List<BlockNode> blocks = mth.getBasicBlocks();
+		Map<ExceptionHandler, Boolean> forwardedThrowCache = new IdentityHashMap<>();
 		if (snapshot) {
 			blocks = new ArrayList<>(blocks);
 		}
@@ -230,12 +231,13 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 			int instructionsCount = instructions.size();
 			for (int i = 0; i < instructionsCount; i++) {
 				InsnNode insn = instructions.get(i);
-				checkInsn(mth, insn, excludedExceptions, skipExceptions);
+				checkInsn(mth, insn, excludedExceptions, skipExceptions, forwardedThrowCache);
 			}
 		}
 	}
 
-	private void checkInsn(MethodNode mth, InsnNode insn, Set<String> excludedExceptions, boolean skipExceptions) throws JadxException {
+	private void checkInsn(MethodNode mth, InsnNode insn, Set<String> excludedExceptions,
+			boolean skipExceptions, Map<ExceptionHandler, Boolean> forwardedThrowCache) throws JadxException {
 		if (!skipExceptions && insn.getType() == InsnType.THROW && !insn.contains(AFlag.DONT_GENERATE)) {
 			InsnArg throwArg = insn.getArg(0);
 			if (throwArg instanceof RegisterArg) {
@@ -257,8 +259,14 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 					}
 					if (exceptionType.equals(ArgType.THROWABLE)) {
 						// Catch-all rethrows are commonly generated for synchronized/finally
-						// cleanup and must not leak a synthetic Throwable declaration.
-						return;
+						// cleanup and must not leak a synthetic Throwable declaration. However,
+						// an explicit throw of a forwarded Throwable in the protected body makes
+						// Java's precise-rethrow inference inapplicable to this catch parameter.
+						if (handlerAttr == null || !handlerAttr.getHandler().isCatchAll()
+								|| !forwardedThrowCache.computeIfAbsent(handlerAttr.getHandler(),
+										handler -> hasForwardedThrowableThrowCaughtBy(mth, handler))) {
+							return;
+						}
 					}
 				}
 				visitThrows(mth, exceptionType, excludedExceptions);
@@ -304,6 +312,31 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 		}
 	}
 
+	private static boolean hasForwardedThrowableThrowCaughtBy(MethodNode mth, ExceptionHandler handler) {
+		for (BlockNode block : mth.getBasicBlocks()) {
+			if (block.contains(AFlag.REMOVE) || block.contains(AFlag.DONT_GENERATE)) {
+				continue;
+			}
+			CatchAttr catchAttr = block.get(AType.EXC_CATCH);
+			if (catchAttr == null || !catchAttr.getHandlers().contains(handler)) {
+				continue;
+			}
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.getType() != InsnType.THROW || insn.contains(AFlag.DONT_GENERATE)
+						|| !(insn.getArg(0) instanceof RegisterArg)) {
+					continue;
+				}
+				RegisterArg arg = (RegisterArg) insn.getArg(0);
+				InsnNode assignInsn = arg.getAssignInsn();
+				if (arg.getType().equals(ArgType.THROWABLE)
+						&& (assignInsn == null || assignInsn.getType() != InsnType.MOVE_EXCEPTION)) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
 	private void visitThrows(MethodNode mth, ArgType excType, Set<String> excludedExceptions) {
 		if (excType.isTypeKnown() && isThrowsRequired(mth, excType)) {
 			for (String excludedException : excludedExceptions) {
@@ -335,7 +368,7 @@ public class MethodThrowsVisitor extends AbstractVisitor {
 	}
 
 	private ExceptionType validateException(ArgType clsType) {
-		if (clsType == null || clsType.equals(ArgType.OBJECT)) {
+		if (clsType == null || !clsType.isObject() || clsType.equals(ArgType.OBJECT)) {
 			return ExceptionType.NO_EXCEPTION;
 		}
 		if (!clsType.isTypeKnown() || !root.getClsp().isClsKnown(clsType.getObject())) {

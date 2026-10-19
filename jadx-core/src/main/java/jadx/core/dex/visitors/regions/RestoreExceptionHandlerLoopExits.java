@@ -9,6 +9,7 @@ import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.attributes.nodes.LoopLabelAttr;
 import jadx.core.dex.instructions.InsnType;
@@ -20,6 +21,8 @@ import jadx.core.dex.nodes.InsnContainer;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.regions.TryCatchRegion;
+import jadx.core.dex.regions.Region;
+import jadx.core.dex.regions.loops.LoopRegion;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.RegionUtils;
@@ -53,7 +56,7 @@ final class RestoreExceptionHandlerLoopExits {
 			TryCatchRegion tryCatchRegion = (TryCatchRegion) region;
 			for (Map.Entry<ExceptionHandler, IContainer> entry : tryCatchRegion.getCatchRegions().entrySet()) {
 				if (entry.getValue() instanceof IRegion) {
-					restoreHandlerExit(mth, entry.getKey(), (IRegion) entry.getValue());
+					restoreHandlerExit(mth, tryCatchRegion, entry.getKey(), (IRegion) entry.getValue());
 				}
 			}
 		}
@@ -64,8 +67,43 @@ final class RestoreExceptionHandlerLoopExits {
 		}
 	}
 
-	private static void restoreHandlerExit(MethodNode mth, ExceptionHandler handler, IRegion handlerRegion) {
+	private static void restoreHandlerExit(MethodNode mth, TryCatchRegion tryCatchRegion,
+			ExceptionHandler handler, IRegion handlerRegion) {
+		if (endsWithDirectBreak(handlerRegion)) {
+			// Region construction can emit a synthetic break for a copied handler even when
+			// its original CFG exit goes to this loop's header or empty loop-end bridge.
+			// Convert only that proven transfer; a break from a switch case outside the
+			// loop must still leave the case rather than repeat the loop.
+			List<LoopInfo> sourceLoops = mth.getAllLoopsForBlock(handler.getTryBlock().getTopSplitter());
+			if (!sourceLoops.isEmpty()) {
+				Set<IBlock> handlerBlocks = new HashSet<>();
+				RegionUtils.getAllRegionBlocks(handlerRegion, handlerBlocks);
+				Set<BlockNode> boundaryTargets = collectBoundaryTargets(handlerBlocks);
+				LoopInfo continueLoop = findContinueLoop(sourceLoops, boundaryTargets);
+				if (continueLoop != null && enclosesLoop(tryCatchRegion, continueLoop)
+						&& canSkipLoopTail(continueLoop, boundaryTargets)) {
+					List<IContainer> blocks = handlerRegion.getSubBlocks();
+					int lastIndex = blocks.size() - 1;
+					IContainer last = blocks.get(lastIndex);
+					if (last instanceof InsnContainer) {
+						InsnNode breakInsn = ((InsnContainer) last).getInstructions().get(0);
+						if (breakInsn.contains(AFlag.SYNTHETIC)) {
+							InsnNode continueInsn = new InsnNode(InsnType.CONTINUE, 0);
+							continueInsn.add(AFlag.SYNTHETIC);
+							addLoopLabelIfNeeded(sourceLoops, continueLoop, continueInsn);
+							Region localCatch = new Region(tryCatchRegion);
+							localCatch.getSubBlocks().addAll(blocks.subList(0, lastIndex));
+							localCatch.getSubBlocks().add(new InsnContainer(continueInsn));
+							tryCatchRegion.setCatchRegion(handler, localCatch);
+						}
+					}
+				}
+			}
+			return;
+		}
 		if (RegionUtils.hasExitBlock(handlerRegion)) {
+			// A catch ending directly in an emitted switch break already transfers
+			// control out of its region. Do not append an unreachable loop transfer.
 			return;
 		}
 		List<LoopInfo> sourceLoops = mth.getAllLoopsForBlock(handler.getTryBlock().getTopSplitter());
@@ -99,19 +137,79 @@ final class RestoreExceptionHandlerLoopExits {
 		}
 	}
 
-	private static Set<BlockNode> collectBoundaryTargets(Set<IBlock> handlerBlocks) {
+	private static boolean enclosesLoop(IRegion region, LoopInfo loop) {
+		for (IRegion parent = region.getParent(); parent != null; parent = parent.getParent()) {
+			if (parent instanceof LoopRegion && ((LoopRegion) parent).getInfo() == loop) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean endsWithDirectBreak(IRegion region) {
+		List<IContainer> blocks = region.getSubBlocks();
+		if (blocks.isEmpty()) {
+			return false;
+		}
+		IContainer last = blocks.get(blocks.size() - 1);
+		return last instanceof IBlock && BlockUtils.checkLastInsnType((IBlock) last, InsnType.BREAK);
+	}
+
+	static Set<BlockNode> collectBoundaryTargets(Set<IBlock> handlerBlocks) {
 		Set<BlockNode> boundaryTargets = new HashSet<>();
 		for (IBlock handlerBlock : handlerBlocks) {
 			if (!(handlerBlock instanceof BlockNode)) {
 				continue;
 			}
-			for (BlockNode successor : ((BlockNode) handlerBlock).getCleanSuccessors()) {
-				if (!handlerBlocks.contains(successor)) {
+			BlockNode block = (BlockNode) handlerBlock;
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn != null
+					&& (lastInsn.getType() == InsnType.THROW || lastInsn.getType() == InsnType.RETURN
+							|| lastInsn.getType() == InsnType.CONTINUE || lastInsn.getType() == InsnType.BREAK)) {
+				// An emitted method/loop exit is not catch fall-through.
+				continue;
+			}
+			for (BlockNode successor : block.getCleanSuccessors()) {
+				if (hasTerminalEdgeInsn(block, successor)) {
+					continue;
+				}
+				if (!handlerBlocks.contains(successor)
+						&& !handlerBlocks.contains(BlockUtils.followEmptyPath(successor))) {
+					// Region construction can omit an empty connector to a block already
+					// emitted inside this handler. It does not leave the handler either.
 					boundaryTargets.add(successor);
+				}
+			}
+			// Clean successors omit loop back edges. If the handler itself emits the loop-end
+			// block, its effects have already executed, but the transfer back to the header still
+			// needs a continue (otherwise it falls through into the normal success continuation).
+			if (block.contains(AFlag.LOOP_END)) {
+				for (LoopInfo loop : block.getAll(AType.LOOP)) {
+					BlockNode start = loop.getStart();
+					if (loop.getEnd() == block && block.getSuccessors().contains(start)
+							&& !handlerBlocks.contains(start) && !hasTerminalEdgeInsn(block, start)) {
+						boundaryTargets.add(start);
+					}
 				}
 			}
 		}
 		return boundaryTargets;
+	}
+
+	private static boolean hasTerminalEdgeInsn(BlockNode block, BlockNode successor) {
+		for (EdgeInsnAttr edge : block.getAll(AType.EDGE_INSN)) {
+			if (edge.getStart() == block && edge.getEnd() == successor) {
+				InsnType type = edge.getInsn().getType();
+				if (type == InsnType.THROW || type == InsnType.RETURN
+						|| type == InsnType.CONTINUE || type == InsnType.BREAK) {
+					// A shared terminal may have been materialized on the edge instead
+					// of retained in the original destination block. Likewise, an emitted loop
+					// transfer must not receive a second, unreachable continue or break.
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	private static @Nullable LoopInfo findContinueLoop(

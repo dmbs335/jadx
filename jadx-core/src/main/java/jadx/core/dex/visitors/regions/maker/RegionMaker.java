@@ -10,11 +10,14 @@ import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 
+import jadx.api.CommentsLevel;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.FieldInitInsnAttr;
 import jadx.core.dex.attributes.nodes.CoroutineLoopPreHeaderAttr;
+import jadx.core.dex.attributes.nodes.CoroutineRetryResultJoinAttr;
 import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
+import jadx.core.dex.attributes.nodes.JadxCommentsAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.info.ClassInfo;
@@ -71,8 +74,6 @@ public class RegionMaker {
 	private final boolean allowSinglePredecessorTerminalDuplication;
 
 	private int regionsCount;
-	private int unsafeDuplicatedBlocksCount;
-	private @Nullable BlockNode firstUnsafeDuplicatedBlock;
 	private @Nullable Map<MethodInfo, Boolean> pureValueCallCache;
 	private @Nullable Map<BlockNode, Boolean> balancedComposeTraceCache;
 
@@ -94,24 +95,59 @@ public class RegionMaker {
 		this.allowSinglePredecessorTerminalDuplication = KtorCioRecovery.isReadPacketMethod(mth);
 	}
 
-	void registerIfRegion(BlockNode block, IfRegion ifRegion) {
-		int blockId = block.getId();
-		IfRegion firstRegion = firstIfRegionByCondition[blockId];
-		if (firstRegion == null) {
-			firstIfRegionByCondition[blockId] = ifRegion;
-		} else {
-			// Conditions keep a view over the mutable IF instruction. If the same CFG block is
-			// materialized in more than one region (for example, a coroutine retry entry), a
-			// later branch-order inversion must not mutate the condition already owned by the
-			// first region. Give both regions detached operator views before any region visitor
-			// can reorder their branches.
-			firstRegion.markConditionShared();
-			ifRegion.markConditionShared();
+	void detachReusedIfCondition(BlockNode block) {
+		IfRegion previousRegion = firstIfRegionByCondition[block.getId()];
+		if (previousRegion != null) {
+			// Inversion during the next traversal can mutate the backing IF instruction.
+			// Freeze the earlier region's operator before that mutation happens.
+			previousRegion.markConditionShared();
+		}
+	}
+
+	List<BlockNode> getReusedMergedIfConditions(BlockNode firstBlock) {
+		IfRegion previousRegion = firstIfRegionByCondition[firstBlock.getId()];
+		if (previousRegion == null || previousRegion.getConditionBlocks().size() < 2) {
+			return List.of();
+		}
+		return previousRegion.getConditionBlocks().stream()
+				.filter(block -> block != firstBlock && block.contains(AFlag.ADDED_TO_REGION))
+				.toList();
+	}
+
+	boolean isInsideRevisitedIfRegion(IRegion region) {
+		for (IRegion current = region; current != null; current = current.getParent()) {
+			if (current instanceof IfRegion) {
+				IfRegion ifRegion = (IfRegion) current;
+				for (BlockNode conditionBlock : ifRegion.getConditionBlocks()) {
+					IfRegion firstRegion = firstIfRegionByCondition[conditionBlock.getId()];
+					if (firstRegion != null && firstRegion != ifRegion) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	void registerIfRegion(IfRegion ifRegion) {
+		for (BlockNode conditionBlock : ifRegion.getConditionBlocks()) {
+			int blockId = conditionBlock.getId();
+			IfRegion firstRegion = firstIfRegionByCondition[blockId];
+			if (firstRegion == null) {
+				firstIfRegionByCondition[blockId] = ifRegion;
+			} else if (firstRegion != ifRegion) {
+				firstRegion.markConditionShared();
+				ifRegion.markConditionShared();
+			}
 		}
 	}
 
 	void registerSafeSwitchSharedDuplication(BlockNode block) {
 		safeSwitchSharedBlocks.add(block);
+	}
+
+	boolean isSafeSwitchSharedBlock(BlockNode block) {
+		return safeSwitchSharedBlocks.contains(block);
 	}
 
 	public Region makeMthRegion() {
@@ -126,13 +162,9 @@ public class RegionMaker {
 		}
 		Region region = makeRegion(mth.getEnterBlock());
 		restoreLinearSyntheticMoveBlocks(region);
-		if (unsafeDuplicatedBlocksCount != 0) {
-			BlockNode firstBlock = Objects.requireNonNull(firstUnsafeDuplicatedBlock);
-			addRegionFallbackComment("Code duplicated in " + unsafeDuplicatedBlocksCount
-					+ " blocks, first: " + firstBlock + ' ' + firstBlock.getAttributesString());
-		}
 		return region;
 	}
+
 
 	private void restoreLinearSyntheticMoveBlocks(Region rootRegion) {
 		List<BlockNode> blocks = mth.getBasicBlocks();
@@ -197,6 +229,7 @@ public class RegionMaker {
 			}
 			if (!recursiveRegionBlocks.addChecked(startBlock)
 					&& !startBlock.contains(AType.EXPECTED_TRAVERSAL_CYCLE)) {
+				mth.addAttr(AType.UNRESOLVED_REGION_RECURSION, startBlock);
 				addRegionFallbackComment("Recursive region processing prevented at block: " + startBlock);
 			}
 			return region;
@@ -208,10 +241,7 @@ public class RegionMaker {
 				// and allow processing to continue
 				if (!startBlock.contains(AFlag.DUPLICATED)) {
 					if (!isSafeLoopDuplication(startBlock)) {
-						if (firstUnsafeDuplicatedBlock == null) {
-							firstUnsafeDuplicatedBlock = startBlock;
-						}
-						unsafeDuplicatedBlocksCount++;
+						mth.addAttr(AType.UNSAFE_REGION_DUPLICATION, startBlock);
 					}
 					startBlock.add(AFlag.DUPLICATED);
 				}
@@ -222,12 +252,15 @@ public class RegionMaker {
 				if (regionBlocks.addChecked(next)) {
 					if (isNestedCoroutineOuterTraversalCycle(region, next)) {
 						if (wrapTraversalCycleAsEndlessLoop(region, next)) {
+							removeHandledRegionFallbackComment(
+									"Region traversal cycle prevented at block: " + next);
 							break;
 						}
 					}
 					if (!traversalCycleBlocks.addChecked(next)
 							&& !isExpectedLoopStartCycle(next, mth.getLoopForBlock(next))
 							&& !next.contains(AType.EXPECTED_TRAVERSAL_CYCLE)) {
+						mth.addAttr(AType.UNRESOLVED_REGION_TRAVERSAL_CYCLE, next);
 						addRegionFallbackComment("Region traversal cycle prevented at block: " + next);
 					}
 					break;
@@ -264,6 +297,7 @@ public class RegionMaker {
 		region.add(block);
 		return true;
 	}
+
 
 	static boolean isSafeRecursiveLeafDuplication(BlockNode block) {
 		block.updateCleanSuccessors();
@@ -316,9 +350,16 @@ public class RegionMaker {
 			return true;
 		}
 		boolean invalidationDrain = isInvalidationDrainCoroutine();
+		List<LoopInfo> traversalLoops = mth.getAllLoopsForBlock(loopStart);
+		boolean sourceOuterLoop = traversalLoops.size() == 1
+				&& traversalLoops.get(0).getStart() == loopStart;
+		boolean normalizedSequenceLoop = mth.contains(AType.NORMALIZED_COROUTINE_LOOP)
+				&& containsYieldInvoke();
 		if (!(isSuspendLambdaMethod() || isCompiledSuspendMethod())
-				|| mth.getAllLoopsForBlock(loopStart).size() != 0
-				|| traversalCycleBlocks.contains(loopStart) && !invalidationDrain
+				|| !traversalLoops.isEmpty() && !sourceOuterLoop
+				|| traversalCycleBlocks.contains(loopStart)
+						&& !invalidationDrain
+						&& !normalizedSequenceLoop
 				|| loopStart.contains(AType.EXPECTED_TRAVERSAL_CYCLE)
 				|| region.getParent() != null && !(region.getParent() instanceof IfRegion)
 				|| (invalidationDrain
@@ -475,9 +516,12 @@ public class RegionMaker {
 	}
 
 	private static boolean containsYieldInvoke(InsnNode insn) {
-		if (insn instanceof InvokeNode
-				&& ((InvokeNode) insn).getCallMth().getName().equals("yield")) {
-			return true;
+		if (insn instanceof InvokeNode) {
+			InvokeNode invoke = (InvokeNode) insn;
+			if (invoke.getCallMth().getName().equals("yield")
+					|| isSequenceScopeYieldSignature(invoke)) {
+				return true;
+			}
 		}
 		for (InsnArg arg : insn.getArguments()) {
 			if (arg instanceof InsnWrapArg
@@ -486,6 +530,16 @@ public class RegionMaker {
 			}
 		}
 		return false;
+	}
+
+	private static boolean isSequenceScopeYieldSignature(InvokeNode invoke) {
+		List<ArgType> argumentTypes = invoke.getCallMth().getArgumentsTypes();
+		return invoke.getInvokeType() != jadx.core.dex.instructions.InvokeType.STATIC
+				&& invoke.getCallMth().getDeclClass().getFullName()
+						.equals("kotlin.sequences.SequenceScope")
+				&& argumentTypes.size() == 2
+				&& ArgType.OBJECT.equals(argumentTypes.get(0))
+				&& CoroutineMethodUtils.isContinuationType(argumentTypes.get(1));
 	}
 
 	private boolean containsChannelSendInvoke() {
@@ -594,6 +648,20 @@ public class RegionMaker {
 		}
 	}
 
+	private void removeHandledRegionFallbackComment(String message) {
+		JadxCommentsAttr commentsAttr = mth.get(AType.JADX_COMMENTS);
+		if (commentsAttr == null) {
+			return;
+		}
+		Map<CommentsLevel, Set<String>> comments = commentsAttr.getComments();
+		for (Set<String> levelComments : comments.values()) {
+			levelComments.remove(message);
+			levelComments.remove(message + " (caused by unsupported multi-entry loop)");
+			levelComments.remove(message + " (inside normalized coroutine loop)");
+		}
+		comments.entrySet().removeIf(entry -> entry.getValue().isEmpty());
+	}
+
 	private boolean isSafeLoopDuplication(BlockNode block) {
 		if (block.contains(AType.SAFE_DUPLICATION)
 				|| safeSwitchSharedBlocks.contains(block)
@@ -603,6 +671,7 @@ public class RegionMaker {
 				|| isSafeStaticFinalSingletonReadDuplication(block)
 				|| isSafeCoroutineStateInitDuplication(block)
 				|| isSafeCoroutineResumeRestoreDuplication(block)
+				|| isSafeCoroutineRetryRequestDuplication(block)
 				|| isSafeImmutableValueConstructorDuplication(block)
 				|| isSafeCompilerLambdaDuplication(block)
 				|| isSafeComposeRememberLambdaDuplication(block)
@@ -652,6 +721,62 @@ public class RegionMaker {
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * A normalized three-state retry coroutine has two mutually exclusive state branches entering
+	 * the same request setup: initial execution and delay resume. Region construction can therefore
+	 * emit a protected request block in both branches even though it still executes only once on any
+	 * runtime path. The recovery marker proves both shared joins; keep the source-level duplication
+	 * but do not report it as an unsafe fallback.
+	 */
+	private boolean isSafeCoroutineRetryRequestDuplication(BlockNode block) {
+		CoroutineRetryResultJoinAttr retry = mth.get(AType.COROUTINE_RETRY_RESULT_JOIN);
+		if (retry == null
+				|| block == retry.getRequestEntry()
+				|| block == retry.getResultJoin()
+				|| retry.getRequestEntry().getPredecessors().size() != 2
+				|| retry.getResultJoin().getPredecessors().size() != 2
+				|| block.getCleanSuccessors().size() != 1
+				|| BlockUtils.isExceptionHandlerPath(block)
+				|| !hasCatchProtection(block)
+				|| !isReachableBefore(
+						retry.getRequestEntry(), block, retry.getResultJoin(), 24)
+				|| !BlockUtils.isPathExists(block, retry.getResultJoin())) {
+			return false;
+		}
+		PhiListAttr phiList = block.get(AType.PHI_LIST);
+		return phiList == null || phiList.getList().isEmpty();
+	}
+
+	private static boolean hasCatchProtection(BlockNode block) {
+		return block.contains(AFlag.TRY_ENTER)
+				|| block.contains(AType.EXC_CATCH)
+				|| block.getInstructions().stream().anyMatch(insn -> insn.get(AType.EXC_CATCH) != null);
+	}
+
+	private static boolean isReachableBefore(
+			BlockNode start, BlockNode target, BlockNode stop, int maxBlocks) {
+		List<BlockNode> queue = new ArrayList<>();
+		Set<BlockNode> visited = new HashSet<>();
+		queue.add(start);
+		for (int i = 0; i < queue.size() && visited.size() < maxBlocks; i++) {
+			BlockNode block = queue.get(i);
+			if (!visited.add(block)) {
+				continue;
+			}
+			if (block == target) {
+				return true;
+			}
+			if (block != stop) {
+				for (BlockNode successor : block.getCleanSuccessors()) {
+					if (!BlockUtils.isExceptionHandlerPath(successor)) {
+						queue.add(successor);
+					}
+				}
+			}
+		}
+		return false;
 	}
 
 	private boolean isSafeImmutableValueConstructorDuplication(BlockNode block) {

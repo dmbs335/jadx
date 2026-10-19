@@ -31,9 +31,11 @@ import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.NewArrayNode;
 import jadx.core.dex.instructions.SwitchInsn;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
@@ -423,6 +425,69 @@ public class ModVisitor extends AbstractVisitor {
 			return;
 		}
 		ArgType castType = (ArgType) insn.getIndex();
+		if (castArg instanceof RegisterArg) {
+			SSAVar sourceVar = ((RegisterArg) castArg).getSVar();
+			CodeVar codeVar = sourceVar == null ? null : sourceVar.getCodeVar();
+			ArgType declaredType = codeVar == null ? null : codeVar.getType();
+			if (ArgType.OBJECT.equals(declaredType)
+					&& sourceVar != null && sourceVar.getAssignInsn() instanceof InvokeNode
+					&& ArgType.isCastNeeded(mth.root(), declaredType, castType)) {
+				// An inferred SSA type can be narrower than the emitted Object local.
+				insn.add(AFlag.EXPLICIT_CAST);
+				return;
+			}
+			if (sourceVar != null) {
+				InsnNode sourceInsn = sourceVar.getAssign().getParentInsn();
+				if (sourceInsn != null && sourceInsn.getType() == InsnType.AGET
+						&& sourceInsn.getArgsCount() >= 1) {
+					ArgType arrayType = InsnUtils.getDeclaredArrayType(sourceInsn.getArg(0));
+					if (arrayType.isArray()) {
+						ArgType elementType = arrayType.getArrayElement();
+						if (!elementType.isGeneric() && !elementType.isGenericType()
+								&& ArgType.isCastNeeded(mth.root(), elementType, castType)) {
+							insn.add(AFlag.EXPLICIT_CAST);
+							return;
+						}
+					}
+				}
+				if (sourceInsn instanceof IndexInsnNode
+						&& (sourceInsn.getType() == InsnType.IGET || sourceInsn.getType() == InsnType.SGET)
+						&& ((IndexInsnNode) sourceInsn).getIndex() instanceof FieldInfo) {
+					ArgType fieldType = ((FieldInfo) ((IndexInsnNode) sourceInsn).getIndex()).getType();
+					if (!fieldType.equals(ArgType.OBJECT) && !fieldType.isGeneric() && !fieldType.isGenericType()
+							&& ArgType.isCastNeeded(mth.root(), fieldType, castType)) {
+						insn.add(AFlag.EXPLICIT_CAST);
+						return;
+					}
+				}
+				if (sourceInsn instanceof InvokeNode
+						&& declaredType != null
+						&& !declaredType.isGeneric() && !declaredType.isGenericType()
+						&& declaredType.equals(((InvokeNode) sourceInsn).getCallMth().getReturnType())
+						&& ArgType.isCastNeeded(mth.root(),
+								((InvokeNode) sourceInsn).getCallMth().getReturnType(), castType)) {
+					insn.add(AFlag.EXPLICIT_CAST);
+					return;
+				}
+				if (sourceInsn != null && sourceInsn.getType() == InsnType.MOVE
+						&& sourceInsn.getArgsCount() == 1 && sourceInsn.getArg(0) instanceof RegisterArg) {
+					RegisterArg moveSource = (RegisterArg) sourceInsn.getArg(0);
+					SSAVar moveSourceVar = moveSource.getSVar();
+					CodeVar moveSourceCodeVar = moveSourceVar == null ? null : moveSourceVar.getCodeVar();
+					ArgType moveSourceType = moveSourceCodeVar == null ? moveSource.getType() : moveSourceCodeVar.getType();
+					if (needsExplicitGenericReceiverCast(mth, insn, moveSourceType, castType)) {
+						insn.add(AFlag.EXPLICIT_CAST);
+						return;
+					}
+				}
+			}
+			if (needsExplicitGenericReceiverCast(mth, insn, declaredType, castType)) {
+				// Type inference may narrow this SSA use after an instanceof guard, but the
+				// emitted Java variable still has its generic declaration type.
+				insn.add(AFlag.EXPLICIT_CAST);
+				return;
+			}
+		}
 		if (!ArgType.isCastNeeded(mth.root(), castArg.getType(), castType)) {
 			RegisterArg result = insn.getResult();
 			if (result.isTypeImmutable()) {
@@ -444,6 +509,28 @@ public class ModVisitor extends AbstractVisitor {
 			move.addArg(prevCast.getArg(0));
 			replaceInsn(mth, block, prevCast, move);
 		}
+	}
+
+	private static boolean needsExplicitGenericReceiverCast(
+			MethodNode mth, IndexInsnNode castInsn, @Nullable ArgType sourceType, ArgType castType) {
+		if (!castType.isTypeKnown() || sourceType == null || !sourceType.isGenericType()
+				|| sourceType.equals(castType)
+				|| sourceType.getExtendTypes().stream()
+						.anyMatch(bound -> !ArgType.isCastNeeded(mth.root(), bound, castType))) {
+			return false;
+		}
+		RegisterArg result = castInsn.getResult();
+		SSAVar resultVar = result == null ? null : result.getSVar();
+		if (resultVar == null) {
+			return false;
+		}
+		for (RegisterArg use : resultVar.getUseList()) {
+			InsnNode useInsn = use.getParentInsn();
+			if (useInsn instanceof InvokeNode && ((InvokeNode) useInsn).getInstanceArg() == use) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static @Nullable InsnNode isCastDuplicate(IndexInsnNode castInsn) {
@@ -652,6 +739,12 @@ public class ModVisitor extends AbstractVisitor {
 			NamedArg namedArg = new NamedArg(name, type);
 			moveInsn.addArg(namedArg);
 			excHandler.setArg(namedArg);
+			// The catch parameter is now the NamedArg, not the shared SSA result.
+			// Let the external variable acquire a declaration in its actual use scope.
+			resArg.remove(AFlag.CUSTOM_DECLARE);
+			sVar.getCodeVar().setDeclared(sVar.getCodeVar().getSsaVars().stream()
+					.map(SSAVar::getAssign)
+					.anyMatch(arg -> arg.contains(AFlag.METHOD_ARGUMENT) || arg.contains(AFlag.CUSTOM_DECLARE)));
 			replaceInsn(mth, block, 0, moveInsn);
 		}
 		block.copyAttributeFrom(insn, AType.CODE_COMMENTS); // save comment

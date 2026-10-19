@@ -49,6 +49,7 @@ import jadx.core.dex.visitors.ModVisitor;
 import jadx.core.dex.visitors.kotlin.CoroutineMethodUtils;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnRemover;
+import jadx.core.utils.InsnUtils;
 
 @JadxVisitor(
 		name = "Finish Type Inference",
@@ -643,6 +644,17 @@ public final class FinishTypeInference extends AbstractVisitor {
 		for (Map.Entry<CodeVar, List<SSAVar>> entry : groups.entrySet()) {
 			CodeVar codeVar = entry.getKey();
 			ArgType currentType = codeVar.getType();
+			if (currentType != null && (currentType.isObject() || currentType.isArray())
+					&& !currentType.equals(ArgType.OBJECT)
+					&& !currentType.isGeneric() && !currentType.isGenericType()) {
+				ArgType producerType = selectDeclaredProducerType(entry.getValue());
+				if (producerType != null && !producerType.equals(ArgType.OBJECT)
+						&& ArgType.isCastNeeded(mth.root(), producerType, currentType)) {
+					// A cast use may narrow SSA inference beyond the producer's declared type.
+					codeVar.setType(producerType);
+					currentType = producerType;
+				}
+			}
 			boolean refineObject = ArgType.OBJECT.equals(currentType);
 			if (currentType != null && currentType.isTypeKnown() && !refineObject) {
 				continue;
@@ -740,6 +752,16 @@ public final class FinishTypeInference extends AbstractVisitor {
 		for (List<SSAVar> group : groups.values()) {
 			replaceClosedNullFlowUses(group);
 		}
+	}
+
+	private static ArgType selectDeclaredProducerType(List<SSAVar> vars) {
+		if (vars.size() != 1) {
+			return null;
+		}
+		ArgType declaredType = InsnUtils.getDeclaredResultType(vars.get(0).getAssignInsn());
+		return declaredType != null && (declaredType.isObject() || declaredType.isArray())
+				&& !declaredType.isGenericType()
+				? declaredType : null;
 	}
 
 	/**

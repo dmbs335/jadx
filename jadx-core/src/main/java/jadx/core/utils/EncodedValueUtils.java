@@ -107,9 +107,13 @@ public class EncodedValueUtils {
 		List<ArgType> callTypes = new ArrayList<>(1 + argTypes.size());
 		callTypes.add(retType);
 		callTypes.addAll(argTypes);
+		List<ArgType> classArgTypes = new ArrayList<>(callTypes.size());
+		for (int i = 0; i < callTypes.size(); i++) {
+			classArgTypes.add(ArgType.CLASS);
+		}
 		ArgType mthType = ArgType.object("java.lang.invoke.MethodType");
 		ClassInfo cls = ClassInfo.fromType(root, mthType);
-		MethodInfo mth = MethodInfo.fromDetails(root, cls, "methodType", callTypes, mthType);
+		MethodInfo mth = MethodInfo.fromDetails(root, cls, "methodType", classArgTypes, mthType);
 		InvokeNode invoke = new InvokeNode(mth, InvokeType.STATIC, callTypes.size());
 		for (ArgType type : callTypes) {
 			InsnNode argInsn;
@@ -126,7 +130,7 @@ public class EncodedValueUtils {
 	public static FieldInfo getTypeField(RootNode root, PrimitiveType type) {
 		ArgType boxType = type.getBoxType();
 		ClassInfo boxCls = ClassInfo.fromType(root, boxType);
-		return FieldInfo.from(root, boxCls, "TYPE", boxType);
+		return FieldInfo.from(root, boxCls, "TYPE", ArgType.CLASS);
 	}
 
 	/**

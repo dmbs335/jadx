@@ -1,13 +1,18 @@
 package jadx.core.dex.visitors.regions.maker;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
+
+import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
@@ -18,6 +23,7 @@ import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.PhiInsn;
 import jadx.core.dex.instructions.args.ArgType;
+import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.BlockNode;
@@ -66,6 +72,7 @@ final class LoopRegionMaker {
 
 	BlockNode process(IRegion curRegion, LoopInfo loop, RegionStack stack) {
 		BlockNode loopStart = loop.getStart();
+		insertContinueToParentLoop(loop);
 		Set<BlockNode> exitBlocksSet = loop.getExitNodes();
 
 		// set exit blocks scan order priority
@@ -216,7 +223,7 @@ final class LoopRegionMaker {
 	private LoopRegion makeLoopRegion(IRegion curRegion, LoopInfo loop, List<BlockNode> exitBlocks) {
 		for (BlockNode block : exitBlocks) {
 			// Ignore blocks that lead to exception handlers
-			if (block.contains(AType.EXC_HANDLER)) {
+			if (block.contains(AType.EXC_HANDLER) || isHandlerOnlyCondition(mth.getExceptionHandlers(), block, loop)) {
 				continue;
 			}
 			// Ignore blocks that do not branch based on an if statement
@@ -274,6 +281,17 @@ final class LoopRegionMaker {
 		return null;
 	}
 
+	static boolean isHandlerOnlyCondition(Iterable<ExceptionHandler> handlers, BlockNode block, LoopInfo loop) {
+		for (ExceptionHandler handler : handlers) {
+			if (handler.getBlocks().contains(block) && !BlockUtils.isPathExists(loop.getStart(), block)) {
+				// A retry predicate belongs to catch scope, not the enclosing loop header.
+				// A real loop inside a handler still has a normal path to its own condition.
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private static boolean isExitAtLoopEnd(BlockNode exit, LoopInfo loop) {
 		BlockNode loopEnd = loop.getEnd();
 		if (exit == loopEnd) {
@@ -319,9 +337,40 @@ final class LoopRegionMaker {
 		if (firstInstructions.size() == 1 && firstInstructions.get(0).getType() == InsnType.RETURN) {
 			return true;
 		}
-
 		// Otherwise the exit must lead to a valid out block
 		return validOutBlock(firstWorkAfterMainExitBlock, loop);
+	}
+
+	/**
+	 * Recognize two loop exits which each pass through an empty bridge and one pure value
+	 * assignment before joining at a PHI. The ordinary post-dominator search can miss this
+	 * shape when a resume-state switch shares the outer loop entry. In that case both paths
+	 * still need explicit breaks before the shared continuation is emitted.
+	 */
+	private @Nullable BlockNode findTwoWayPhiExitJoin(List<Edge> exitEdges) {
+		if (exitEdges.size() != 2) {
+			return null;
+		}
+		BlockNode join = null;
+		for (Edge edge : exitEdges) {
+			BlockNode valueBlock = BlockUtils.followEmptyPath(edge.getTarget());
+			if (valueBlock.getPredecessors().size() != 1
+					|| valueBlock.getCleanSuccessors().size() != 1
+					|| valueBlock.getInstructions().size() != 1) {
+				return null;
+			}
+			BlockNode next = valueBlock.getCleanSuccessors().get(0);
+			if (join != null && join != next) {
+				return null;
+			}
+			join = next;
+			InsnNode valueInsn = valueBlock.getInstructions().get(0);
+			if (valueInsn.getType() != InsnType.CONST && valueInsn.getType() != InsnType.MOVE) {
+				return null;
+			}
+		}
+		return join != null && join.get(AType.PHI_LIST) != null && join.getPredecessors().size() == 2
+				? join : null;
 	}
 
 	/*
@@ -570,7 +619,7 @@ final class LoopRegionMaker {
 		stack.push(loopRegion);
 
 		BlockNode out = null;
-		boolean sharedReturnBreaks = false;
+		boolean sharedExitInsns = false;
 		boolean nestedSplitExits = false;
 		// insert 'break' for exits
 		List<Edge> exitEdges = loop.getExitEdges();
@@ -588,16 +637,24 @@ final class LoopRegionMaker {
 			out = splitNestedLoopExits(stack, loop, exitEdges);
 			if (out == null) {
 				BlockNode commonOut = findCommonPostDominator(exitEdges);
+				BlockNode simplePhiOut = null;
+				if (commonOut == null) {
+					simplePhiOut = findTwoWayPhiExitJoin(exitEdges);
+					commonOut = simplePhiOut;
+				}
 				PhiListAttr phiList = commonOut == null ? null : commonOut.get(AType.PHI_LIST);
 				if (commonOut != null
 						&& !loop.getLoopBlocks().contains(commonOut)
-						&& ArgType.STRING.equals(mth.getReturnType())
-						&& hasStringBuilderPhi(phiList)) {
+						&& (ArgType.STRING.equals(mth.getReturnType()) && hasStringBuilderPhi(phiList)
+								|| simplePhiOut != null)) {
 					insertBreaksAtJoin(stack, loop, exitEdges, commonOut);
 					out = commonOut;
 				}
 			}
 			nestedSplitExits = out != null;
+			if (out == null) {
+				out = findSharedSyntheticBridgeOut(loop, exitEdges);
+			}
 			loop0: for (Edge exitEdge : exitEdges) {
 				if (out != null) {
 					break;
@@ -627,12 +684,14 @@ final class LoopRegionMaker {
 				}
 			}
 
-			sharedReturnBreaks = nestedSplitExits
+			sharedExitInsns = nestedSplitExits
+					|| insertSharedHandlerRethrows(loop, out)
 					|| insertSharedSyntheticBridgeBreaks(loop, out)
-					|| insertSharedReturnBreaks(loop, out);
+					|| insertSharedReturnBreaks(loop, out)
+					|| insertMixedSharedReturnBreaks(loop, out);
 			// Add breaks
 			stack.addExit(out);
-			if (!sharedReturnBreaks && out != null && out != mth.getExitBlock()) {
+			if (!sharedExitInsns && out != null && out != mth.getExitBlock()) {
 				// Add a break on every incoming edge where the predecessor is reachable from the loop
 				for (BlockNode predecessor : out.getPredecessors()) {
 					for (Edge exitEdge : loop.getExitEdges()) {
@@ -661,6 +720,86 @@ final class LoopRegionMaker {
 		stack.pop();
 		loopStart.addAttr(AType.LOOP, loop);
 		return out;
+	}
+
+	/**
+	 * A catch handler inside an endless loop can have several conditional exits which converge through
+	 * synthetic bridges on one shared {@code throw handlerArg} block. Treating that block as the loop
+	 * out emits {@code break} in the catch and leaves the rethrow after the loop, outside the catch
+	 * parameter's Java scope. Materialize the already-proven rethrow on each handler edge instead.
+	 */
+	private boolean insertSharedHandlerRethrows(LoopInfo loop, @Nullable BlockNode out) {
+		if (out == null
+				|| !out.contains(AFlag.IGNORE_THROW_SPLIT)
+				|| out.getInstructions().size() != 1
+				|| !ListUtils.isSingleElement(out.getCleanSuccessors(), mth.getExitBlock())) {
+			return false;
+		}
+		InsnNode throwInsn = out.getInstructions().get(0);
+		if (throwInsn.getType() != InsnType.THROW
+				|| throwInsn.contains(AFlag.DONT_GENERATE)
+				|| throwInsn.getArgsCount() != 1) {
+			return false;
+		}
+
+		List<Edge> rethrowExits = new ArrayList<>();
+		for (Edge exitEdge : loop.getExitEdges()) {
+			BlockNode bridge = exitEdge.getTarget();
+			if (bridge.contains(AFlag.SYNTHETIC)
+					&& bridge.getInstructions().isEmpty()
+					&& ListUtils.isSingleElement(bridge.getPredecessors(), exitEdge.getSource())
+					&& BlockUtils.followEmptyPath(bridge) == out) {
+				rethrowExits.add(exitEdge);
+			} else if (!allPathsTerminateOutsideLoop(
+					bridge, loop, out, new HashSet<>(), new HashMap<>())) {
+				return false;
+			}
+		}
+		if (rethrowExits.size() < 2
+				|| out.getPredecessors().size() != rethrowExits.size()
+				|| rethrowExits.stream().anyMatch(edge -> !out.getPredecessors().contains(edge.getTarget()))) {
+			return false;
+		}
+
+		ExceptionHandler handler = findSharedRethrowHandler(rethrowExits, throwInsn.getArg(0));
+		if (handler == null) {
+			return false;
+		}
+		for (Edge exitEdge : rethrowExits) {
+			InsnNode edgeThrow = new InsnNode(InsnType.THROW, 1);
+			edgeThrow.addArg(handler.getArg().duplicate());
+			EdgeInsnAttr.addEdgeInsn(exitEdge, edgeThrow);
+		}
+		throwInsn.add(AFlag.DONT_GENERATE);
+		return true;
+	}
+
+	private @Nullable ExceptionHandler findSharedRethrowHandler(
+			List<Edge> rethrowExits, InsnArg throwArg) {
+		ExceptionHandler match = null;
+		for (ExceptionHandler handler : mth.getExceptionHandlers()) {
+			InsnArg handlerArg = handler.getArg();
+			if (handlerArg == null
+					|| !isSameSsaValue(throwArg, handlerArg)
+					|| rethrowExits.stream().anyMatch(edge -> !handler.getBlocks().contains(edge.getSource()))) {
+				continue;
+			}
+			if (match != null) {
+				return null;
+			}
+			match = handler;
+		}
+		return match;
+	}
+
+	private static boolean isSameSsaValue(InsnArg first, InsnArg second) {
+		if (first == second || first.equals(second)) {
+			return true;
+		}
+		return first instanceof RegisterArg
+				&& second instanceof RegisterArg
+				&& ((RegisterArg) first).getSVar() != null
+				&& ((RegisterArg) first).getSVar() == ((RegisterArg) second).getSVar();
 	}
 
 	private BlockNode splitNestedLoopExits(RegionStack stack, LoopInfo loop, List<Edge> exitEdges) {
@@ -759,19 +898,20 @@ final class LoopRegionMaker {
 	}
 
 	private boolean insertSharedSyntheticBridgeBreaks(LoopInfo loop, BlockNode out) {
-		ArgType returnType = mth.getReturnType();
 		if (out == null
-				|| out == mth.getExitBlock()
-				|| !returnType.isPrimitive()
-				|| ArgType.VOID.equals(returnType)) {
+				|| out == mth.getExitBlock()) {
 			return false;
 		}
 		List<Edge> bridgeExits = new ArrayList<>();
 		for (Edge exitEdge : loop.getExitEdges()) {
 			BlockNode bridge = exitEdge.getTarget();
 			BlockNode bridgeOut = BlockUtils.followEmptyPath(bridge);
-			if (bridgeOut == mth.getExitBlock() || bridgeOut.isReturnBlock()) {
-				continue;
+			if (bridgeOut != out) {
+				if (allPathsTerminateOutsideLoop(
+						bridge, loop, out, new HashSet<>(), new HashMap<>())) {
+					continue;
+				}
+				return false;
 			}
 			if (!bridge.contains(AFlag.SYNTHETIC)
 					|| !bridge.getInstructions().isEmpty()
@@ -793,6 +933,97 @@ final class LoopRegionMaker {
 		return true;
 	}
 
+	/**
+	 * Several loop exits can share one real continuation through one synthetic bridge per edge,
+	 * while all remaining exits return or throw independently. The common post-dominator of every
+	 * exit is then only the method exit, which is too late to place the required loop breaks.
+	 * Select the unique shared continuation after proving that every other exit terminates without
+	 * re-entering the loop or reaching that continuation.
+	 */
+	private BlockNode findSharedSyntheticBridgeOut(LoopInfo loop, List<Edge> exitEdges) {
+		Map<BlockNode, List<Edge>> exitsByOut = new LinkedHashMap<>();
+		for (Edge exitEdge : exitEdges) {
+			BlockNode bridge = exitEdge.getTarget();
+			if (!bridge.contains(AFlag.SYNTHETIC)
+					|| !bridge.getInstructions().isEmpty()
+					|| !ListUtils.isSingleElement(bridge.getPredecessors(), exitEdge.getSource())) {
+				continue;
+			}
+			BlockNode bridgeOut = BlockUtils.followEmptyPath(bridge);
+			if (bridgeOut != mth.getExitBlock()
+					&& !loop.getLoopBlocks().contains(bridgeOut)) {
+				exitsByOut.computeIfAbsent(bridgeOut, key -> new ArrayList<>()).add(exitEdge);
+			}
+		}
+		BlockNode candidate = null;
+		Set<Edge> candidateEdges = null;
+		for (Map.Entry<BlockNode, List<Edge>> entry : exitsByOut.entrySet()) {
+			if (entry.getValue().size() < 2) {
+				continue;
+			}
+			if (mth.getExceptionHandlersCount() != 0) {
+				// A shared return inside protected code can be reached through handler edges which
+				// are not represented by the loop exit list. Keep the existing handler region.
+				List<BlockNode> simplePath = BlockUtils.buildSimplePath(entry.getKey());
+				BlockNode terminal = simplePath.isEmpty()
+						? entry.getKey()
+						: simplePath.get(simplePath.size() - 1);
+				if (terminal.isReturnBlock()) {
+					continue;
+				}
+			}
+			if (candidate != null) {
+				return null;
+			}
+			candidate = entry.getKey();
+			candidateEdges = new HashSet<>(entry.getValue());
+		}
+		if (candidate == null) {
+			return null;
+		}
+		for (Edge exitEdge : exitEdges) {
+			if (!candidateEdges.contains(exitEdge)
+					&& !allPathsTerminateOutsideLoop(
+							exitEdge.getTarget(), loop, candidate,
+							new HashSet<>(), new HashMap<>())) {
+				return null;
+			}
+		}
+		return candidate;
+	}
+
+	private boolean allPathsTerminateOutsideLoop(
+			BlockNode block,
+			LoopInfo loop,
+			BlockNode sharedOut,
+			Set<BlockNode> visiting,
+			Map<BlockNode, Boolean> resolved) {
+		if (block == sharedOut || loop.getLoopBlocks().contains(block)) {
+			return false;
+		}
+		if (block == mth.getExitBlock() || BlockUtils.containsExitInsn(block)) {
+			return true;
+		}
+		Boolean cached = resolved.get(block);
+		if (cached != null) {
+			return cached;
+		}
+		if (!visiting.add(block) || block.getCleanSuccessors().isEmpty()) {
+			return false;
+		}
+		for (BlockNode successor : block.getCleanSuccessors()) {
+			if (!allPathsTerminateOutsideLoop(
+					successor, loop, sharedOut, visiting, resolved)) {
+				visiting.remove(block);
+				resolved.put(block, false);
+				return false;
+			}
+		}
+		visiting.remove(block);
+		resolved.put(block, true);
+		return true;
+	}
+
 	private boolean insertSharedReturnBreaks(LoopInfo loop, BlockNode out) {
 		if (out == null || !out.isReturnBlock()) {
 			return false;
@@ -811,6 +1042,46 @@ final class LoopRegionMaker {
 			}
 		}
 		for (Edge exitEdge : exitEdges) {
+			InsnNode breakInsn = new InsnNode(InsnType.BREAK, 0);
+			breakInsn.addAttr(AType.LOOP, loop);
+			EdgeInsnAttr.addEdgeInsn(exitEdge, breakInsn);
+			addBreakLabel(exitEdge.getSource(), out, breakInsn);
+		}
+		return true;
+	}
+
+	/**
+	 * A loop exit can reach a shared return through an empty edge bridge while other state-dispatch
+	 * exits leave the loop before reaching that same return. Only the bridge edge needs a break;
+	 * the other paths are already outside this loop and must retain their own control flow.
+	 */
+	private boolean insertMixedSharedReturnBreaks(LoopInfo loop, @Nullable BlockNode out) {
+		if (out == null || !out.isReturnBlock() || mth.getExceptionHandlersCount() != 0) {
+			return false;
+		}
+		List<Edge> bridgeExits = new ArrayList<>();
+		for (Edge exitEdge : loop.getExitEdges()) {
+			BlockNode bridge = exitEdge.getTarget();
+			if (bridge.contains(AFlag.SYNTHETIC)
+					&& bridge.getInstructions().isEmpty()
+					&& ListUtils.isSingleElement(bridge.getPredecessors(), exitEdge.getSource())
+					&& ListUtils.isSingleElement(bridge.getCleanSuccessors(), out)) {
+				bridgeExits.add(exitEdge);
+			}
+		}
+		if (bridgeExits.isEmpty()
+				|| out.getPredecessors().size() <= bridgeExits.size()
+				|| out.getPredecessors().stream().allMatch(
+						pred -> bridgeExits.stream().anyMatch(edge -> edge.getTarget() == pred))) {
+			return false;
+		}
+		for (Edge exitEdge : loop.getExitEdges()) {
+			if (!bridgeExits.contains(exitEdge)
+					&& !BlockUtils.checkLastInsnType(exitEdge.getSource(), InsnType.SWITCH)) {
+				return false;
+			}
+		}
+		for (Edge exitEdge : bridgeExits) {
 			InsnNode breakInsn = new InsnNode(InsnType.BREAK, 0);
 			breakInsn.addAttr(AType.LOOP, loop);
 			EdgeInsnAttr.addEdgeInsn(exitEdge, breakInsn);
@@ -975,6 +1246,9 @@ final class LoopRegionMaker {
 		}
 		Set<BlockNode> loopExitNodes = loop.getExitNodes();
 		for (BlockNode pred : predecessors) {
+			if (insertContinueAfterSyntheticResultStore(pred, loop)) {
+				continue;
+			}
 			boolean nestedStateReset = isStateResetBridge(pred);
 			if (nestedStateReset || canInsertContinue(pred, predecessors, loopEnd, loopExitNodes)) {
 				InsnNode cont = new InsnNode(InsnType.CONTINUE, 0);
@@ -985,6 +1259,55 @@ final class LoopRegionMaker {
 				}
 				pred.getInstructions().add(cont);
 			}
+		}
+	}
+
+	private static boolean insertContinueAfterSyntheticResultStore(BlockNode bridge, LoopInfo loop) {
+		// A result-field store synthesized for immediate coroutine completion can be emitted
+		// before its empty back-edge bridge. If the store block is already owned by an if region,
+		// putting CONTINUE on the bridge leaves it outside every region; put it after the store.
+		if (!bridge.contains(AFlag.SYNTHETIC)
+				|| !bridge.getInstructions().isEmpty()
+				|| bridge.getPredecessors().size() != 1
+				|| !ListUtils.isSingleElement(bridge.getSuccessors(), loop.getEnd())) {
+			return false;
+		}
+		BlockNode source = bridge.getPredecessors().get(0);
+		if (!loop.getLoopBlocks().contains(source)
+				|| !ListUtils.isSingleElement(source.getCleanSuccessors(), bridge)
+				|| BlockUtils.checkLastInsnType(source, InsnType.CONTINUE)
+				|| source.getInstructions().stream().noneMatch(insn -> insn.getType() == InsnType.IPUT
+						&& insn.contains(AFlag.EXPLICIT_CAST))) {
+			return false;
+		}
+		source.getInstructions().add(new InsnNode(InsnType.CONTINUE, 0));
+		return true;
+	}
+
+	private static void insertContinueToParentLoop(LoopInfo loop) {
+		LoopInfo parentLoop = loop.getParentLoop();
+		if (parentLoop == null) {
+			return;
+		}
+		BlockNode parentEnd = parentLoop.getEnd();
+		if (!parentEnd.contains(AFlag.SYNTHETIC)
+				|| !parentEnd.getInstructions().isEmpty()
+				|| !ListUtils.isSingleElement(parentEnd.getSuccessors(), parentLoop.getStart())) {
+			return;
+		}
+		for (Edge exitEdge : loop.getExitEdges()) {
+			if (exitEdge.getTarget() != parentEnd
+					|| !BlockUtils.checkLastInsnType(exitEdge.getSource(), InsnType.IF)
+					|| exitEdge.getSource().getAll(AType.EDGE_INSN).stream().anyMatch(
+							edgeInsn -> edgeInsn.getStart() == exitEdge.getSource()
+									&& edgeInsn.getEnd() == parentEnd)) {
+				continue;
+			}
+			InsnNode cont = new InsnNode(InsnType.CONTINUE, 0);
+			LoopLabelAttr labelAttr = new LoopLabelAttr(parentLoop);
+			cont.addAttr(labelAttr);
+			parentLoop.getStart().addAttr(labelAttr);
+			EdgeInsnAttr.addEdgeInsn(exitEdge, cont);
 		}
 	}
 

@@ -23,8 +23,10 @@ import jadx.core.Consts;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.CoroutineLoopPreHeaderAttr;
+import jadx.core.dex.attributes.nodes.CoroutineRetryResultJoinAttr;
 import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
+import jadx.core.dex.attributes.nodes.LoopLabelAttr;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.instructions.ArithNode;
@@ -41,6 +43,7 @@ import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
+import jadx.core.dex.instructions.mods.ConstructorInsn;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.Edge;
 import jadx.core.dex.nodes.FieldNode;
@@ -105,6 +108,8 @@ final class IfRegionMaker {
 	private final Map<BlockNode, Set<BlockNode>> dualInheritedExitBranches = new HashMap<>();
 	private @Nullable Boolean coroutineSuspensionPoints;
 	private @Nullable Boolean byteContinuationClassifier;
+	private @Nullable FieldInfo coroutineLabelField;
+	private boolean coroutineLabelFieldResolved;
 
 	IfRegionMaker(MethodNode mth, RegionMaker regionMaker) {
 		this.mth = mth;
@@ -113,7 +118,15 @@ final class IfRegionMaker {
 
 	@Nullable
 	BlockNode process(IRegion currentRegion, BlockNode block, IfNode ifnode, RegionStack stack) {
-		if (block.contains(AFlag.ADDED_TO_REGION)) {
+		regionMaker.detachReusedIfCondition(block);
+		// A shared acyclic tail of mutually exclusive switch cases can be emitted in
+		// each case. Otherwise ADDED_TO_REGION still prevents revisiting an IF.
+		boolean sharedSwitchCondition = regionMaker.isSafeSwitchSharedBlock(block);
+		if (block.contains(AFlag.ADDED_TO_REGION)
+				&& !sharedSwitchCondition
+				&& !(CoroutineMethodUtils.hasKnownContinuationParameter(mth)
+						&& mth.getLoopsCount() == 0
+						&& !mth.getExceptionHandlers().iterator().hasNext())) {
 			// block already included in other 'if' region
 			return ifnode.getThenBlock();
 		}
@@ -125,9 +138,20 @@ final class IfRegionMaker {
 		if (currentIf == null) {
 			return null;
 		}
-		IfInfo mergedIf = block.contains(AType.STANDALONE_IF_REGION)
-				? null
-				: mergeNestedIfNodes(currentIf);
+		List<BlockNode> reusedConditions = sharedSwitchCondition || CoroutineMethodUtils.hasKnownContinuationParameter(mth)
+				&& mth.getLoopsCount() == 0
+				&& !mth.getExceptionHandlers().iterator().hasNext()
+				? regionMaker.getReusedMergedIfConditions(block)
+				: List.of();
+		reusedConditions.forEach(b -> b.remove(AFlag.ADDED_TO_REGION));
+		IfInfo mergedIf;
+		try {
+			mergedIf = block.contains(AType.STANDALONE_IF_REGION)
+					? null
+					: mergeNestedIfNodes(currentIf);
+		} finally {
+			reusedConditions.forEach(b -> b.add(AFlag.ADDED_TO_REGION));
+		}
 		if (mergedIf != null) {
 			currentIf = mergedIf;
 		} else if (!block.contains(AFlag.DONT_INVERT)) {
@@ -153,7 +177,7 @@ final class IfRegionMaker {
 		confirmMerge(currentIf);
 		IfRegion ifRegion = new IfRegion(currentRegion);
 		ifRegion.updateCondition(currentIf);
-		regionMaker.registerIfRegion(block, ifRegion);
+		regionMaker.registerIfRegion(ifRegion);
 		currentRegion.getSubBlocks().add(ifRegion);
 
 		BlockNode outBlock = currentIf.getOutBlock();
@@ -171,19 +195,41 @@ final class IfRegionMaker {
 			// empty then block, not normal, but maybe correct
 			ifRegion.setThenRegion(new Region(ifRegion));
 		} else {
-			IContainer edgeBranch = makeDirectEdgeBranch(ifRegion, currentIf, thenBlock);
+			IContainer edgeBranch = makeComparedReturnBranch(ifRegion, block, currentIf, thenBlock, stack);
+			if (edgeBranch == null) {
+				edgeBranch = makeInheritedReturnBranch(ifRegion, block, thenBlock, stack);
+			}
+			if (edgeBranch == null) {
+				edgeBranch = makeLoopContinueBranch(ifRegion, block, currentIf, thenBlock, stack);
+			}
+			if (edgeBranch == null) {
+				edgeBranch = makeDirectEdgeBranch(ifRegion, currentIf, thenBlock);
+			}
 			ifRegion.setThenRegion(edgeBranch != null
 					? edgeBranch
 					: makeBranchRegion(currentIf, thenBlock, stack));
 		}
 		BlockNode elseBlock = currentIf.getElseBlock();
-		if (elseBlock == null || stack.containsExit(elseBlock)) {
+		if (elseBlock == null) {
 			ifRegion.setElseRegion(null);
 		} else {
-			IContainer edgeBranch = makeDirectEdgeBranch(ifRegion, currentIf, elseBlock);
-			ifRegion.setElseRegion(edgeBranch != null
-					? edgeBranch
-					: makeBranchRegion(currentIf, elseBlock, stack));
+			// An inherited region exit can still carry this branch's explicit loop break.
+			// Preserve the edge instruction before omitting an otherwise empty exit branch.
+			IContainer edgeBranch = makeComparedReturnBranch(ifRegion, block, currentIf, elseBlock, stack);
+			if (edgeBranch == null) {
+				edgeBranch = makeInheritedReturnBranch(ifRegion, block, elseBlock, stack);
+			}
+			if (edgeBranch == null) {
+				edgeBranch = makeLoopContinueBranch(ifRegion, block, currentIf, elseBlock, stack);
+			}
+			if (edgeBranch == null) {
+				edgeBranch = makeDirectEdgeBranch(ifRegion, currentIf, elseBlock);
+			}
+			if (edgeBranch != null) {
+				ifRegion.setElseRegion(edgeBranch);
+			} else {
+				ifRegion.setElseRegion(stack.containsExit(elseBlock) ? null : makeBranchRegion(currentIf, elseBlock, stack));
+			}
 		}
 
 		// insert edge insns in new 'else' branch
@@ -224,6 +270,121 @@ final class IfRegionMaker {
 		}
 	}
 
+	private @Nullable IContainer makeComparedReturnBranch(
+			IfRegion ifRegion, BlockNode ifBlock, IfInfo currentIf, BlockNode branchBlock, RegionStack stack) {
+		// A shared return can be an inherited exit of the surrounding try/catch region.
+		// In that case makeRegion stops before the return and leaves an empty if branch.
+		if (!stack.containsExit(branchBlock)
+				|| !ifBlock.getSuccessors().contains(branchBlock)
+				|| branchBlock.getInstructions().size() != 1
+				|| !returnsComparedValue(currentIf, branchBlock)) {
+			return null;
+		}
+		Region returnRegion = new Region(ifRegion);
+		InsnNode returnCopy = branchBlock.getInstructions().get(0).copy();
+		EdgeInsnAttr.addEdgeInsn(ifBlock, branchBlock, returnCopy);
+		returnRegion.add(new InsnContainer(List.of(returnCopy)));
+		return returnRegion;
+	}
+
+	private @Nullable IContainer makeInheritedReturnBranch(
+			IfRegion ifRegion, BlockNode ifBlock, BlockNode branchBlock, RegionStack stack) {
+		if (!ifBlock.getSuccessors().contains(branchBlock)
+				|| !isSharedLoopReturnPath(ifBlock, branchBlock)) {
+			return null;
+		}
+		BlockNode block = branchBlock;
+		Set<BlockNode> visited = new HashSet<>();
+		while (visited.size() < 8 && visited.add(block)) {
+			if (stack.containsExit(block)) {
+				if (block.getInstructions().size() != 1
+						|| block.getInstructions().get(0).getType() != InsnType.RETURN
+						|| block.contains(AType.PHI_LIST)) {
+					return null;
+				}
+				InsnNode returnInsn = block.getInstructions().get(0);
+				if (returnInsn.getArgsCount() > 1
+						|| returnInsn.getArgsCount() == 1
+								&& !returnInsn.getArg(0).isRegister()
+								&& !returnInsn.getArg(0).isLiteral()) {
+					return null;
+				}
+				InsnNode returnCopy = returnInsn.copy();
+				EdgeInsnAttr.addEdgeInsn(ifBlock, branchBlock, returnCopy);
+				Region returnRegion = new Region(ifRegion);
+				returnRegion.add(new InsnContainer(List.of(returnCopy)));
+				return returnRegion;
+			}
+			if (!block.getInstructions().isEmpty()
+					|| block.contains(AFlag.LOOP_START)
+					|| block.contains(AFlag.LOOP_END)) {
+				return null;
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return null;
+			}
+			block = successors.get(0);
+		}
+		return null;
+	}
+
+	private @Nullable IContainer makeLoopContinueBranch(
+			IfRegion ifRegion, BlockNode ifBlock, IfInfo currentIf, BlockNode branchBlock, RegionStack stack) {
+		// Only exception-region exits can hide a branch's remaining loop body here. In an
+		// ordinary loop, an empty path to the increment is just an implicit fallthrough.
+		if (mth.isNoExceptionHandlers()
+				|| !ifBlock.getSuccessors().contains(branchBlock)
+				|| branchBlock == currentIf.getOutBlock()
+				|| !branchBlock.getInstructions().isEmpty()) {
+			return null;
+		}
+		List<LoopInfo> sourceLoops = mth.getAllLoopsForBlock(ifBlock);
+		LoopInfo innermost = null;
+		for (LoopInfo sourceLoop : sourceLoops) {
+			if (innermost == null || sourceLoop.hasParent(innermost)) {
+				innermost = sourceLoop;
+			}
+		}
+		for (LoopInfo loop : sourceLoops) {
+			BlockNode loopEnd = loop.getEnd();
+			if (ifBlock == loop.getStart()
+					|| !stack.containsExit(loop.getStart())
+					|| !ListUtils.isSingleElement(loopEnd.getSuccessors(), loop.getStart())
+					|| loopEnd.getInstructions().size() != 1
+					|| loopEnd.getInstructions().get(0).getType() != InsnType.ARITH
+					|| !isEmptyPathToLoopEnd(branchBlock, loopEnd)) {
+				continue;
+			}
+			InsnNode continueInsn = new InsnNode(InsnType.CONTINUE, 0);
+			if (loop != innermost) {
+				if (innermost == null || !innermost.hasParent(loop)) {
+					continue;
+				}
+				LoopLabelAttr labelAttr = new LoopLabelAttr(loop);
+				continueInsn.addAttr(labelAttr);
+				loop.getStart().addAttr(labelAttr);
+			}
+			EdgeInsnAttr.addEdgeInsn(ifBlock, branchBlock, continueInsn);
+			Region continueRegion = new Region(ifRegion);
+			continueRegion.add(new InsnContainer(List.of(continueInsn)));
+			return continueRegion;
+		}
+		return null;
+	}
+
+	private static boolean isEmptyPathToLoopEnd(BlockNode branchBlock, BlockNode loopEnd) {
+		Set<BlockNode> visited = new HashSet<>();
+		BlockNode current = branchBlock;
+		while (current != loopEnd && visited.add(current)) {
+			if (!current.getInstructions().isEmpty() || current.getSuccessors().size() != 1) {
+				return false;
+			}
+			current = current.getSuccessors().get(0);
+		}
+		return current == loopEnd;
+	}
+
 	private boolean isDirectLoopContinueBranch(IfInfo currentIf, BlockNode branchBlock) {
 		if (!branchBlock.contains(AFlag.SYNTHETIC)
 				|| !branchBlock.getInstructions().isEmpty()
@@ -258,7 +419,7 @@ final class IfRegionMaker {
 		for (EdgeInsnAttr edgeInsnAttr : branchBlock.getAll(AType.EDGE_INSN)) {
 			if (edgeInsnAttr.getEnd() == branchBlock
 					&& currentIf.getMergedBlocks().contains(followEmptyPath(edgeInsnAttr.getStart(), true))
-					&& edgeInsnAttr.getInsn().getType() == InsnType.BREAK) {
+					&& isDirectAbruptEdgeInsn(edgeInsnAttr.getInsn())) {
 				instructions.add(edgeInsnAttr.getInsn());
 			}
 		}
@@ -268,6 +429,12 @@ final class IfRegionMaker {
 		Region edgeRegion = new Region(ifRegion);
 		edgeRegion.add(new InsnContainer(instructions));
 		return edgeRegion;
+	}
+
+	private static boolean isDirectAbruptEdgeInsn(InsnNode insn) {
+		return insn.getType() == InsnType.BREAK
+				|| insn.getType() == InsnType.CONTINUE
+				|| insn.getType() == InsnType.THROW;
 	}
 
 	private @Nullable BlockNode processSharedTerminalDiscriminator(
@@ -591,9 +758,17 @@ final class IfRegionMaker {
 			info.setOutBlock(null);
 			return info;
 		}
+		IfInfo inheritedSuspendJoin = restructureInheritedCoroutineSuspendJoin(info, thenBlock, elseBlock);
+		if (inheritedSuspendJoin != null) {
+			return inheritedSuspendJoin;
+		}
 		IfInfo coroutineSuspendIf = restructureCoroutineSuspendReturn(info, thenBlock, elseBlock);
 		if (coroutineSuspendIf != null) {
 			return coroutineSuspendIf;
+		}
+		IfInfo computedLoopGuard = restructureComputedCoroutineLoopGuard(block, info, thenBlock, elseBlock);
+		if (computedLoopGuard != null) {
+			return computedLoopGuard;
 		}
 		IfInfo sharedGuardFailure = restructureSharedGuardFailure(info, thenBlock, elseBlock);
 		if (sharedGuardFailure != null) {
@@ -602,6 +777,18 @@ final class IfRegionMaker {
 		IfInfo sharedTerminalDiscriminator = restructureSharedTerminalDiscriminator(info, thenBlock, elseBlock);
 		if (sharedTerminalDiscriminator != null) {
 			return sharedTerminalDiscriminator;
+		}
+		BlockNode continuationSetupOut = findCoroutineContinuationSetupOut(block, thenBlock, elseBlock);
+		if (continuationSetupOut != null) {
+			IfInfo result = new IfInfo(info, thenBlock, elseBlock);
+			result.setOutBlock(continuationSetupOut);
+			return result;
+		}
+		BlockNode retryResultOut = findCoroutineRetryResultOut(block, thenBlock, elseBlock);
+		if (retryResultOut != null) {
+			IfInfo result = new IfInfo(info, thenBlock, elseBlock);
+			result.setOutBlock(retryResultOut);
+			return result;
 		}
 		BlockNode structuralOut = findOutBlock(mth, thenBlock, elseBlock);
 		BlockNode earlierResumeJoin = findEarlierDirectCoroutineResumeJoin(
@@ -670,6 +857,10 @@ final class IfRegionMaker {
 		if (directScopeExit != null) {
 			return directScopeExit;
 		}
+		IfInfo inheritedResumeExit = restructureInheritedCoroutineResumeExit(block, info, thenBlock, elseBlock);
+		if (inheritedResumeExit != null) {
+			return inheritedResumeExit;
+		}
 		IfInfo directTerminalIf = !preserveDirectBranchJoin
 				&& !preserveCoroutineResumeJoin
 				&& (isCoroutineMethod()
@@ -719,6 +910,12 @@ final class IfRegionMaker {
 		IfInfo loopContinueIf = restructureSyntheticLoopContinuation(info, thenBlock, elseBlock);
 		if (loopContinueIf != null) {
 			return loopContinueIf;
+		}
+		if (isSharedLoopReturnPath(block, thenBlock) || isSharedLoopReturnPath(block, elseBlock)) {
+			IfInfo sharedReturnIf = restructureSharedReturn(info, thenBlock, elseBlock);
+			if (sharedReturnIf != null) {
+				return sharedReturnIf;
+			}
 		}
 		if (badThen != badElse) {
 			IfInfo scopeExitIf = restructureDeepDirectScopeExit(info, thenBlock, elseBlock);
@@ -791,6 +988,68 @@ final class IfRegionMaker {
 			info.setOutBlock(null);
 		}
 		return info;
+	}
+
+	private @Nullable BlockNode findCoroutineRetryResultOut(
+			BlockNode ifBlock, BlockNode thenBlock, BlockNode elseBlock) {
+		if (!isCoroutineLabelIf(ifBlock)) {
+			return null;
+		}
+		CoroutineRetryResultJoinAttr attr = mth.get(AType.COROUTINE_RETRY_RESULT_JOIN);
+		if (attr == null) {
+			return null;
+		}
+		BlockNode resultJoin = attr.getResultJoin();
+		return isPathExists(thenBlock, resultJoin) && isPathExists(elseBlock, resultJoin)
+				? resultJoin
+				: null;
+	}
+
+	/**
+	 * A recovered coroutine loop can compute its continuation predicate through a small value-select
+	 * subgraph. Both destinations of the final guard can then have external predecessors: the taken
+	 * edge returns to the shared suspend point and the fall-through enters a shared action. Generic
+	 * IF ownership rejects both branches and drops the guard.
+	 *
+	 * The standalone marker is attached only after CFG recovery proves this exact shape. At region
+	 * time, additionally require one inherited loop boundary, one externally shared fall-through,
+	 * and convergence from that fall-through back to the boundary. This makes the taken edge an
+	 * explicit source-level continue while leaving the shared action owned by its enclosing region.
+	 */
+	private @Nullable IfInfo restructureComputedCoroutineLoopGuard(
+			BlockNode block, IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		if (!block.contains(AType.STANDALONE_IF_REGION)
+				|| info.getMergedBlocks().size() != 1
+				|| !(isCoroutineMethod() || isSuspendLambdaMethod())
+				|| thenBlock == null
+				|| elseBlock == null) {
+			return null;
+		}
+		RegionStack stack = regionMaker.getStack();
+		boolean thenExit = stack.containsExit(thenBlock);
+		boolean elseExit = stack.containsExit(elseBlock);
+		if (thenExit == elseExit) {
+			return null;
+		}
+		BlockNode continuation = thenExit ? thenBlock : elseBlock;
+		BlockNode sharedAction = thenExit ? elseBlock : thenBlock;
+		boolean externalPred = sharedAction.getPredecessors().stream()
+				.anyMatch(pred -> !info.getMergedBlocks().contains(pred));
+		boolean reachesContinuation = isPathExists(sharedAction, continuation);
+		if (!externalPred || !reachesContinuation) {
+			return null;
+		}
+		List<LoopInfo> guardLoops = mth.getAllLoopsForBlock(block);
+		if (guardLoops.isEmpty()
+				|| !guardLoops.equals(mth.getAllLoopsForBlock(continuation))
+				|| !guardLoops.equals(mth.getAllLoopsForBlock(sharedAction))) {
+			return null;
+		}
+		IfInfo condition = thenExit ? info : IfInfo.invert(info);
+		EdgeInsnAttr.addEdgeInsn(block, continuation, new InsnNode(InsnType.CONTINUE, 0));
+		IfInfo result = new IfInfo(condition, continuation, null);
+		result.setOutBlock(sharedAction);
+		return result;
 	}
 
 	/**
@@ -910,6 +1169,9 @@ final class IfRegionMaker {
 			}
 		}
 		if (inheritedExits.isEmpty()
+				// A move-only carrier flowing directly to an inherited exit is an action, not
+				// the next guard. Selecting it as out duplicates the later shared tail.
+				|| isLinearMoveCarrierToInheritedExit(failure, inheritedExits)
 				|| !allPathsReachGuardBoundary(
 						guardedPath, failure, inheritedExits, new HashSet<>(), new HashMap<>())) {
 			return null;
@@ -918,6 +1180,13 @@ final class IfRegionMaker {
 		IfInfo result = new IfInfo(normalized, guardedPath, null);
 		result.setOutBlock(failure);
 		return result;
+	}
+
+	static boolean isLinearMoveCarrierToInheritedExit(BlockNode block, Set<BlockNode> inheritedExits) {
+		return block.getCleanSuccessors().size() == 1
+				&& inheritedExits.contains(block.getCleanSuccessors().get(0))
+				&& !block.getInstructions().isEmpty()
+				&& block.getInstructions().stream().allMatch(insn -> insn.getType() == InsnType.MOVE);
 	}
 
 	/**
@@ -1087,6 +1356,114 @@ final class IfRegionMaker {
 				&& !((List<?>) lines.getValue()).isEmpty();
 	}
 
+	private @Nullable IfInfo restructureInheritedCoroutineResumeExit(
+			BlockNode ifBlock, IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		FieldInfo labelField = findCoroutineLabelField(BlockUtils.getLastInsn(ifBlock));
+		if (!CoroutineMethodUtils.hasKnownContinuationParameter(mth)
+				|| labelField == null
+				|| info.getOutBlock() == null
+				|| mth.getLoopsCount() != 0) {
+			return null;
+		}
+		for (BlockNode exit : regionMaker.getStack().getExits()) {
+			if (exit == info.getOutBlock()
+					|| !isCoroutineResumeJoin(exit)
+						&& !isSingleFieldCoroutineResumeJoin(exit, labelField)) {
+				continue;
+			}
+			boolean thenReachesExit = isPathExists(thenBlock, exit);
+			boolean elseReachesExit = isPathExists(elseBlock, exit);
+			if (thenReachesExit == elseReachesExit) {
+				continue;
+			}
+			BlockNode terminalBranch = thenReachesExit ? elseBlock : thenBlock;
+			if (!isAcyclicTerminalSubgraph(terminalBranch, 64)) {
+				continue;
+			}
+			IfInfo result = new IfInfo(info, thenBlock, elseBlock);
+			result.setOutBlock(exit);
+			return result;
+		}
+		return null;
+	}
+
+	private static boolean isCoroutineResumeJoin(BlockNode block) {
+		PhiListAttr phiList = block.get(AType.PHI_LIST);
+		return phiList != null
+				&& !phiList.getList().isEmpty()
+				&& block.getPredecessors().stream().anyMatch(IfRegionMaker::isCoroutineResumeRestoreBlock);
+	}
+
+	private boolean isKnownCoroutineResumeJoin(BlockNode block) {
+		if (isCoroutineResumeJoin(block)) {
+			return true;
+		}
+		FieldInfo labelField = getCoroutineLabelField();
+		return labelField != null && isSingleFieldCoroutineResumeJoin(block, labelField);
+	}
+
+	private @Nullable FieldInfo getCoroutineLabelField() {
+		if (!coroutineLabelFieldResolved) {
+			coroutineLabelFieldResolved = true;
+			for (BlockNode block : mth.getBasicBlocks()) {
+				FieldInfo field = findCoroutineLabelField(BlockUtils.getLastInsn(block));
+				if (field != null) {
+					coroutineLabelField = field;
+					break;
+				}
+			}
+		}
+		return coroutineLabelField;
+	}
+
+	private static boolean isSingleFieldCoroutineResumeJoin(BlockNode block, FieldInfo labelField) {
+		PhiListAttr phiList = block.get(AType.PHI_LIST);
+		if (phiList == null || phiList.getList().isEmpty() || block.getPredecessors().size() != 2) {
+			return false;
+		}
+		for (BlockNode pred : block.getPredecessors()) {
+			if (pred.getCleanSuccessors().size() != 1) {
+				continue;
+			}
+			boolean hasRestore = false;
+			for (InsnNode insn : pred.getInstructions()) {
+				if (insn instanceof IndexInsnNode && insn.getType() == InsnType.IGET
+						&& ((IndexInsnNode) insn).getIndex() instanceof FieldInfo) {
+					FieldInfo field = (FieldInfo) ((IndexInsnNode) insn).getIndex();
+					if (field.getDeclClass().equals(labelField.getDeclClass()) && field.getType().isObject()) {
+						hasRestore = true;
+					}
+				} else if (hasRestore && insn instanceof InvokeNode
+						&& insn.getResult() == null && insn.getArgsCount() == 1) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private @Nullable IfInfo restructureInheritedCoroutineSuspendJoin(
+			IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
+		if (!CoroutineMethodUtils.hasKnownContinuationParameter(mth) || mth.getLoopsCount() != 0) {
+			return null;
+		}
+		for (BlockNode exit : regionMaker.getStack().getExits()) {
+			if (!isKnownCoroutineResumeJoin(exit)) {
+				continue;
+			}
+			boolean thenContinues = isLinearReadOnlyPath(thenBlock, exit)
+					&& isBranchReturn(elseBlock) && returnsComparedValue(info, elseBlock);
+			boolean elseContinues = isLinearReadOnlyPath(elseBlock, exit)
+					&& isBranchReturn(thenBlock) && returnsComparedValue(info, thenBlock);
+			if (thenContinues || elseContinues) {
+				IfInfo result = new IfInfo(info, thenBlock, elseBlock);
+				result.setOutBlock(exit);
+				return result;
+			}
+		}
+		return null;
+	}
+
 	private static @Nullable IfInfo restructureAcyclicTerminalBranch(
 			IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
 		boolean thenTerminal = isAcyclicTerminalSubgraph(thenBlock);
@@ -1117,29 +1494,41 @@ final class IfRegionMaker {
 				|| isDirectCoroutineResumeJoin(currentOut, thenBlock, elseBlock)) {
 			return null;
 		}
-		boolean currentOutIsCommonPostDominator = isCommonPostDominator(mth, thenBlock, elseBlock, currentOut);
+		// A branch start can be a local structural join even when an early return bypasses it.
+		// Keep that weaker notion for the existing out block; an unprotected replacement must
+		// pass the stricter check so a bypassed guard is not silently omitted.
+		boolean preserveCurrentStructuralJoin = isCommonPostDominator(mth, thenBlock, elseBlock, currentOut);
 		BlockNode best = null;
 		for (BlockNode candidate : mth.getBasicBlocks()) {
-			if (candidate == currentOut
-					|| candidate.getPredecessors().size() < 2
-					|| BlockUtils.isExceptionHandlerPath(candidate)
-					|| isAcyclicTerminalSubgraph(candidate)
-					|| isPathExists(currentOut, candidate)
-					|| !isPathExists(thenBlock, candidate)
-					|| !isPathExists(elseBlock, candidate)) {
+			if (!isSharedContinuationCandidate(currentOut, thenBlock, elseBlock, candidate)) {
 				continue;
 			}
 			if (best == null || isPathExists(candidate, best)) {
 				best = candidate;
 			}
 		}
-		// Don't move an already valid structural join back to a block bypassed by some branch paths.
-		if (currentOutIsCommonPostDominator
+		// Protected try/finally paths may use an early return that bypasses the local join.
+		// Preserve the local-join rule there to avoid duplicating the protected tail.
+		if (preserveCurrentStructuralJoin
 				&& best != null
-				&& !isCommonPostDominator(mth, thenBlock, elseBlock, best)) {
+				&& !(mth.isNoExceptionHandlers()
+						? isStrictCommonPostDominator(mth, thenBlock, elseBlock, best)
+						: isCommonPostDominator(mth, thenBlock, elseBlock, best))) {
 			return null;
 		}
 		return best;
+	}
+
+	static boolean isSharedContinuationCandidate(
+			BlockNode currentOut, BlockNode thenBlock, BlockNode elseBlock, BlockNode candidate) {
+		return candidate != currentOut
+				&& !candidate.contains(AFlag.MTH_EXIT_BLOCK)
+				&& candidate.getPredecessors().size() >= 2
+				&& !BlockUtils.isExceptionHandlerPath(candidate)
+				&& !isAcyclicTerminalSubgraph(candidate)
+				&& !isPathExists(currentOut, candidate)
+				&& isPathExists(thenBlock, candidate)
+				&& isPathExists(elseBlock, candidate);
 	}
 
 	/**
@@ -1240,7 +1629,11 @@ final class IfRegionMaker {
 	}
 
 	private boolean isComparedValueReturn(IfInfo info, BlockNode block) {
-		if (!isCoroutineMethod() || !block.isReturnBlock()) {
+		return isCoroutineMethod() && returnsComparedValue(info, block);
+	}
+
+	private static boolean returnsComparedValue(IfInfo info, BlockNode block) {
+		if (!block.isReturnBlock()) {
 			return false;
 		}
 		InsnNode returnInsn = BlockUtils.getLastInsn(block);
@@ -1267,6 +1660,301 @@ final class IfRegionMaker {
 
 	private boolean isCoroutineMethod() {
 		return CoroutineMethodUtils.hasContinuationParameter(mth);
+	}
+
+	/**
+	 * Kotlin suspend functions start by reusing a generated continuation when its high label bit is
+	 * set, or by constructing a fresh continuation otherwise. Both setup paths join before reading
+	 * the continuation result and dispatch label. In a method containing a source loop, a duplicated
+	 * resume tail can also be reachable from both setup branches and look like a better region exit.
+	 * Keep the setup IF bounded by the first shared state-dispatch block. A normalized state dispatch
+	 * can itself be a loop header, so the bounded setup-only subgraph is the safety condition here.
+	 */
+	private @Nullable BlockNode findCoroutineContinuationSetupOut(
+			BlockNode ifBlock, BlockNode thenBlock, BlockNode elseBlock) {
+		if (!CoroutineMethodUtils.hasKnownContinuationParameter(mth)) {
+			return null;
+		}
+		ArgType continuationType = findInstanceOfType(BlockUtils.getLastInsn(ifBlock));
+		FieldInfo conditionLabelField = findCoroutineLabelField(BlockUtils.getLastInsn(ifBlock));
+		boolean instanceTypeCondition = continuationType != null;
+		if (continuationType == null && conditionLabelField != null) {
+			continuationType = conditionLabelField.getDeclClass().getType();
+		}
+		if (continuationType == null || !continuationType.isObject()) {
+			return null;
+		}
+		BlockNode commonOut = findContinuationStateJoin(thenBlock, elseBlock, continuationType);
+		if (commonOut == null
+				|| commonOut.contains(AFlag.LOOP_END)
+				|| BlockUtils.isExceptionHandlerPath(commonOut)) {
+			return null;
+		}
+		Set<FieldInfo> joinFields = collectContinuationJoinFields(commonOut, continuationType);
+		FieldInfo labelField = joinFields.stream()
+				.filter(field -> field.getType().equals(ArgType.INT))
+				.findFirst()
+				.orElse(null);
+		boolean hasResultField = joinFields.stream().anyMatch(field -> field.getType().isObject());
+		if (labelField == null || !hasResultField) {
+			return null;
+		}
+
+		Set<BlockNode> setupBlocks = collectBlocksBeforeJoin(thenBlock, elseBlock, commonOut, 16);
+		if (setupBlocks == null) {
+			return null;
+		}
+		boolean hasCast = false;
+		boolean hasConstructor = false;
+		boolean hasLabelPut = false;
+		for (BlockNode setupBlock : setupBlocks) {
+			for (InsnNode insn : setupBlock.getInstructions()) {
+				Boolean invalid = insn.visitInsns(inner -> isContinuationSetupInsn(inner) ? null : Boolean.TRUE);
+				if (!isContinuationSetupInsn(insn) || invalid != null) {
+					return null;
+				}
+				if (insn instanceof IndexInsnNode
+						&& insn.getType() == InsnType.CHECK_CAST
+						&& continuationType.equals(((IndexInsnNode) insn).getIndex())) {
+					hasCast = true;
+				}
+				if (insn instanceof ConstructorInsn
+						&& ((ConstructorInsn) insn).isNewInstance()) {
+					hasConstructor = true;
+				}
+				if (insn instanceof IndexInsnNode
+						&& insn.getType() == InsnType.IPUT
+						&& labelField.equals(((IndexInsnNode) insn).getIndex())) {
+					hasLabelPut = true;
+				}
+			}
+		}
+		boolean conditionMatchesLabel = conditionLabelField == null || conditionLabelField.equals(labelField);
+		return hasConstructor
+				&& hasLabelPut
+				&& conditionMatchesLabel
+				&& (!instanceTypeCondition || hasCast)
+						? commonOut
+						: null;
+	}
+
+	private @Nullable BlockNode findContinuationStateJoin(
+			BlockNode thenBlock, BlockNode elseBlock, ArgType continuationType) {
+		List<BlockNode> candidates = new ArrayList<>();
+		for (BlockNode candidate : mth.getBasicBlocks()) {
+			if (candidate == thenBlock
+					|| candidate == elseBlock
+					|| candidate == mth.getExitBlock()
+					|| candidate.getPredecessors().size() < 2
+					|| !isPathExists(thenBlock, candidate)
+					|| !isPathExists(elseBlock, candidate)
+					|| collectContinuationJoinFields(candidate, continuationType).size() < 2) {
+				continue;
+			}
+			candidates.add(candidate);
+		}
+		for (BlockNode candidate : candidates) {
+			boolean first = true;
+			for (BlockNode other : candidates) {
+				if (candidate != other && !isPathExists(candidate, other)) {
+					first = false;
+					break;
+				}
+			}
+			if (first) {
+				return candidate;
+			}
+		}
+		return null;
+	}
+
+	private static @Nullable FieldInfo findCoroutineLabelField(@Nullable InsnNode conditionInsn) {
+		if (conditionInsn == null) {
+			return null;
+		}
+		for (InsnArg arg : conditionInsn.getArguments()) {
+			FieldInfo field = findCoroutineLabelField(arg, new HashSet<>(), 0);
+			if (field != null) {
+				return field;
+			}
+		}
+		return null;
+	}
+
+	private static @Nullable FieldInfo findCoroutineLabelField(
+			InsnArg arg, Set<SSAVar> visited, int depth) {
+		if (depth > 8) {
+			return null;
+		}
+		InsnNode assignInsn;
+		if (arg instanceof InsnWrapArg) {
+			assignInsn = ((InsnWrapArg) arg).getWrapInsn();
+		} else if (arg instanceof RegisterArg) {
+			SSAVar ssaVar = ((RegisterArg) arg).getSVar();
+			if (ssaVar == null || !visited.add(ssaVar)) {
+				return null;
+			}
+			assignInsn = ssaVar.getAssignInsn();
+		} else {
+			return null;
+		}
+		if (assignInsn instanceof IndexInsnNode
+				&& assignInsn.getType() == InsnType.IGET
+				&& ((IndexInsnNode) assignInsn).getIndex() instanceof FieldInfo) {
+			FieldInfo field = (FieldInfo) ((IndexInsnNode) assignInsn).getIndex();
+			return field.getType().equals(ArgType.INT) ? field : null;
+		}
+		if (assignInsn == null) {
+			return null;
+		}
+		switch (assignInsn.getType()) {
+			case ARITH:
+			case MOVE:
+			case CAST:
+			case CHECK_CAST:
+			case NEG:
+			case NOT:
+				for (InsnArg assignArg : assignInsn.getArguments()) {
+					FieldInfo field = findCoroutineLabelField(assignArg, visited, depth + 1);
+					if (field != null) {
+						return field;
+					}
+				}
+				break;
+			default:
+				break;
+		}
+		return null;
+	}
+
+	private static @Nullable ArgType findInstanceOfType(@Nullable InsnNode conditionInsn) {
+		if (conditionInsn == null) {
+			return null;
+		}
+		for (InsnArg arg : conditionInsn.getArguments()) {
+			ArgType type = findInstanceOfType(arg, new HashSet<>(), 0);
+			if (type != null) {
+				return type;
+			}
+		}
+		return null;
+	}
+
+	private static @Nullable ArgType findInstanceOfType(InsnArg arg, Set<SSAVar> visited, int depth) {
+		if (depth > 6) {
+			return null;
+		}
+		InsnNode assignInsn;
+		if (arg instanceof InsnWrapArg) {
+			assignInsn = ((InsnWrapArg) arg).getWrapInsn();
+		} else if (arg instanceof RegisterArg) {
+			SSAVar ssaVar = ((RegisterArg) arg).getSVar();
+			if (ssaVar == null || !visited.add(ssaVar)) {
+				return null;
+			}
+			assignInsn = ssaVar.getAssignInsn();
+		} else {
+			return null;
+		}
+		if (assignInsn instanceof IndexInsnNode
+				&& assignInsn.getType() == InsnType.INSTANCE_OF
+				&& ((IndexInsnNode) assignInsn).getIndex() instanceof ArgType) {
+			return (ArgType) ((IndexInsnNode) assignInsn).getIndex();
+		}
+		if (assignInsn == null) {
+			return null;
+		}
+		switch (assignInsn.getType()) {
+			case MOVE:
+			case NOT:
+			case CAST:
+			case CHECK_CAST:
+				for (InsnArg assignArg : assignInsn.getArguments()) {
+					ArgType type = findInstanceOfType(assignArg, visited, depth + 1);
+					if (type != null) {
+						return type;
+					}
+				}
+				break;
+			default:
+				break;
+		}
+		return null;
+	}
+
+	/** The result and label reads can occupy successive blocks after the two setup paths join. */
+	static Set<FieldInfo> collectContinuationJoinFields(BlockNode block, ArgType continuationType) {
+		Set<FieldInfo> fields = new HashSet<>();
+		BlockNode current = block;
+		for (int i = 0; i < 3; i++) {
+			for (InsnNode insn : current.getInstructions()) {
+				insn.visitInsns(inner -> {
+					if (inner instanceof IndexInsnNode
+							&& inner.getType() == InsnType.IGET
+							&& ((IndexInsnNode) inner).getIndex() instanceof FieldInfo) {
+						FieldInfo field = (FieldInfo) ((IndexInsnNode) inner).getIndex();
+						if (continuationType.equals(field.getDeclClass().getType())) {
+							fields.add(field);
+						}
+					}
+					return null;
+				});
+			}
+			if (current.getCleanSuccessors().size() != 1) {
+				break;
+			}
+			BlockNode next = current.getCleanSuccessors().get(0);
+			if (next.getPredecessors().size() != 1
+					|| next.contains(AFlag.LOOP_START)
+					|| BlockUtils.isExceptionHandlerPath(next)) {
+				break;
+			}
+			current = next;
+		}
+		return fields;
+	}
+
+	private static @Nullable Set<BlockNode> collectBlocksBeforeJoin(
+			BlockNode thenBlock, BlockNode elseBlock, BlockNode join, int maxBlocks) {
+		Set<BlockNode> blocks = new HashSet<>();
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		queue.add(thenBlock);
+		queue.add(elseBlock);
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (block == join || !blocks.add(block)) {
+				continue;
+			}
+			if (blocks.size() > maxBlocks
+					|| block.contains(AFlag.LOOP_START)
+					|| block.contains(AFlag.LOOP_END)
+					|| BlockUtils.isExceptionHandlerPath(block)) {
+				return null;
+			}
+			queue.addAll(block.getCleanSuccessors());
+		}
+		return blocks;
+	}
+
+	private static boolean isContinuationSetupInsn(InsnNode insn) {
+		if (insn.contains(AFlag.DONT_GENERATE)) {
+			return true;
+		}
+		switch (insn.getType()) {
+			case IF:
+			case CONST:
+			case ARITH:
+			case MOVE:
+			case CAST:
+			case CHECK_CAST:
+			case IGET:
+			case IPUT:
+			case CONSTRUCTOR:
+			case NEW_INSTANCE:
+				return true;
+			default:
+				return false;
+		}
 	}
 
 	private @Nullable BlockNode findLoopContinueSharedOut(
@@ -1617,12 +2305,16 @@ final class IfRegionMaker {
 	private @Nullable BlockNode findEarlierCoroutineLoopJoin(
 			BlockNode ifBlock, @Nullable BlockNode currentOut, BlockNode thenBlock, BlockNode elseBlock) {
 		CoroutineLoopPreHeaderAttr preHeaderAttr = mth.get(AType.COROUTINE_LOOP_PRE_HEADER);
-		if (preHeaderAttr == null
-				|| !isCoroutineLabelIf(ifBlock)
-						&& !mth.contains(AType.TRY_PROTECTED_ITERATOR_BOOLEAN_ACTION)) {
+		if (!isCoroutineLabelIf(ifBlock)
+				&& !mth.contains(AType.TRY_PROTECTED_ITERATOR_BOOLEAN_ACTION)) {
 			return null;
 		}
-		BlockNode candidate = preHeaderAttr.getBlock();
+		BlockNode candidate = preHeaderAttr != null
+				? preHeaderAttr.getBlock()
+				: findStructuralCoroutineLoopPreHeader(currentOut, thenBlock, elseBlock);
+		if (candidate == null) {
+			return null;
+		}
 		PhiListAttr phiList = candidate.get(AType.PHI_LIST);
 		if (phiList == null
 				|| phiList.getList().isEmpty()
@@ -1639,28 +2331,92 @@ final class IfRegionMaker {
 		return loopStart.contains(AFlag.LOOP_START) ? candidate : null;
 	}
 
-	private static boolean isCoroutineLabelIf(BlockNode block) {
+	private @Nullable BlockNode findStructuralCoroutineLoopPreHeader(
+			@Nullable BlockNode currentOut, BlockNode thenBlock, BlockNode elseBlock) {
+		if (!CoroutineMethodUtils.hasKnownContinuationParameter(mth)) {
+			return null;
+		}
+		BlockNode match = null;
+		for (BlockNode candidate : mth.getBasicBlocks()) {
+			PhiListAttr phiList = candidate.get(AType.PHI_LIST);
+			if (phiList == null
+					|| phiList.getList().size() < 2
+					|| candidate.getPredecessors().size() != 2
+					|| candidate.getCleanSuccessors().size() != 1
+					|| mth.getLoopForBlock(candidate) != null
+					|| BlockUtils.isExceptionHandlerPath(candidate)
+					|| !isPathExists(thenBlock, candidate)
+					|| !isPathExists(elseBlock, candidate)
+					|| currentOut != null && !isPathExists(candidate, currentOut)) {
+				continue;
+			}
+			BlockNode loopStart = BlockUtils.followEmptyPath(candidate.getCleanSuccessors().get(0));
+			if (!loopStart.contains(AFlag.LOOP_START)
+					|| countCoroutineSavedLocalRestores(candidate) < 2) {
+				continue;
+			}
+			if (match != null) {
+				return null;
+			}
+			match = candidate;
+		}
+		return match;
+	}
+
+	static boolean isCoroutineLabelIf(BlockNode block) {
 		InsnNode lastInsn = BlockUtils.getLastInsn(block);
 		if (!(lastInsn instanceof IfNode)) {
 			return false;
 		}
 		for (InsnArg arg : lastInsn.getArguments()) {
-			if (!(arg instanceof RegisterArg)) {
-				continue;
-			}
-			RegisterArg registerArg = (RegisterArg) arg;
-			if (registerArg.getSVar() == null) {
-				continue;
-			}
-			InsnNode assignInsn = registerArg.getSVar().getAssignInsn();
-			if (assignInsn instanceof IndexInsnNode
-					&& assignInsn.getType() == InsnType.IGET
-					&& ((IndexInsnNode) assignInsn).getIndex() instanceof FieldInfo
-					&& ((FieldInfo) ((IndexInsnNode) assignInsn).getIndex()).getName().equals("label")) {
+			if (isCoroutineLabelValue(arg, new HashSet<>(), 0)) {
 				return true;
 			}
 		}
 		return false;
+	}
+
+	private static boolean isCoroutineLabelValue(InsnArg arg, Set<SSAVar> visited, int depth) {
+		if (depth > 8) {
+			return false;
+		}
+		InsnNode assignInsn;
+		if (arg instanceof InsnWrapArg) {
+			assignInsn = ((InsnWrapArg) arg).getWrapInsn();
+		} else if (arg instanceof RegisterArg) {
+			SSAVar ssaVar = ((RegisterArg) arg).getSVar();
+			if (ssaVar == null || !visited.add(ssaVar)) {
+				return false;
+			}
+			assignInsn = ssaVar.getAssignInsn();
+		} else {
+			return false;
+		}
+		if (assignInsn == null) {
+			return false;
+		}
+		if (assignInsn instanceof IndexInsnNode
+				&& assignInsn.getType() == InsnType.IGET
+				&& ((IndexInsnNode) assignInsn).getIndex() instanceof FieldInfo
+				&& ((FieldInfo) ((IndexInsnNode) assignInsn).getIndex()).getName().equals("label")) {
+			return true;
+		}
+		switch (assignInsn.getType()) {
+			case ARITH:
+			case MOVE:
+			case CAST:
+			case CHECK_CAST:
+			case NEG:
+			case NOT:
+				for (InsnArg assignArg : assignInsn.getArguments()) {
+					if (isCoroutineLabelValue(assignArg, visited, depth + 1)) {
+						return true;
+					}
+				}
+				return false;
+			default:
+				return false;
+		}
 	}
 
 	private @Nullable IfInfo restructurePhiAwareBranch(
@@ -2116,6 +2872,11 @@ final class IfRegionMaker {
 			// a genuinely shared (3+ input) latch or an SSA-proven loop-carried assignment.
 			return null;
 		}
+		if (!loopPhiCarry && hasInstructionfulLoopContinuationPath(continuation, carryTail)) {
+			// An incoming continue would skip assignments on the path to the loop latch,
+			// including values consumed by the next iteration's header PHIs.
+			return null;
+		}
 		if (carryTail != null
 				&& !carryTail.getInstructions().isEmpty()
 				&& !carryTail.contains(AType.COROUTINE_LOOP_CARRY_TAIL)
@@ -2265,6 +3026,22 @@ final class IfRegionMaker {
 		return null;
 	}
 
+	private static boolean hasInstructionfulLoopContinuationPath(BlockNode start, BlockNode tail) {
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != tail && visited.add(block)) {
+			if (!block.getInstructions().isEmpty()) {
+				return true;
+			}
+			List<BlockNode> successors = block.getSuccessors();
+			if (successors.size() != 1) {
+				return true;
+			}
+			block = successors.get(0);
+		}
+		return block != tail;
+	}
+
 	private static boolean isPhiNeutralLoopContinuation(IfInfo info, BlockNode start) {
 		if (!isPhiNeutralJoin(info, start)) {
 			return false;
@@ -2383,6 +3160,9 @@ final class IfRegionMaker {
 		}
 		for (BlockNode exit : regionMaker.getStack().getExits()) {
 			if (exit != localOut
+					// A catch entry is reachable through an exceptional edge, not a normal IF exit.
+					// Selecting it here duplicates the protected tail into both branches.
+					&& !exit.contains(AType.EXC_HANDLER)
 					&& BlockUtils.isPathExists(nestedBranch, exit)
 					&& !BlockUtils.isPathExists(terminalBranch, exit)) {
 				info.setOutBlock(exit);
@@ -2555,11 +3335,55 @@ final class IfRegionMaker {
 		return true;
 	}
 
+	/** Find an instruction-free path from a loop branch to a return shared by multiple exits. */
+	private boolean isSharedLoopReturnPath(BlockNode ifBlock, BlockNode startBlock) {
+		if (mth.getLoopForBlock(ifBlock) == null
+				|| !mth.isNoExceptionHandlers()
+				|| CoroutineMethodUtils.isCoroutineMethod(mth)
+				|| CoroutineMethodUtils.hasKnownContinuationParameter(mth)
+				|| !startBlock.contains(AFlag.SYNTHETIC)
+				|| !startBlock.getInstructions().isEmpty()) {
+			return false;
+		}
+		BlockNode block = startBlock;
+		Set<BlockNode> visited = new HashSet<>();
+		while (visited.size() < 8 && visited.add(block)) {
+			if (BlockUtils.checkLastInsnType(block, InsnType.RETURN)) {
+				if (block.getPredecessors().size() < 2
+						|| block.getInstructions().size() != 1
+						|| block.contains(AType.PHI_LIST)) {
+					return false;
+				}
+				InsnNode returnInsn = block.getInstructions().get(0);
+				if (returnInsn.getArgsCount() > 1
+						|| returnInsn.getArgsCount() == 1
+								&& !returnInsn.getArg(0).isRegister()
+								&& !returnInsn.getArg(0).isLiteral()) {
+					return false;
+				}
+				BlockNode sharedReturn = block;
+				return mth.getBasicBlocks().stream()
+						.anyMatch(other -> other != sharedReturn
+								&& BlockUtils.checkLastInsnType(other, InsnType.RETURN));
+			}
+			if (!block.getInstructions().isEmpty()
+					|| block.contains(AFlag.LOOP_START)
+					|| block.contains(AFlag.LOOP_END)) {
+				return false;
+			}
+			List<BlockNode> successors = block.getCleanSuccessors();
+			if (successors.size() != 1) {
+				return false;
+			}
+			block = successors.get(0);
+		}
+		return false;
+	}
+
 	/**
-	 * Both branches can have external predecessors in a state machine: the return block is shared by
-	 * several suspension checks and the other branch is also a resume target. This is still a regular
-	 * early-return condition and can be represented without traversing the shared continuation as a
-	 * branch.
+	 * A return block can be shared by multiple loop exits or suspension checks while the other branch
+	 * continues execution. Represent the terminal path as an early return, without traversing the
+	 * shared return as a continuation of the other branch.
 	 */
 	private @Nullable IfInfo restructureSharedReturn(IfInfo info, BlockNode thenBlock, BlockNode elseBlock) {
 		boolean allowTerminalSubgraph = isSuspendLambdaMethod() && isBooleanCondition(info);
@@ -3042,11 +3866,16 @@ final class IfRegionMaker {
 
 	private static boolean isCommonPostDominator(
 			@Nullable MethodNode mth, BlockNode thenBlock, BlockNode elseBlock, BlockNode candidate) {
-		// A branch starting at the join passes through it by definition. A terminal path in the
-		// opposite branch must not push a normal continuation to a later, unrelated join.
+		// For a local IF out block, the surviving branch can start at the join while the other
+		// branch terminates. This is structurally useful even though it is not a strict post-dominator.
 		if (candidate == thenBlock || candidate == elseBlock) {
 			return true;
 		}
+		return isStrictCommonPostDominator(mth, thenBlock, elseBlock, candidate);
+	}
+
+	static boolean isStrictCommonPostDominator(
+			@Nullable MethodNode mth, BlockNode thenBlock, BlockNode elseBlock, BlockNode candidate) {
 		BlockNode exitBlock = mth == null ? null : mth.getExitBlock();
 		return !hasTerminalPathAvoiding(thenBlock, candidate, exitBlock)
 				&& !hasTerminalPathAvoiding(elseBlock, candidate, exitBlock);
@@ -3316,7 +4145,19 @@ final class IfRegionMaker {
 
 	private static @Nullable IfInfo mergeBooleanDiamondBranch(
 			IfInfo currentIf, BlockNode branch, boolean followThenBranch) {
+		BlockNode diamondBlock = branch;
 		InsnNode branchInsn = BlockUtils.getLastInsn(branch);
+		if (!(branchInsn instanceof IfNode)
+				&& branch.getInstructions().isEmpty()
+				&& branch.getCleanSuccessors().size() == 1) {
+			BlockNode next = branch.getCleanSuccessors().get(0);
+			if (next.getPredecessors().size() == 1
+					&& !next.contains(AFlag.ADDED_TO_REGION)
+					&& !next.contains(AType.STANDALONE_IF_REGION)) {
+				diamondBlock = next;
+				branchInsn = BlockUtils.getLastInsn(next);
+			}
+		}
 		if (!(branchInsn instanceof IfNode)) {
 			return null;
 		}
@@ -3335,6 +4176,9 @@ final class IfRegionMaker {
 			return null;
 		}
 		nextIf.getMergedBlocks().add(branch);
+		if (diamondBlock != branch) {
+			nextIf.getMergedBlocks().add(diamondBlock);
+		}
 		nextIf.getMergedBlocks().add(((IfNode) branchInsn).getThenBlock());
 		nextIf.getMergedBlocks().add(((IfNode) branchInsn).getElseBlock());
 		return mergeIfInfo(currentIf, nextIf, followThenBranch);
@@ -3375,12 +4219,35 @@ final class IfRegionMaker {
 		if (thenCondition == null || elseCondition == null) {
 			return null;
 		}
-		IfCondition condition = IfCondition.ternary(
-				IfCondition.fromIfNode(diamondIf), thenCondition, elseCondition);
+		IfCondition diamondCondition = IfCondition.fromIfNode(diamondIf);
+		Boolean thenValue = evaluateBooleanComparison(thenCondition);
+		Boolean elseValue = evaluateBooleanComparison(elseCondition);
+		IfCondition condition = thenValue != null && elseValue != null && thenValue != elseValue
+				? thenValue ? diamondCondition : IfCondition.invert(IfCondition.copyForSharedView(diamondCondition))
+				: IfCondition.ternary(diamondCondition, thenCondition, elseCondition);
 		IfInfo info = new IfInfo(mth, condition,
 				((IfNode) joinInsn).getThenBlock(), ((IfNode) joinInsn).getElseBlock());
 		info.getMergedBlocks().add(join);
 		return info;
+	}
+
+	private static @Nullable Boolean evaluateBooleanComparison(IfCondition condition) {
+		if (!condition.isCompare()) {
+			return null;
+		}
+		IfOp op = condition.getCompare().getOp();
+		if (op != IfOp.EQ && op != IfOp.NE) {
+			return null;
+		}
+		InsnArg first = condition.getCompare().getA();
+		InsnArg second = condition.getCompare().getB();
+		if (!first.isLiteral() || !second.isLiteral()
+				|| !(first.isTrue() || first.isFalse())
+				|| !(second.isTrue() || second.isFalse())) {
+			return null;
+		}
+		boolean equal = first.isTrue() == second.isTrue();
+		return op == IfOp.EQ ? equal : !equal;
 	}
 
 	private static @Nullable IfCondition replacePhiInCondition(
@@ -3421,8 +4288,8 @@ final class IfRegionMaker {
 		InsnNode thenConst = getSingleGeneratedInsn(thenBlock);
 		InsnNode elseConst = getSingleGeneratedInsn(elseBlock);
 		if (thenConst == null || elseConst == null
-				|| thenConst.getType() != InsnType.CONST
-				|| elseConst.getType() != InsnType.CONST
+				|| !(thenConst.getType() == InsnType.CONST || thenConst.getType() == InsnType.MOVE)
+				|| !(elseConst.getType() == InsnType.CONST || elseConst.getType() == InsnType.MOVE)
 				|| thenConst.getResult() == null
 				|| elseConst.getResult() == null
 				|| thenConst.getResult().getRegNum() != elseConst.getResult().getRegNum()

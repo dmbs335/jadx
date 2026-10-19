@@ -16,6 +16,8 @@ import jadx.core.dex.instructions.ConstClassNode;
 import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.InvokeNode;
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -52,6 +54,43 @@ public class InsnUtils {
 			return "\"" + index + '"';
 		}
 		return index.toString();
+	}
+
+	/**
+	 * Return the type declared by the bytecode producer, before SSA use constraints narrow it.
+	 * This is the type the generated Java expression must have at an assignment or cast site.
+	 */
+	public static @Nullable ArgType getDeclaredResultType(@Nullable InsnNode insn) {
+		if (insn instanceof InvokeNode) {
+			return ((InvokeNode) insn).getCallMth().getReturnType();
+		}
+		if (insn instanceof IndexInsnNode
+				&& (insn.getType() == InsnType.IGET || insn.getType() == InsnType.SGET)
+				&& ((IndexInsnNode) insn).getIndex() instanceof FieldInfo) {
+			return ((FieldInfo) ((IndexInsnNode) insn).getIndex()).getType();
+		}
+		if (insn instanceof IndexInsnNode
+				&& (insn.getType() == InsnType.CHECK_CAST || insn.getType() == InsnType.CAST)
+				&& ((IndexInsnNode) insn).getIndex() instanceof ArgType) {
+			return (ArgType) ((IndexInsnNode) insn).getIndex();
+		}
+		if (insn != null && insn.getType() == InsnType.AGET && insn.getArgsCount() != 0) {
+			ArgType arrayType = getDeclaredArrayType(insn.getArg(0));
+			return arrayType.isArray() ? arrayType.getArrayElement() : null;
+		}
+		return null;
+	}
+
+	public static ArgType getDeclaredArrayType(InsnArg arrayArg) {
+		InsnNode producer = null;
+		if (arrayArg instanceof RegisterArg) {
+			SSAVar arrayVar = ((RegisterArg) arrayArg).getSVar();
+			producer = arrayVar == null ? null : arrayVar.getAssignInsn();
+		} else if (arrayArg instanceof InsnWrapArg) {
+			producer = ((InsnWrapArg) arrayArg).getWrapInsn();
+		}
+		ArgType declaredType = getDeclaredResultType(producer);
+		return declaredType != null && declaredType.isArray() ? declaredType : arrayArg.getType();
 	}
 
 	/**

@@ -24,6 +24,7 @@ import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.instructions.mods.ConstructorInsn;
+import jadx.core.dex.instructions.mods.TernaryInsn;
 import jadx.core.dex.nodes.IBlock;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
@@ -247,6 +248,10 @@ public class ProcessVariables extends AbstractVisitor {
 		if (codeVar.isDeclared()) {
 			return;
 		}
+		if (codeVar.isInitFromThis()) {
+			declareVarInRegion(mth.getRegion(), codeVar);
+			return;
+		}
 
 		VarUsage mergedUsage = new VarUsage(null);
 		int usageCount = usageList.size();
@@ -266,7 +271,28 @@ public class ProcessVariables extends AbstractVisitor {
 		// TODO: search closest region for declare
 
 		// region not found, declare at method start
+		if (!codeVar.isFinal()
+				&& mergedUsage.getAssigns().size() > 1
+				&& isTernaryBranchValue(codeVar)) {
+			// Java's definite-assignment analysis does not infer that an earlier boolean carrier
+			// selects this value only on paths which assigned it. Preserve the conditional value
+			// and initialize its shared declaration instead of losing a guard or a PHI operand.
+			codeVar.setInitAtDeclaration(true);
+		}
 		declareVarInRegion(mth.getRegion(), codeVar);
+	}
+
+	private static boolean isTernaryBranchValue(CodeVar codeVar) {
+		for (SSAVar ssaVar : codeVar.getSsaVars()) {
+			for (RegisterArg use : ssaVar.getUseList()) {
+				InsnNode parent = use.getParentInsn();
+				if (parent instanceof TernaryInsn
+						&& (parent.getArg(0) == use || parent.getArg(1) == use)) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	private List<CodeVar> collectCodeVars(MethodNode mth) {

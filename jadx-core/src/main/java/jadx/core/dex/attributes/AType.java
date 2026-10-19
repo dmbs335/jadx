@@ -5,6 +5,7 @@ import jadx.api.plugins.input.data.attributes.IJadxAttribute;
 import jadx.core.codegen.utils.CodeComment;
 import jadx.core.dex.attributes.nodes.AnonymousClassAttr;
 import jadx.core.dex.attributes.nodes.AnonymousClassOriginAttr;
+import jadx.core.dex.attributes.nodes.AutoBoxedLiteralAttr;
 import jadx.core.dex.attributes.nodes.BooleanNumericConversionAttr;
 import jadx.core.dex.attributes.nodes.ClassTypeVarsAttr;
 import jadx.core.dex.attributes.nodes.CodeFeaturesAttr;
@@ -12,6 +13,8 @@ import jadx.core.dex.attributes.nodes.ConstReplacementUseAttr;
 import jadx.core.dex.attributes.nodes.ConstantReturnMethodAttr;
 import jadx.core.dex.attributes.nodes.CoroutineLoopCarryTailAttr;
 import jadx.core.dex.attributes.nodes.CoroutineLoopPreHeaderAttr;
+import jadx.core.dex.attributes.nodes.CoroutineRetryCatchDispatchAttr;
+import jadx.core.dex.attributes.nodes.CoroutineRetryResultJoinAttr;
 import jadx.core.dex.attributes.nodes.CoroutineStateMachineAttr;
 import jadx.core.dex.attributes.nodes.DeclareVariablesAttr;
 import jadx.core.dex.attributes.nodes.DecompileModeOverrideAttr;
@@ -39,6 +42,7 @@ import jadx.core.dex.attributes.nodes.MethodReplaceAttr;
 import jadx.core.dex.attributes.nodes.MethodThrowsAttr;
 import jadx.core.dex.attributes.nodes.MethodTypeVarsAttr;
 import jadx.core.dex.attributes.nodes.NormalizedCoroutineLoopAttr;
+import jadx.core.dex.attributes.nodes.ProtectedCoroutineEntrySplitAttr;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.attributes.nodes.ProtectedCoroutineZeroDelayAttr;
 import jadx.core.dex.attributes.nodes.ReadOnlyMethodAttr;
@@ -52,6 +56,7 @@ import jadx.core.dex.attributes.nodes.StandaloneIfRegionAttr;
 import jadx.core.dex.attributes.nodes.TmpEdgeAttr;
 import jadx.core.dex.attributes.nodes.TryProtectedIteratorBooleanActionAttr;
 import jadx.core.dex.attributes.nodes.UnsupportedMultiEntryLoopAttr;
+import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.IMethodDetails;
 import jadx.core.dex.trycatch.CatchAttr;
 import jadx.core.dex.trycatch.ExcHandlerAttr;
@@ -104,10 +109,15 @@ public final class AType<T extends IJadxAttribute> implements IJadxAttrType<T> {
 	public static final AType<ConstantReturnMethodAttr> CONSTANT_RETURN_METHOD = new AType<>();
 	public static final AType<UnsupportedMultiEntryLoopAttr> UNSUPPORTED_MULTI_ENTRY_LOOP = new AType<>();
 	public static final AType<NormalizedCoroutineLoopAttr> NORMALIZED_COROUTINE_LOOP = new AType<>();
+	public static final AType<ProtectedCoroutineEntrySplitAttr> PROTECTED_COROUTINE_ENTRY_SPLIT = new AType<>();
+	public static final AType<CoroutineRetryCatchDispatchAttr> COROUTINE_RETRY_CATCH_DISPATCH = new AType<>();
 	public static final AType<CoroutineStateMachineAttr> COROUTINE_STATE_MACHINE = new AType<>();
 	public static final AType<TryProtectedIteratorBooleanActionAttr> TRY_PROTECTED_ITERATOR_BOOLEAN_ACTION =
 			new AType<>();
 	public static final AType<InitAtDeclareVarsAttr> INIT_AT_DECLARE_VARS = new AType<>();
+	public static final AType<AttrList<BlockNode>> UNSAFE_REGION_DUPLICATION = new AType<>();
+	public static final AType<AttrList<BlockNode>> UNRESOLVED_REGION_RECURSION = new AType<>();
+	public static final AType<AttrList<BlockNode>> UNRESOLVED_REGION_TRAVERSAL_CYCLE = new AType<>();
 
 	// region
 	public static final AType<DeclareVariablesAttr> DECLARE_VARIABLES = new AType<>();
@@ -124,6 +134,7 @@ public final class AType<T extends IJadxAttribute> implements IJadxAttrType<T> {
 	public static final AType<ExpectedTraversalCycleAttr> EXPECTED_TRAVERSAL_CYCLE = new AType<>();
 	public static final AType<ProtectedCoroutineZeroDelayAttr> PROTECTED_COROUTINE_ZERO_DELAY = new AType<>();
 	public static final AType<CoroutineLoopPreHeaderAttr> COROUTINE_LOOP_PRE_HEADER = new AType<>();
+	public static final AType<CoroutineRetryResultJoinAttr> COROUTINE_RETRY_RESULT_JOIN = new AType<>();
 	public static final AType<CoroutineLoopCarryTailAttr> COROUTINE_LOOP_CARRY_TAIL = new AType<>();
 	public static final AType<SafeDuplicationAttr> SAFE_DUPLICATION = new AType<>();
 	public static final AType<StandaloneIfRegionAttr> STANDALONE_IF_REGION = new AType<>();
@@ -134,6 +145,7 @@ public final class AType<T extends IJadxAttribute> implements IJadxAttrType<T> {
 
 	// instruction
 	public static final AType<BooleanNumericConversionAttr> BOOLEAN_NUMERIC_CONVERSION = new AType<>();
+	public static final AType<AutoBoxedLiteralAttr> AUTO_BOXED_LITERAL = new AType<>();
 	public static final AType<LoopLabelAttr> LOOP_LABEL = new AType<>();
 	public static final AType<AttrList<JumpInfo>> JUMP = new AType<>();
 	public static final AType<IMethodDetails> METHOD_DETAILS = new AType<>();

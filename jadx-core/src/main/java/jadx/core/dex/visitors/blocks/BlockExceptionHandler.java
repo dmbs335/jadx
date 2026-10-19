@@ -256,6 +256,10 @@ public class BlockExceptionHandler {
 		if (mth.isNoExceptionHandlers()) {
 			return Collections.emptyList();
 		}
+		// initExcHandlers may insert synthetic handler entry blocks, and detaching
+		// removed handlers changes edges. The corridor check below traverses clean
+		// successors, so refresh them for the current graph before merging ranges.
+		BlockProcessor.updateCleanSuccessors(mth);
 
 		blocksByHandler.forEach((eh, blocks) -> {
 			// remove catches from same handler

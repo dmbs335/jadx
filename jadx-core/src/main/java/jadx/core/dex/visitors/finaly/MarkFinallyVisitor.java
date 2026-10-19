@@ -249,15 +249,11 @@ public class MarkFinallyVisitor extends AbstractVisitor {
 		}
 		for (BlockNode pathExit : pathExits) {
 			// For this to be able to extract a finally, we must ensure that all paths into the handler's logic
-			// end with a THROW equal to the output of the move-exception instruction located at the start of
-			// this handler, if any.
+			// end in a throw of the original exception.
 			InsnNode bottomBlockLastInsn = BlockUtils.getLastInsn(pathExit);
-			boolean isValidPathExit = bottomBlockLastInsn != null
-					&& handlerFinalInsn != null
-					&& bottomBlockLastInsn.getType() == InsnType.THROW
-					&& bottomBlockLastInsn.getArgsCount() > 0
-					&& isSameThrowableValue(bottomBlockLastInsn.getArg(0), handlerFinalInsn.getResult());
-			if (!isValidPathExit) {
+			if (bottomBlockLastInsn == null || bottomBlockLastInsn.getType() != InsnType.THROW
+					|| bottomBlockLastInsn.getArgsCount() == 0 || handlerFinalInsn == null
+					|| !isSameThrowableValue(bottomBlockLastInsn.getArg(0), handlerFinalInsn.getResult())) {
 				return handlerBlocks;
 			}
 		}

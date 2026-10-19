@@ -82,9 +82,189 @@ public class SSATransform extends AbstractVisitor {
 		fixLastAssignInTry(mth, exceptionPhiData);
 		removeBlockerInsns(mth);
 		tryToFixUselessPhi(mth);
+		splitOverwrittenReceiverPhi(mth, exceptionPhiData);
 		markThisArgs(mth.getThisArg());
 		hidePhiInsns(mth);
 		removeUnusedInvokeResults(mth);
+	}
+
+	/**
+	 * DEX permits writing to p0 after entry, but Java cannot assign to {@code this}. When a
+	 * PHIs join the original receiver with reference overwrites, keep the original receiver
+	 * distinct and seed the local with an explicit copy at method entry. Validate all PHIs
+	 * using the original receiver before changing any of them.
+	 */
+	private static void splitOverwrittenReceiverPhi(MethodNode mth, ExceptionPhiData exceptionPhiData) {
+		RegisterArg thisArg = mth.getThisArg();
+		if (thisArg == null || thisArg.getSVar() == null || thisArg.getSVar().getPhiList().isEmpty()) {
+			return;
+		}
+		BlockNode enter = mth.getEnterBlock();
+		if (enter == null || !enter.getInstructions().isEmpty() || enter.getSuccessors().size() != 1) {
+			return;
+		}
+		Set<PhiInsn> receiverPhis = Collections.newSetFromMap(new IdentityHashMap<>());
+		receiverPhis.addAll(thisArg.getSVar().getPhiList());
+		Map<PhiInsn, List<RegisterArg>> receiverInputsByPhi = new IdentityHashMap<>();
+		ArgType referenceType = thisArg.getInitType();
+		for (PhiInsn phi : receiverPhis) {
+			if (phi.getResult() == null || phi.getResult().getRegNum() != thisArg.getRegNum()
+					|| phi.getArgsCount() < 2) {
+				return;
+			}
+			List<RegisterArg> receiverInputs = new ArrayList<>();
+			List<RegisterArg> overwrittenInputs = new ArrayList<>();
+			for (InsnArg arg : phi.getArguments()) {
+				if (!arg.isRegister()) {
+					return;
+				}
+				RegisterArg input = (RegisterArg) arg;
+				if (input.getSVar() == thisArg.getSVar()) {
+					receiverInputs.add(input);
+				} else {
+					overwrittenInputs.add(input);
+				}
+			}
+			if (receiverInputs.isEmpty() || overwrittenInputs.isEmpty()) {
+				return;
+			}
+			List<BlockNode> receiverBlocks = new ArrayList<>(receiverInputs.size());
+			for (RegisterArg receiverInput : receiverInputs) {
+				BlockNode receiverBlock = phi.getBlockByArg(receiverInput);
+				if (receiverBlock == null) {
+					return;
+				}
+				receiverBlocks.add(receiverBlock);
+			}
+			for (RegisterArg overwrittenInput : overwrittenInputs) {
+				BlockNode overwrittenBlock = phi.getBlockByArg(overwrittenInput);
+				// Separate throwing instructions in one block can observe different register states.
+				if (overwrittenBlock == null
+						|| (receiverBlocks.contains(overwrittenBlock)
+								&& !exceptionPhiData.isBeforeThrowPhi(phi))) {
+					return;
+				}
+				// Exceptional edges can carry a different pre-throw register state.
+				ArgType inputType = getOverwrittenReceiverType(overwrittenInput, thisArg.getSVar(),
+						thisArg.getInitType(), mth.isNoExceptionHandlers(),
+						Collections.newSetFromMap(new IdentityHashMap<>()));
+				if (inputType == null) {
+					return;
+				}
+				if (!referenceType.equals(inputType)) {
+					referenceType = ArgType.OBJECT;
+				}
+			}
+			receiverInputsByPhi.put(phi, receiverInputs);
+		}
+		boolean needsObjectLocal = !referenceType.equals(thisArg.getInitType());
+		RegisterArg local = InsnArg.reg(thisArg.getRegNum(),
+				needsObjectLocal ? ArgType.OBJECT : thisArg.getType());
+		InsnNode copy = new InsnNode(InsnType.MOVE, 1);
+		copy.add(AFlag.SYNTHETIC);
+		copy.setResult(local);
+		mth.makeNewSVar(local);
+		copy.addArg(thisArg.duplicate());
+		enter.getInstructions().add(copy);
+		for (Map.Entry<PhiInsn, List<RegisterArg>> entry : receiverInputsByPhi.entrySet()) {
+			for (RegisterArg receiverInput : entry.getValue()) {
+				if (!entry.getKey().replaceArg(receiverInput, local.duplicate())) {
+					throw new JadxRuntimeException("Failed to split validated receiver PHI");
+				}
+			}
+		}
+	}
+
+	private static ArgType getOverwrittenReceiverType(RegisterArg arg, SSAVar receiverVar,
+			ArgType receiverType, boolean allowLoopPhiCycle, Set<SSAVar> active) {
+		SSAVar sVar = arg.getSVar();
+		if (sVar == receiverVar) {
+			return receiverType;
+		}
+		if (sVar == null) {
+			return null;
+		}
+		if (!active.add(sVar)) {
+			// Only a same-register PHI back edge can stand for the carried receiver.
+			// All other inputs still need a proven reference type.
+			InsnNode cycle = arg.getAssignInsn();
+			return allowLoopPhiCycle && cycle != null && cycle.getType() == InsnType.PHI
+					&& arg.getRegNum() == receiverVar.getAssign().getRegNum() ? receiverType : null;
+		}
+		try {
+			InsnNode overwrite = arg.getAssignInsn();
+			if (overwrite == null || overwrite.getResult() == null) {
+				return null;
+			}
+			if (overwrite.getType() == InsnType.PHI) {
+				ArgType commonType = null;
+				for (InsnArg phiArg : overwrite.getArguments()) {
+					if (!phiArg.isRegister()) {
+						return null;
+					}
+					ArgType inputType = getOverwrittenReceiverType((RegisterArg) phiArg,
+							receiverVar, receiverType, allowLoopPhiCycle, active);
+					if (inputType == null) {
+						return null;
+					}
+					commonType = commonType == null || commonType.equals(inputType) ? inputType : ArgType.OBJECT;
+				}
+				return commonType;
+			}
+			boolean oneArgOverwrite = overwrite.getArgsCount() == 1;
+			if (oneArgOverwrite && overwrite.getType() == InsnType.CONST
+					&& overwrite.getArg(0).isZeroLiteral()) {
+				return receiverType;
+			}
+			ArgType referenceType;
+			if (overwrite.getType() == InsnType.MOVE) {
+				if (!oneArgOverwrite || !overwrite.getArg(0).isRegister()) {
+					return null;
+				}
+				RegisterArg moveSource = (RegisterArg) overwrite.getArg(0);
+				if (moveSource.getSVar() == null || moveSource.getSVar().getAssign() == null) {
+					return null;
+				}
+				referenceType = moveSource.getSVar().getAssign().getInitType();
+				if (!referenceType.isTypeKnown()) {
+					referenceType = getOverwrittenReceiverType(moveSource, receiverVar,
+							receiverType, allowLoopPhiCycle, active);
+					if (referenceType == null) {
+						return null;
+					}
+				}
+			} else {
+				switch (overwrite.getType()) {
+					case AGET:
+						// AGET_OBJECT shares this IR type with primitive array reads.
+						// Only its reference-only result marker proves a safe receiver replacement.
+						ArgType arrayResultType = overwrite.getResult().getInitType();
+						if (ArgType.UNKNOWN_OBJECT.equals(arrayResultType)) {
+							return ArgType.OBJECT;
+						}
+						referenceType = arrayResultType;
+						break;
+					case CHECK_CAST:
+					case NEW_INSTANCE:
+					case CONSTRUCTOR:
+					case NEW_ARRAY:
+					case FILLED_NEW_ARRAY:
+					case CONST_STR:
+					case CONST_CLASS:
+					case SGET:
+					case IGET:
+					case INVOKE:
+						referenceType = overwrite.getResult().getInitType();
+						break;
+					default:
+						return null;
+				}
+			}
+			return referenceType.isTypeKnown() && referenceType.getPrimitiveType() != null
+					&& referenceType.getPrimitiveType().isObjectOrArray() ? referenceType : null;
+		} finally {
+			active.remove(sVar);
+		}
 	}
 
 	/**
@@ -124,7 +304,15 @@ public class SSATransform extends AbstractVisitor {
 				boolean definitionDominatesHandler = hasDefinitionDominating(mth, la, handlerBlock, regNum);
 				boolean recoverCoroutineHandlerPhi = CoroutineMethodUtils.isStateMachine(mth)
 						&& (existingPhi != null || definitionDominatesHandler);
-				boolean recoverPreTryHandlerState = definitionDominatesHandler
+				// A shared non-loop handler can observe separate values assigned before each
+				// protected call. Require a concrete dominating definition on every source;
+				// generic live-on-entry is not enough for nested finally/coroutine paths.
+				boolean recoverExistingHandlerPhi = existingPhi != null
+						&& mth.getLoopsCount() == 0
+						&& !CoroutineMethodUtils.isStateMachine(mth)
+						&& sources.size() == throwSources.size()
+						&& hasDominatingDefinitionForAllSources(la, throwSources, regNum);
+				boolean recoverPreTryHandlerState = (definitionDominatesHandler || recoverExistingHandlerPhi)
 						&& hasNewerDefinitionAtProtectedThrow(
 								mth, la, handler, handlerBlock, throwSources, regNum);
 				if (!la.isLive(handlerBlock, regNum)
@@ -537,6 +725,17 @@ public class SSATransform extends AbstractVisitor {
 			}
 			if (!la.isDefinedOnAllPaths(source, regNum)
 					&& !startsWithLiteralAssign(source, regNum)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean hasDominatingDefinitionForAllSources(
+			LiveVarAnalysis la, List<BlockNode> sources, int regNum) {
+		BitSet assignBlocks = la.getAssignBlocks(regNum);
+		for (BlockNode source : sources) {
+			if (!source.getDoms().intersects(assignBlocks)) {
 				return false;
 			}
 		}
@@ -1498,9 +1697,12 @@ public class SSATransform extends AbstractVisitor {
 				useArg.getSVar().removeUse(useArg);
 				inlineArg.getSVar().use(useArg);
 			} else {
-				RegisterArg replacement = inlineArg;
+				// Every instruction must own its RegisterArg: reusing one arg across
+				// several PHI users corrupts parentInsn and SSA use tracking.
+				RegisterArg replacement = duplicateArg
+						? inlineArg.duplicate(useArg.getInitType())
+						: inlineArg.duplicate();
 				if (duplicateArg) {
-					replacement = inlineArg.duplicate(useArg.getInitType());
 					replacement.copyAttributesFrom(useArg);
 				}
 				if (!useInsn.replaceArg(useArg, replacement)) {
@@ -1560,7 +1762,7 @@ public class SSATransform extends AbstractVisitor {
 		}
 		SSAVar sourceVar = getSameMoveSource(phi);
 		if (sourceVar == null
-				|| !isEligibleStringConstructorArg(mth, sourceVar)
+				|| !isEligibleSameSourceArgumentPhi(mth, sourceVar)
 				|| !canInlinePhi(phi)) {
 			return false;
 		}
@@ -1580,6 +1782,17 @@ public class SSATransform extends AbstractVisitor {
 		}
 		detachMethodArgCodeVar(sourceVar);
 		return true;
+	}
+
+	private static boolean isEligibleSameSourceArgumentPhi(MethodNode mth, SSAVar sourceVar) {
+		if (isEligibleStringConstructorArg(mth, sourceVar)) {
+			return true;
+		}
+		return !mth.isConstructor()
+				&& mth.isNoExceptionHandlers()
+				&& mth.getLoopsCount() == 0
+				&& sourceVar.getAssign().contains(AFlag.METHOD_ARGUMENT)
+				&& mth.getArgRegs().stream().anyMatch(arg -> arg.getSVar() == sourceVar);
 	}
 
 	private static boolean isEligibleStringConstructorArg(MethodNode mth, SSAVar sourceVar) {

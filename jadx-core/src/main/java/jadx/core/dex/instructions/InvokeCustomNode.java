@@ -1,20 +1,26 @@
 package jadx.core.dex.instructions;
 
+import java.util.List;
+import java.util.Objects;
+
 import org.jetbrains.annotations.Nullable;
 
 import jadx.api.plugins.input.data.MethodHandleType;
 import jadx.api.plugins.input.insns.InsnData;
 import jadx.core.dex.info.MethodInfo;
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.utils.InsnUtils;
 
 public class InvokeCustomNode extends InvokeNode {
 	private MethodInfo implMthInfo;
+	private MethodInfo instantiatedMthInfo;
 	private MethodHandleType handleType;
 	private InsnNode callInsn;
 	private boolean inlineInsn;
 	private boolean useRef;
+	private List<ArgType> lambdaInterfaces = List.of();
 
 	public InvokeCustomNode(MethodInfo lambdaInfo, InsnData insn, boolean instanceCall, boolean isRange) {
 		super(lambdaInfo, insn, InvokeType.CUSTOM, instanceCall, isRange);
@@ -29,10 +35,12 @@ public class InvokeCustomNode extends InvokeNode {
 		InvokeCustomNode copy = new InvokeCustomNode(getCallMth(), getInvokeType(), getArgsCount());
 		copyCommonParams(copy);
 		copy.setImplMthInfo(implMthInfo);
+		copy.setInstantiatedMthInfo(instantiatedMthInfo);
 		copy.setHandleType(handleType);
 		copy.setCallInsn(callInsn);
 		copy.setInlineInsn(inlineInsn);
 		copy.setUseRef(useRef);
+		copy.setLambdaInterfaces(lambdaInterfaces);
 		return copy;
 	}
 
@@ -47,9 +55,11 @@ public class InvokeCustomNode extends InvokeNode {
 		InvokeCustomNode other = (InvokeCustomNode) obj;
 		return handleType == other.handleType
 				&& implMthInfo.equals(other.implMthInfo)
+				&& Objects.equals(instantiatedMthInfo, other.instantiatedMthInfo)
 				&& callInsn.isSame(other.callInsn)
 				&& inlineInsn == other.inlineInsn
-				&& useRef == other.useRef;
+				&& useRef == other.useRef
+				&& lambdaInterfaces.equals(other.lambdaInterfaces);
 	}
 
 	public MethodInfo getImplMthInfo() {
@@ -58,6 +68,15 @@ public class InvokeCustomNode extends InvokeNode {
 
 	public void setImplMthInfo(MethodInfo implMthInfo) {
 		this.implMthInfo = implMthInfo;
+	}
+
+	@Nullable
+	public MethodInfo getInstantiatedMthInfo() {
+		return instantiatedMthInfo;
+	}
+
+	public void setInstantiatedMthInfo(MethodInfo instantiatedMthInfo) {
+		this.instantiatedMthInfo = instantiatedMthInfo;
 	}
 
 	public MethodHandleType getHandleType() {
@@ -90,6 +109,14 @@ public class InvokeCustomNode extends InvokeNode {
 
 	public void setUseRef(boolean useRef) {
 		this.useRef = useRef;
+	}
+
+	public List<ArgType> getLambdaInterfaces() {
+		return lambdaInterfaces;
+	}
+
+	public void setLambdaInterfaces(List<ArgType> lambdaInterfaces) {
+		this.lambdaInterfaces = List.copyOf(lambdaInterfaces);
 	}
 
 	@Nullable

@@ -17,8 +17,10 @@ import jadx.core.dex.nodes.IBlock;
 import jadx.core.dex.nodes.IBranchRegion;
 import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.IRegion;
+import jadx.core.dex.nodes.InsnContainer;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
+import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.SwitchRegion;
 import jadx.core.dex.regions.TryCatchRegion;
 import jadx.core.dex.visitors.AbstractVisitor;
@@ -68,6 +70,11 @@ public class SwitchBreakVisitor extends AbstractVisitor {
 
 		private void processBranchRegion(MethodNode mth, IRegion region) {
 			IRegion parentRegion = region.getParent();
+			if (!(parentRegion instanceof Region)) {
+				// A branch directly owned by a switch (or another structured region)
+				// has no linear slot for a common break. Keep its original breaks.
+				return;
+			}
 			if (parentRegion.contains(AFlag.FALL_THROUGH)) {
 				// fallthrough case, can't extract break
 				return;
@@ -111,7 +118,10 @@ public class SwitchBreakVisitor extends AbstractVisitor {
 				boolean branchExits = RegionUtils.hasExitBlock(branch);
 				boolean catchBranch = region instanceof TryCatchRegion
 						&& branch != ((TryCatchRegion) region).getTryRegion();
-				boolean unsafeExceptionalMove = soleExceptionalBreak && (catchBranch || handlerConditional);
+				boolean unsafeExceptionalMove = (catchBranch
+						&& !RegionUtils.hasExitBlock(((TryCatchRegion) region).getTryRegion())
+						&& hasFollowingCaseCode(region))
+						|| (soleExceptionalBreak && (catchBranch || handlerConditional));
 				if ((branchExits || !unsafeExceptionalMove)
 						&& lastInsn.getType() == InsnType.BREAK
 						&& isBreakBlock(last.getBlock())) {
@@ -150,6 +160,28 @@ public class SwitchBreakVisitor extends AbstractVisitor {
 			});
 			return found[0];
 		}
+
+		private boolean hasFollowingCaseCode(IRegion region) {
+			// A catch may jump over statements that follow the protected fragment in this
+			// case. Hoisting its break after the whole try/catch would execute those
+			// statements on the exceptional path. A trailing common break is harmless.
+			IContainer child = region;
+			for (IRegion parent = region.getParent(); parent != null && parent != currentSwitch;
+					child = parent, parent = parent.getParent()) {
+				List<IContainer> blocks = parent.getSubBlocks();
+				int index = blocks.indexOf(child);
+				if (index == -1) {
+					return true;
+				}
+				for (int i = index + 1; i < blocks.size(); i++) {
+					IContainer next = blocks.get(i);
+					if (!(next instanceof IBlock) || !isBreakBlock((IBlock) next)) {
+						return true;
+					}
+				}
+			}
+			return false;
+		}
 	}
 
 	private static final class RemoveUnreachableBreak extends BaseSwitchRegionVisitor {
@@ -157,6 +189,18 @@ public class SwitchBreakVisitor extends AbstractVisitor {
 		public void processRegion(MethodNode mth, IRegion region) {
 			List<IContainer> subBlocks = region.getSubBlocks();
 			IContainer lastContainer = ListUtils.last(subBlocks);
+			InsnNode lastInsn = lastContainer instanceof InsnContainer
+					? ListUtils.last(((InsnContainer) lastContainer).getInstructions()) : null;
+			if (lastContainer instanceof InsnContainer && subBlocks.size() > 1
+					&& lastInsn != null && lastInsn.getType() == InsnType.RETURN
+					&& isBreakBlock(subBlocks.get(subBlocks.size() - 2) instanceof IBlock
+							? (IBlock) subBlocks.get(subBlocks.size() - 2) : null)) {
+				// A duplicated terminal return can be appended to a shared catch after
+				// a switch break was already inserted. The break reaches the original
+				// return after the switch; the in-catch copy is unreachable.
+				subBlocks.remove(subBlocks.size() - 1);
+				return;
+			}
 			if (lastContainer instanceof IBlock) {
 				IBlock block = (IBlock) lastContainer;
 				if (isBreakBlock(block) && isPrevInsnIsExit(block, subBlocks)) {

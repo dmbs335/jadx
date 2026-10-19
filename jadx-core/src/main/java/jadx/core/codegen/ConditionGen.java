@@ -107,7 +107,13 @@ public class ConditionGen extends InsnGen {
 		if (addFloatingCmp(code, firstArg, secondArg, op)) {
 			return;
 		}
-		if (isBooleanConditionArg(firstArg)
+		boolean firstBoolean = isBooleanConditionArg(firstArg);
+		boolean secondBoolean = isBooleanConditionArg(secondArg);
+		if ((firstBoolean || secondBoolean)
+				&& op != IfOp.EQ && op != IfOp.NE) {
+			throw new CodegenException("Unsupported relational boolean condition " + op.getSymbol());
+		}
+		if (firstBoolean
 				&& secondArg.isLiteral()
 				&& isBooleanLiteral((LiteralArg) secondArg)) {
 			LiteralArg lit = (LiteralArg) secondArg;
@@ -128,12 +134,28 @@ public class ConditionGen extends InsnGen {
 				wrap(code, firstArg);
 				return;
 			}
-			mth.addWarn("Unsupported boolean condition " + op.getSymbol());
+		}
+		if (secondBoolean && firstArg.isLiteral() && isBooleanLiteral((LiteralArg) firstArg)) {
+			IfOp effectiveOp = ((LiteralArg) firstArg).getLiteral() == 0 ? op.invert() : op;
+			if (effectiveOp == IfOp.EQ) {
+				addArg(code, secondArg, false);
+			} else {
+				code.add('!');
+				wrap(code, secondArg);
+			}
+			return;
+		}
+		if (firstBoolean != secondBoolean) {
+			throw new CodegenException("Unsupported mixed boolean condition " + op.getSymbol());
 		}
 
-		addArg(code, firstArg, isArgWrapNeeded(firstArg));
+		if (!addLambdaObjectOperandIfNeeded(code, firstArg)) {
+			addArg(code, firstArg, isArgWrapNeeded(firstArg));
+		}
 		code.add(' ').add(op.getSymbol()).add(' ');
-		addArg(code, secondArg, isArgWrapNeeded(secondArg));
+		if (!addLambdaObjectOperandIfNeeded(code, secondArg)) {
+			addArg(code, secondArg, isArgWrapNeeded(secondArg));
+		}
 	}
 
 	/**
@@ -186,6 +208,13 @@ public class ConditionGen extends InsnGen {
 		if (ArgType.BOOLEAN.equals(arg.getType())) {
 			return true;
 		}
+		if (arg.isRegister()) {
+			RegisterArg register = (RegisterArg) arg;
+			if (register.getSVar() != null && register.getSVar().getCodeVar() != null
+					&& ArgType.BOOLEAN.equals(register.getSVar().getCodeVar().getType())) {
+				return true;
+			}
+		}
 		if (!arg.isInsnWrap()) {
 			return false;
 		}
@@ -222,12 +251,7 @@ public class ConditionGen extends InsnGen {
 		IfCondition current = it.next();
 		while (it.hasNext()) {
 			IfCondition next = it.next();
-			if (condition.getMode() == Mode.OR && IfCondition.isUnsafeNotNullGuard(current, next)) {
-				Compare compare = current.getCompare();
-				addCompare(code, stack, compare, compare.getOp().invert());
-			} else {
-				wrap(code, stack, current);
-			}
+			wrap(code, stack, current);
 			code.add(mode);
 			current = next;
 		}

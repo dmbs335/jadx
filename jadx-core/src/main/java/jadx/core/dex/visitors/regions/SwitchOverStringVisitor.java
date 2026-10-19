@@ -119,14 +119,20 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 			} else {
 				return false;
 			}
+			if (hasNumberUseBeyondSelectorSwitch(data)) {
+				return false;
+			}
 
 			if (!collectPart1RegionCases(data)) {
 				return false;
 			}
-			if (!prepareMergedSwitchCases(data) || !replaceWithMergedSwitch(data)) {
-				if (directPart2Switch || part2Region == null) {
-					mth.addWarnComment("Failed to restore switch over string. Please report as a decompilation issue");
-				}
+			if (!prepareMergedSwitchCases(data) || hasUnretainedAction(data)) {
+				// No method instructions have changed: retain the original dispatch when this
+				// switch shape cannot be represented as a single string switch.
+				return false;
+			}
+			if (!replaceWithMergedSwitch(data)) {
+				mth.addWarnComment("Failed to restore switch over string. Please report as a decompilation issue");
 				return false;
 			}
 			return true;
@@ -620,6 +626,89 @@ public class SwitchOverStringVisitor extends AbstractVisitor implements IRegionI
 			clearResolvedDuplicationWarning(mth);
 		}
 		return true;
+	}
+
+	/**
+	 * The numeric selector can remain live in a catch, a case action, or after the switch.
+	 * Replacing the two dispatches must not remove those uses along with its assignments.
+	 * PHI uses are internal SSA bookkeeping and are never emitted as source expressions.
+	 */
+	private static boolean hasNumberUseBeyondSelectorSwitch(SwitchData data) {
+		RegisterArg numArg = data.getNumArg();
+		if (numArg == null) {
+			return false;
+		}
+		SwitchRegion part2Region = data.getPart2Region();
+		if (part2Region == null) {
+			return false;
+		}
+		InsnNode selectorSwitch = BlockUtils.getLastInsnWithType(part2Region.getHeader(), InsnType.SWITCH);
+		for (SSAVar ssaVar : numArg.getSVar().getCodeVar().getSsaVars()) {
+			for (RegisterArg useArg : ssaVar.getUseList()) {
+				InsnNode useInsn = useArg.getParentInsn();
+				if (useInsn == null || useInsn.getType() != InsnType.PHI && useInsn != selectorSwitch) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Reject a restoration when the selected case containers do not cover executable code
+	 * in the original switch. Otherwise the cleanup below silently removes that code.
+	 */
+	private static boolean hasUnretainedAction(SwitchData data) {
+		if (data.getType() != SwitchStringType.SINGLE_SWITCH) {
+			return false;
+		}
+		Set<InsnNode> retained = Collections.newSetFromMap(new IdentityHashMap<>());
+		MethodNode mth = data.getMth();
+		for (SwitchRegion.CaseInfo caseInfo : data.getNewCases()) {
+			RegionUtils.visitBlocks(mth, caseInfo.getContainer(), block -> retained.addAll(block.getInstructions()));
+		}
+		for (IContainer tail : data.getSharedCaseTail()) {
+			RegionUtils.visitBlocks(mth, tail, block -> retained.addAll(block.getInstructions()));
+		}
+		return containsUnretainedAction(mth, data.getPart1Region(), retained);
+	}
+
+	private static boolean containsUnretainedAction(MethodNode mth, IContainer region, Set<InsnNode> retained) {
+		boolean[] found = { false };
+		BlockNode header = ((SwitchRegion) region).getHeader();
+		RegionUtils.visitBlocks(mth, region, block -> {
+			if (block == header) {
+				return;
+			}
+			for (InsnNode insn : block.getInstructions()) {
+				if (!retained.contains(insn) && !insn.contains(AFlag.REMOVE)
+						&& !(insn.contains(AFlag.SYNTHETIC) && insn.getType() == InsnType.RETURN)
+						&& !isStringSwitchDispatchInsn(insn)) {
+					found[0] = true;
+				}
+			}
+		});
+		return found[0];
+	}
+
+	private static boolean isStringSwitchDispatchInsn(InsnNode insn) {
+		switch (insn.getType()) {
+			case CONST:
+			case CONST_STR:
+			case MOVE:
+			case MOVE_MULTI:
+			case CAST:
+			case IF:
+			case SWITCH:
+			case GOTO:
+			case NOP:
+			case PHI:
+			case BREAK:
+			case CONTINUE:
+				return true;
+			default:
+				return false;
+		}
 	}
 
 	private static IContainer addBreakForSharedTail(SwitchRegion switchRegion, IContainer container) {

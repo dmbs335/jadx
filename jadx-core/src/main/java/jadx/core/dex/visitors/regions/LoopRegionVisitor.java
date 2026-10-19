@@ -134,6 +134,13 @@ public class LoopRegionVisitor extends AbstractVisitor implements IRegionVisitor
 				|| initArg.getSVar().getUseCount() != 1) {
 			return false;
 		}
+		// Conversion removes the initializer from its block and emits it once in a for
+		// header. A duplicated block appears in multiple regions, so another copy of
+		// this loop would then be emitted without its initializer.
+		BlockNode initBlock = BlockUtils.getBlockByInsn(mth, initInsn);
+		if (initBlock != null && initBlock.contains(AFlag.DUPLICATED)) {
+			return false;
+		}
 		if (!usedOnlyInLoop(mth, loopRegion, arg)) {
 			return false;
 		}

@@ -1,9 +1,12 @@
 package jadx.core.codegen;
 
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
@@ -14,12 +17,16 @@ import jadx.api.CommentsLevel;
 import jadx.api.ICodeWriter;
 import jadx.api.metadata.annotations.InsnCodeOffset;
 import jadx.api.metadata.annotations.VarNode;
+import jadx.api.plugins.input.data.AccessFlags;
 import jadx.api.plugins.input.data.MethodHandleType;
 import jadx.api.plugins.input.data.annotations.EncodedValue;
+import jadx.core.clsp.ClspClass;
+import jadx.core.clsp.ClspMethod;
 import jadx.core.codegen.utils.CodeGenUtils;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.FieldInitInsnAttr;
+import jadx.core.dex.attributes.nodes.ClassTypeVarsAttr;
 import jadx.core.dex.attributes.nodes.FieldReplaceAttr;
 import jadx.core.dex.attributes.nodes.GenericInfoAttr;
 import jadx.core.dex.attributes.nodes.LoopLabelAttr;
@@ -59,10 +66,12 @@ import jadx.core.dex.instructions.mods.TernaryInsn;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
+import jadx.core.dex.nodes.IMethodDetails;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.nodes.RootNode;
 import jadx.core.dex.visitors.ProcessAnonymous;
+import jadx.core.utils.InsnUtils;
 import jadx.core.utils.RegionUtils;
 import jadx.core.utils.exceptions.CodegenException;
 import jadx.core.utils.exceptions.JadxRuntimeException;
@@ -186,6 +195,10 @@ public class InsnGen {
 	}
 
 	private void instanceField(ICodeWriter code, FieldInfo field, InsnArg arg) throws CodegenException {
+		instanceField(code, field, arg, false);
+	}
+
+	private void instanceField(ICodeWriter code, FieldInfo field, InsnArg arg, boolean castReceiver) throws CodegenException {
 		ClassNode pCls = mth.getParentClass();
 		FieldNode fieldNode = pCls.root().resolveField(field);
 		if (fieldNode != null) {
@@ -209,7 +222,18 @@ public class InsnGen {
 				return;
 			}
 		}
-		addArgDot(code, arg);
+		ArgType receiverType = arg.getType();
+		ArgType ownerType = field.getDeclClass().getType();
+		checkInstanceReceiver(arg, ownerType, castReceiver, "field");
+		if (castReceiver && receiverType.isObject() && !ArgType.isInstanceOf(root, receiverType, ownerType)) {
+			code.add("((");
+			useClass(code, ownerType);
+			code.add(") ");
+			addArg(code, arg);
+			code.add(").");
+		} else {
+			addArgDot(code, arg);
+		}
 		if (fieldNode != null) {
 			code.attachAnnotation(fieldNode);
 		}
@@ -319,6 +343,9 @@ public class InsnGen {
 							useType(code, resArg.getSVar().getCodeVar().getType());
 							code.add(") ");
 						}
+						if (var != null && var.getCodeVar() != null) {
+							addLambdaObjectCast(code, insn, var.getCodeVar().getType());
+						}
 					}
 				}
 				makeInsnBody(code, insn, EMPTY_FLAGS);
@@ -404,6 +431,14 @@ public class InsnGen {
 					code.add(" != 0");
 					break;
 				}
+				if (insn.getResult() != null && insn.getResult().getSVar() != null) {
+					ArgType resultType = insn.getResult().getSVar().getCodeVar().getType();
+					ArgType sourceType = getAssignmentExpressionType(moveArg, resultType);
+					if (resultType != null && sourceType != null && resultType.isTypeKnown() && sourceType.isTypeKnown()
+							&& resultType.isPrimitive() != sourceType.isPrimitive()) {
+						checkAssignmentOperand(moveArg, resultType, "local assignment");
+					}
+				}
 				if (isMoveCastNeeded(insn, moveArg)) {
 					code.add('(');
 					useType(code, insn.getResult().getSVar().getCodeVar().getType());
@@ -414,13 +449,29 @@ public class InsnGen {
 
 			case CHECK_CAST:
 			case CAST: {
+				if (isRedundantLambdaInterfaceCast(insn)) {
+					addArg(code, insn.getArg(0), true);
+					break;
+				}
+				ArgType castType = (ArgType) ((IndexInsnNode) insn).getIndex();
+				checkNonNullReferenceLiteral(insn.getArg(0), castType);
+				if (insn.getType() == InsnType.CHECK_CAST && !isFallback() && !insn.getArg(0).isZeroLiteral()) {
+					ArgType sourceType = getExpressionArgType(insn.getArg(0));
+					if (sourceType != null && sourceType.isPrimitive()) {
+						throw new CodegenException("Primitive value used as check-cast operand: " + sourceType);
+					}
+					if (sourceType != null && isDefinitelyIncompatibleReferenceTypes(sourceType, castType)) {
+						throw new CodegenException("Incompatible check-cast types: " + sourceType + " and " + castType);
+					}
+				}
 				boolean wrap = state.contains(Flags.BODY_ONLY);
 				if (wrap) {
 					code.add('(');
 				}
 				code.add('(');
-				useType(code, (ArgType) ((IndexInsnNode) insn).getIndex());
+				useType(code, castType);
 				code.add(") ");
+				addLambdaCastForNonTargetType(code, insn.getArg(0), castType);
 				addArg(code, insn.getArg(0), true);
 				if (wrap) {
 					code.add(')');
@@ -443,9 +494,13 @@ public class InsnGen {
 
 			case RETURN:
 				if (insn.getArgsCount() != 0) {
+					checkReturnOperand(insn.getArg(0));
 					code.add("return ");
-					addArg(code, insn.getArg(0), false);
+					addArgWithExpectedType(code, insn.getArg(0), mth.getReturnType());
 				} else {
+					if (!isFallback() && !ArgType.VOID.equals(mth.getReturnType())) {
+						throw new CodegenException("Missing return value for " + mth.getReturnType());
+					}
 					code.add("return");
 				}
 				break;
@@ -467,11 +522,14 @@ public class InsnGen {
 				break;
 
 			case THROW:
+				checkThrowOperand(insn.getArg(0));
 				code.add("throw ");
-				addArg(code, insn.getArg(0), true);
+				addArgWithExpectedType(code, insn.getArg(0), ArgType.THROWABLE);
 				break;
 
 			case CMP_L:
+				checkNumericCmpOperand(insn.getArg(0));
+				checkNumericCmpOperand(insn.getArg(1));
 				code.add('(');
 				addArg(code, insn.getArg(0));
 				code.add(" > ");
@@ -484,6 +542,8 @@ public class InsnGen {
 				break;
 
 			case CMP_G:
+				checkNumericCmpOperand(insn.getArg(0));
+				checkNumericCmpOperand(insn.getArg(1));
 				code.add('(');
 				addArg(code, insn.getArg(0));
 				code.add(" < ");
@@ -500,9 +560,27 @@ public class InsnGen {
 				if (wrap) {
 					code.add('(');
 				}
-				addArg(code, insn.getArg(0));
+				InsnArg instanceArg = insn.getArg(0);
+				checkNonNullReferenceLiteral(instanceArg, ArgType.OBJECT);
+				ArgType targetType = (ArgType) ((IndexInsnNode) insn).getIndex();
+				if (!isFallback() && !instanceArg.isZeroLiteral()) {
+					ArgType instanceType = getExpressionArgType(instanceArg);
+					if (instanceType != null && instanceType.isPrimitive()) {
+						throw new CodegenException("Primitive value used as instanceof operand: " + instanceType);
+					}
+					if (instanceType != null && isDefinitelyIncompatibleReferenceTypes(instanceType, targetType)) {
+						throw new CodegenException("Incompatible instanceof types: " + instanceType + " and " + targetType);
+					}
+				}
+				if (instanceArg.isLiteral() && instanceArg.contains(AType.AUTO_BOXED_LITERAL)) {
+					code.add("((Object) ");
+					addArg(code, instanceArg);
+					code.add(')');
+				} else {
+					addLambdaObjectOperand(code, instanceArg);
+				}
 				code.add(" instanceof ");
-				useType(code, (ArgType) ((IndexInsnNode) insn).getIndex());
+				useType(code, targetType);
 				if (wrap) {
 					code.add(')');
 				}
@@ -523,6 +601,7 @@ public class InsnGen {
 				int k = 0;
 				int argsCount = insn.getArgsCount();
 				for (; k < argsCount; k++) {
+					checkArrayIndex(insn.getArg(k), "dimension");
 					code.add('[');
 					addArg(code, insn.getArg(k), false);
 					code.add(']');
@@ -535,6 +614,7 @@ public class InsnGen {
 			}
 
 			case ARRAY_LENGTH:
+				checkArrayOperand(insn.getArg(0));
 				addArg(code, insn.getArg(0));
 				code.add(".length");
 				break;
@@ -555,19 +635,33 @@ public class InsnGen {
 				break;
 
 			case AGET:
+				checkArrayOperand(insn.getArg(0));
+				checkArrayIndex(insn.getArg(1), "index");
 				addArg(code, insn.getArg(0));
 				code.add('[');
 				addArg(code, insn.getArg(1), false);
 				code.add(']');
 				break;
 
-			case APUT:
+			case APUT: {
+				checkArrayOperand(insn.getArg(0));
+				checkArrayIndex(insn.getArg(1), "index");
+				ArgType arrayType = insn.getArg(0).getType();
+				if (insn.getArg(0) instanceof InsnWrapArg) {
+					InsnNode arrayInsn = ((InsnWrapArg) insn.getArg(0)).getWrapInsn();
+					if (arrayInsn.getType() == InsnType.CHECK_CAST) {
+						arrayType = ((IndexInsnNode) arrayInsn).getIndexAsType();
+					}
+				}
+				ArgType elementType = arrayType.isArray() ? arrayType.getArrayElement() : null;
+				checkAssignmentOperand(insn.getArg(2), elementType, "array assignment");
 				addArg(code, insn.getArg(0));
 				code.add('[');
 				addArg(code, insn.getArg(1), false);
 				code.add("] = ");
-				addArg(code, insn.getArg(2), false);
+				addArgWithExpectedType(code, insn.getArg(2), elementType);
 				break;
+			}
 
 			case IGET: {
 				FieldInfo fieldInfo = (FieldInfo) ((IndexInsnNode) insn).getIndex();
@@ -576,9 +670,10 @@ public class InsnGen {
 			}
 			case IPUT: {
 				FieldInfo fieldInfo = (FieldInfo) ((IndexInsnNode) insn).getIndex();
-				instanceField(code, fieldInfo, insn.getArg(1));
+				checkAssignmentOperand(insn.getArg(0), fieldInfo.getType(), "field assignment");
+				instanceField(code, fieldInfo, insn.getArg(1), insn.contains(AFlag.EXPLICIT_CAST));
 				code.add(" = ");
-				addArg(code, insn.getArg(0), false);
+				addArgWithExpectedType(code, insn.getArg(0), fieldInfo.getType());
 				break;
 			}
 
@@ -587,9 +682,10 @@ public class InsnGen {
 				break;
 			case SPUT:
 				FieldInfo field = (FieldInfo) ((IndexInsnNode) insn).getIndex();
+				checkAssignmentOperand(insn.getArg(0), field.getType(), "field assignment");
 				staticField(code, field);
 				code.add(" = ");
-				addArg(code, insn.getArg(0), false);
+				addArgWithExpectedType(code, insn.getArg(0), field.getType());
 				break;
 
 			case STR_CONCAT:
@@ -598,7 +694,7 @@ public class InsnGen {
 					code.add('(');
 				}
 				for (Iterator<InsnArg> it = insn.getArguments().iterator(); it.hasNext();) {
-					addArg(code, it.next());
+					addLambdaObjectOperand(code, it.next());
 					if (it.hasNext()) {
 						code.add(" + ");
 					}
@@ -816,6 +912,7 @@ public class InsnGen {
 	}
 
 	private void oneArgInsn(ICodeWriter code, InsnNode insn, Set<Flags> state, char op) throws CodegenException {
+		checkUnaryOperand(insn.getArg(0), op);
 		boolean wrap = state.contains(Flags.BODY_ONLY);
 		if (wrap) {
 			code.add('(');
@@ -825,6 +922,46 @@ public class InsnGen {
 		if (wrap) {
 			code.add(')');
 		}
+	}
+
+	private void checkUnaryOperand(InsnArg arg, char op) throws CodegenException {
+		if (isFallback()) {
+			return;
+		}
+		ArgType type = getExpressionArgType(arg);
+		if (type == null || !type.isTypeKnown() || type.isGenericType()) {
+			return;
+		}
+		if (type.isPrimitive()) {
+			if (op == '!') {
+				if (ArgType.BOOLEAN.equals(type)) {
+					return;
+				}
+			} else if (op == '-') {
+				if (!ArgType.BOOLEAN.equals(type) && !type.isVoid()) {
+					return;
+				}
+			} else if (op == '~') {
+				if (ArgType.INT.equals(type) || ArgType.LONG.equals(type)
+						|| ArgType.BYTE.equals(type) || ArgType.SHORT.equals(type) || ArgType.CHAR.equals(type)) {
+					return;
+				}
+			}
+		} else if (type.isObject()) {
+			String cls = type.getObject();
+			if (op == '!' && cls.equals("java.lang.Boolean")) {
+				return;
+			}
+			if (op == '-' || op == '~') {
+				if (cls.equals("java.lang.Integer") || cls.equals("java.lang.Long")
+						|| cls.equals("java.lang.Byte") || cls.equals("java.lang.Short")
+						|| cls.equals("java.lang.Character")
+						|| (op == '-' && (cls.equals("java.lang.Float") || cls.equals("java.lang.Double")))) {
+					return;
+				}
+			}
+		}
+		throw new CodegenException("Invalid unary operand type for '" + op + "': " + type);
 	}
 
 	private void fallbackOnlyInsn(InsnNode insn) throws CodegenException {
@@ -845,8 +982,9 @@ public class InsnGen {
 		code.add('{');
 		int c = insn.getArgsCount();
 		int wrap = 0;
+		ArgType elementType = insn.getArrayType().getArrayElement();
 		for (int i = 0; i < c; i++) {
-			addArg(code, insn.getArg(i), false);
+			addArgWithExpectedType(code, insn.getArg(i), elementType);
 			if (i + 1 < c) {
 				code.add(", ");
 			}
@@ -1021,7 +1159,17 @@ public class InsnGen {
 			case POLYMORPHIC:
 				InsnArg arg = insn.getArg(0);
 				if (needInvokeArg(arg)) {
-					addArgDot(code, arg);
+					ArgType ownerType = callMth.getDeclClass().getType();
+					checkInstanceReceiver(arg, ownerType, false, "invoke");
+					if (needsObjectReceiverCast(arg, ownerType)) {
+						code.add("((");
+						useClass(code, ownerType);
+						code.add(") ");
+						addArg(code, arg);
+						code.add(").");
+					} else {
+						addArgDot(code, arg);
+					}
 				}
 				k++;
 				break;
@@ -1096,6 +1244,17 @@ public class InsnGen {
 	}
 
 	private void makeInvokeLambda(ICodeWriter code, InvokeCustomNode customNode) throws CodegenException {
+		List<ArgType> lambdaInterfaces = customNode.getLambdaInterfaces();
+		if (!lambdaInterfaces.isEmpty()) {
+			code.add('(');
+			for (int i = 0; i < lambdaInterfaces.size(); i++) {
+				if (i != 0) {
+					code.add(" & ");
+				}
+				useType(code, lambdaInterfaces.get(i));
+			}
+			code.add(") ");
+		}
 		if (customNode.isUseRef()) {
 			makeRefLambda(code, customNode);
 			return;
@@ -1106,6 +1265,25 @@ public class InsnGen {
 		}
 		MethodNode callMth = (MethodNode) customNode.getCallInsn().get(AType.METHOD_DETAILS);
 		makeInlinedLambdaMethod(code, customNode, callMth);
+	}
+
+	private static boolean isRedundantLambdaInterfaceCast(InsnNode castInsn) {
+		if (castInsn.getType() != InsnType.CHECK_CAST) {
+			return false;
+		}
+		ArgType castType = (ArgType) ((IndexInsnNode) castInsn).getIndex();
+		InsnArg arg = castInsn.getArg(0);
+		while (arg instanceof InsnWrapArg) {
+			InsnNode source = ((InsnWrapArg) arg).getWrapInsn();
+			if (source instanceof InvokeCustomNode) {
+				return ((InvokeCustomNode) source).getLambdaInterfaces().contains(castType);
+			}
+			if (source.getType() != InsnType.CHECK_CAST || source.getArgsCount() != 1) {
+				return false;
+			}
+			arg = source.getArg(0);
+		}
+		return false;
 	}
 
 	private void makeRefLambda(ICodeWriter code, InvokeCustomNode customNode) throws CodegenException {
@@ -1292,10 +1470,372 @@ public class InsnGen {
 				if (i == argsCount - 1 && processVarArg(code, insn, arg)) {
 					continue;
 				}
-				addArg(code, arg, false);
+				int paramIndex = i - insn.getFirstArgOffset();
+				List<ArgType> paramTypes = insn.getCallMth().getArgumentsTypes();
+				ArgType expectedType = paramIndex >= 0 && paramIndex < paramTypes.size() ? paramTypes.get(paramIndex) : null;
+				if (arg.isInsnWrap()) {
+					checkAssignmentOperand(arg, expectedType, "method argument");
+				}
+				addArgWithExpectedType(code, arg, expectedType);
 			}
 		}
 		code.add(')');
+	}
+
+	void addArgWithExpectedType(ICodeWriter code, InsnArg arg, @Nullable ArgType expectedType) throws CodegenException {
+		checkNonNullReferenceLiteral(arg, expectedType);
+		if (arg instanceof InsnWrapArg) {
+			InsnNode wrapped = ((InsnWrapArg) arg).getWrapInsn();
+			if (expectedType != null && expectedType.isGenericType()
+					&& wrapped instanceof InvokeCustomNode
+					&& ((InvokeCustomNode) wrapped).getLambdaInterfaces().isEmpty()) {
+				code.add('(');
+				useType(code, expectedType);
+				code.add(") ");
+				addLambdaObjectCast(code, wrapped, ArgType.OBJECT);
+			} else {
+				addLambdaObjectCast(code, wrapped, expectedType);
+			}
+		}
+		addArg(code, arg, false);
+	}
+
+	private void checkNonNullReferenceLiteral(InsnArg arg, @Nullable ArgType expectedType) throws CodegenException {
+		if (!isFallback() && expectedType != null && (expectedType.isObject() || expectedType.isArray())
+				&& arg.isLiteral() && ((LiteralArg) arg).getLiteral() != 0
+				&& !arg.contains(AType.AUTO_BOXED_LITERAL)) {
+			throw new CodegenException("Non-null numeric literal used as reference type: " + expectedType);
+		}
+	}
+
+	private void checkArrayOperand(InsnArg arg) throws CodegenException {
+		checkNonNullReferenceLiteral(arg, ArgType.UNKNOWN_ARRAY);
+		if (isFallback()) {
+			return;
+		}
+		ArgType type = getExpressionArgType(arg);
+		if (type != null && type.isTypeKnown() && !type.isArray()) {
+			throw new CodegenException("Non-array value used as array operand: " + type);
+		}
+	}
+
+	private void checkArrayIndex(InsnArg arg, String operation) throws CodegenException {
+		if (isFallback()) {
+			return;
+		}
+		ArgType type = getExpressionArgType(arg);
+		if (type == null || !type.isTypeKnown() || type.isGenericType()) {
+			return;
+		}
+		if (type.isPrimitive()) {
+			if (ArgType.INT.equals(type) || ArgType.BYTE.equals(type)
+					|| ArgType.SHORT.equals(type) || ArgType.CHAR.equals(type)) {
+				return;
+			}
+		} else if (type.isObject()) {
+			String cls = type.getObject();
+			if (cls.equals("java.lang.Integer") || cls.equals("java.lang.Byte")
+					|| cls.equals("java.lang.Short") || cls.equals("java.lang.Character")) {
+				return;
+			}
+		} else if (!type.isArray()) {
+			return;
+		}
+		throw new CodegenException("Invalid array " + operation + " type: " + type);
+	}
+
+	private void checkNumericCmpOperand(InsnArg arg) throws CodegenException {
+		if (isFallback()) {
+			return;
+		}
+		ArgType type = getExpressionArgType(arg);
+		if (type == null || !type.isTypeKnown() || type.isGenericType()) {
+			return;
+		}
+		if (type.isPrimitive()) {
+			if (!ArgType.BOOLEAN.equals(type)) {
+				return;
+			}
+		} else if (type.isObject()) {
+			String cls = type.getObject();
+			if (cls.equals("java.lang.Integer") || cls.equals("java.lang.Long")
+					|| cls.equals("java.lang.Float") || cls.equals("java.lang.Double")
+					|| cls.equals("java.lang.Byte") || cls.equals("java.lang.Short")
+					|| cls.equals("java.lang.Character")) {
+				return;
+			}
+		}
+		throw new CodegenException("Non-numeric CMP operand: " + type);
+	}
+
+	void checkMonitorOperand(InsnArg arg) throws CodegenException {
+		checkNonNullReferenceLiteral(arg, ArgType.OBJECT);
+		if (!isFallback()) {
+			ArgType type = getExpressionArgType(arg);
+			if (type != null && type.isPrimitive()) {
+				throw new CodegenException("Primitive value used as monitor operand: " + type);
+			}
+		}
+	}
+
+	private void checkThrowOperand(InsnArg arg) throws CodegenException {
+		checkNonNullReferenceLiteral(arg, ArgType.THROWABLE);
+		if (isFallback() || arg.isZeroLiteral()) {
+			return;
+		}
+		ArgType type = getExpressionArgType(arg);
+		if (type != null && (type.isPrimitive() || type.isArray() || ArgType.OBJECT.equals(type)
+				|| (type.isObject() && root.getTypeCompare().compareTypes(type, ArgType.THROWABLE).isConflict()))) {
+			throw new CodegenException("Invalid throw operand type: " + type);
+		}
+	}
+
+	private void checkReturnOperand(InsnArg arg) throws CodegenException {
+		checkAssignmentOperand(arg, mth.getReturnType(), "return");
+	}
+
+	private void checkAssignmentOperand(InsnArg arg, @Nullable ArgType expected, String operation) throws CodegenException {
+		if (isFallback()) {
+			return;
+		}
+		ArgType actual = getAssignmentExpressionType(arg, expected);
+		if (actual == null || !actual.isTypeKnown() || expected == null || !expected.isTypeKnown()
+				|| actual.isGenericType() || expected.isGenericType()) {
+			return;
+		}
+		if (expected.isPrimitive()) {
+			if (actual.isPrimitive() && (isPrimitiveWideningReturn(actual, expected)
+					|| isNarrowingIntConstantReturn(arg, actual, expected))) {
+				return;
+			}
+			if (actual.isObject() && isUnboxableReturn(actual, expected)) {
+				return;
+			}
+		} else if (expected.isObject() || expected.isArray()) {
+			if (actual.isPrimitive()) {
+				ArgType boxed = getBoxedType(actual);
+				if (!isMethodParameter(arg) && boxed != null && expected.isObject()
+						&& root.getTypeCompare().compareTypes(boxed, expected).isNarrowOrEqual()) {
+					return;
+				}
+			} else if (root.getTypeCompare().compareTypes(actual, expected).isNarrowOrEqual()
+				|| root.getTypeCompare().compareTypes(actual, expected) == jadx.core.dex.visitors.typeinference.TypeCompareEnum.UNKNOWN) {
+				return;
+			}
+		} else {
+			return;
+		}
+		throw new CodegenException("Incompatible " + operation + " type: " + actual + " for " + expected);
+	}
+
+	private ArgType getAssignmentExpressionType(InsnArg arg, @Nullable ArgType expected) {
+		ArgType declared = getExpressionArgType(arg);
+		if (!arg.isInsnWrap()) {
+			return declared;
+		}
+		ArgType rendered = getRenderedArgType(arg);
+		if (rendered == null || !rendered.isTypeKnown()) {
+			return declared;
+		}
+		InsnNode producer = ((InsnWrapArg) arg).getWrapInsn();
+		if (producer instanceof BaseInvokeNode
+				&& root.getMethodUtils().getMethodGenericReturnType((BaseInvokeNode) producer) != null) {
+			return rendered;
+		}
+		if (declared != null && expected != null && expected.containsGeneric()
+				&& declared.isObject() && expected.isObject() && rendered.isObject()
+				&& declared.getObject().equals(expected.getObject())
+				&& declared.getObject().equals(rendered.getObject())) {
+			return rendered;
+		}
+		return declared;
+	}
+
+	private static boolean isNarrowingIntConstantReturn(InsnArg arg, ArgType actual, ArgType expected) {
+		if (!arg.isLiteral() || !ArgType.INT.equals(actual)) {
+			return false;
+		}
+		long value = ((LiteralArg) arg).getLiteral();
+		if (ArgType.BYTE.equals(expected)) {
+			return value >= Byte.MIN_VALUE && value <= Byte.MAX_VALUE;
+		}
+		if (ArgType.SHORT.equals(expected)) {
+			return value >= Short.MIN_VALUE && value <= Short.MAX_VALUE;
+		}
+		return ArgType.CHAR.equals(expected) && value >= Character.MIN_VALUE && value <= Character.MAX_VALUE;
+	}
+
+	@Nullable
+	private static ArgType getBoxedType(ArgType primitive) {
+		if (primitive.equals(ArgType.BOOLEAN)) {
+			return ArgType.object("java.lang.Boolean");
+		}
+		if (primitive.equals(ArgType.BYTE)) {
+			return ArgType.object("java.lang.Byte");
+		}
+		if (primitive.equals(ArgType.SHORT)) {
+			return ArgType.object("java.lang.Short");
+		}
+		if (primitive.equals(ArgType.CHAR)) {
+			return ArgType.object("java.lang.Character");
+		}
+		if (primitive.equals(ArgType.INT)) {
+			return ArgType.object("java.lang.Integer");
+		}
+		if (primitive.equals(ArgType.LONG)) {
+			return ArgType.object("java.lang.Long");
+		}
+		if (primitive.equals(ArgType.FLOAT)) {
+			return ArgType.object("java.lang.Float");
+		}
+		if (primitive.equals(ArgType.DOUBLE)) {
+			return ArgType.object("java.lang.Double");
+		}
+		return null;
+	}
+
+	private static boolean isPrimitiveWideningReturn(ArgType actual, ArgType expected) {
+		if (actual.equals(expected)) {
+			return true;
+		}
+		if (actual.equals(ArgType.BYTE)) {
+			return expected.equals(ArgType.SHORT) || expected.equals(ArgType.INT)
+					|| expected.equals(ArgType.LONG) || expected.equals(ArgType.FLOAT) || expected.equals(ArgType.DOUBLE);
+		}
+		if (actual.equals(ArgType.SHORT) || actual.equals(ArgType.CHAR)) {
+			return expected.equals(ArgType.INT) || expected.equals(ArgType.LONG)
+					|| expected.equals(ArgType.FLOAT) || expected.equals(ArgType.DOUBLE);
+		}
+		if (actual.equals(ArgType.INT)) {
+			return expected.equals(ArgType.LONG) || expected.equals(ArgType.FLOAT) || expected.equals(ArgType.DOUBLE);
+		}
+		if (actual.equals(ArgType.LONG)) {
+			return expected.equals(ArgType.FLOAT) || expected.equals(ArgType.DOUBLE);
+		}
+		return actual.equals(ArgType.FLOAT) && expected.equals(ArgType.DOUBLE);
+	}
+
+	private static boolean isUnboxableReturn(ArgType actual, ArgType expected) {
+		String cls = actual.getObject();
+		if (cls.equals("java.lang.Boolean")) {
+			return expected.equals(ArgType.BOOLEAN);
+		}
+		if (cls.equals("java.lang.Byte")) {
+			return isPrimitiveWideningReturn(ArgType.BYTE, expected);
+		}
+		if (cls.equals("java.lang.Short")) {
+			return isPrimitiveWideningReturn(ArgType.SHORT, expected);
+		}
+		if (cls.equals("java.lang.Character")) {
+			return isPrimitiveWideningReturn(ArgType.CHAR, expected);
+		}
+		if (cls.equals("java.lang.Integer")) {
+			return isPrimitiveWideningReturn(ArgType.INT, expected);
+		}
+		if (cls.equals("java.lang.Long")) {
+			return isPrimitiveWideningReturn(ArgType.LONG, expected);
+		}
+		if (cls.equals("java.lang.Float")) {
+			return isPrimitiveWideningReturn(ArgType.FLOAT, expected);
+		}
+		return cls.equals("java.lang.Double") && expected.equals(ArgType.DOUBLE);
+	}
+
+	private static ArgType getRenderedArgType(InsnArg arg) {
+		if (arg instanceof RegisterArg) {
+			RegisterArg reg = (RegisterArg) arg;
+			if (reg.getSVar() != null && reg.getSVar().getCodeVar() != null) {
+				return reg.getSVar().getCodeVar().getType();
+			}
+		}
+		return arg.getType();
+	}
+
+	private void checkInstanceReceiver(InsnArg arg, ArgType ownerType, boolean castReceiver, String operation) throws CodegenException {
+		checkNonNullReferenceLiteral(arg, ownerType);
+		if (isFallback()) {
+			return;
+		}
+		ArgType renderedType = getExpressionArgType(arg);
+		if (renderedType == null) {
+			return;
+		}
+		if (renderedType.isPrimitive()) {
+			throw new CodegenException("Primitive value used as " + operation + " receiver: " + renderedType);
+		}
+		if (!castReceiver && needsObjectReceiverCast(arg, ownerType) && isMethodParameter(arg)) {
+			throw new CodegenException("Incompatible " + operation + " receiver: " + renderedType + " for " + ownerType);
+		}
+	}
+
+	private boolean needsObjectReceiverCast(InsnArg arg, ArgType ownerType) {
+		return ArgType.OBJECT.equals(getRenderedArgType(arg))
+				&& !ArgType.OBJECT.equals(ownerType) && !arg.isZeroLiteral();
+	}
+
+	private boolean isMethodParameter(InsnArg arg) {
+		if (!(arg instanceof RegisterArg)) {
+			return false;
+		}
+		SSAVar ssaVar = ((RegisterArg) arg).getSVar();
+		if (ssaVar == null) {
+			return false;
+		}
+		for (RegisterArg mthArg : mth.getArgRegs()) {
+			if (mthArg.getSVar() == ssaVar) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private void addLambdaObjectOperand(ICodeWriter code, InsnArg arg) throws CodegenException {
+		if (!addLambdaObjectOperandIfNeeded(code, arg)) {
+			addArg(code, arg);
+		}
+	}
+
+	boolean addLambdaObjectOperandIfNeeded(ICodeWriter code, InsnArg arg) throws CodegenException {
+		if (arg instanceof InsnWrapArg) {
+			InsnNode wrapped = ((InsnWrapArg) arg).getWrapInsn();
+			if (wrapped instanceof InvokeCustomNode && ((InvokeCustomNode) wrapped).getLambdaInterfaces().isEmpty()) {
+				code.add('(');
+				addLambdaObjectCast(code, wrapped, ArgType.OBJECT);
+				addArg(code, arg, false);
+				code.add(')');
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void addLambdaObjectCast(ICodeWriter code, InsnNode insn, @Nullable ArgType expectedType) {
+		if (!ArgType.OBJECT.equals(expectedType) || !(insn instanceof InvokeCustomNode)) {
+			return;
+		}
+		InvokeCustomNode lambda = (InvokeCustomNode) insn;
+		if (lambda.getLambdaInterfaces().isEmpty()) {
+			code.add('(');
+			useType(code, lambda.getCallMth().getReturnType());
+			code.add(") ");
+		}
+	}
+
+	private void addLambdaCastForNonTargetType(ICodeWriter code, InsnArg arg, ArgType castType) {
+		if (!(arg instanceof InsnWrapArg)) {
+			return;
+		}
+		InsnNode wrapped = ((InsnWrapArg) arg).getWrapInsn();
+		if (!(wrapped instanceof InvokeCustomNode)) {
+			return;
+		}
+		InvokeCustomNode lambda = (InvokeCustomNode) wrapped;
+		ArgType lambdaType = lambda.getCallMth().getReturnType();
+		if (lambda.getLambdaInterfaces().isEmpty() && !castType.equals(lambdaType)) {
+			code.add('(');
+			useType(code, lambdaType);
+			code.add(") ");
+		}
 	}
 
 	/**
@@ -1312,12 +1852,192 @@ public class InsnGen {
 		if (insn.getType() != InsnType.FILLED_NEW_ARRAY) {
 			return false;
 		}
+		ArgType arrayType = ((FilledNewArrayNode) insn).getArrayType();
+		IMethodDetails details = root.getMethodUtils().getMethodDetails(invokeInsn);
+		List<ArgType> paramTypes = details == null
+				? invokeInsn.getCallMth().getArgumentsTypes() : details.getArgTypes();
+		ArgType paramArrayType = paramTypes.isEmpty() ? null : paramTypes.get(paramTypes.size() - 1);
+		if (paramArrayType != null && paramArrayType.isArray()
+				&& !paramArrayType.getArrayElement().isGenericType()
+				&& !sameVarargArrayErasure(paramArrayType, arrayType)) {
+			// A covariant array (e.g. String[] passed to Object...) is one array argument,
+			// not a sequence of vararg elements.
+			return false;
+		}
 		int count = insn.getArgsCount();
+		ArgType elementType = arrayType.getArrayElement();
 		for (int i = 0; i < count; i++) {
 			InsnArg elemArg = insn.getArg(i);
-			addArg(code, elemArg, false);
+			InsnNode elemInsn = elemArg instanceof InsnWrapArg ? ((InsnWrapArg) elemArg).getWrapInsn() : null;
+			if (elemInsn instanceof InvokeCustomNode && ((InvokeCustomNode) elemInsn).isUseRef()) {
+				ArgType targetType = inferMethodRefVarArgType((InvokeCustomNode) elemInsn);
+				if (targetType != null) {
+					code.add('(');
+					useType(code, targetType);
+					code.add(") ");
+				}
+				addArg(code, elemArg, false);
+			} else if (elemInsn instanceof InvokeCustomNode) {
+				// A varargs call can target T... even when the allocated array has a concrete
+				// element type. T gives a lambda expression no functional target at the call site.
+				// The instantiated SAM signature supplies the target for lambda parameter types,
+				// including erased parameters that the body dereferences or unboxes.
+				ArgType targetType = inferMethodRefVarArgType((InvokeCustomNode) elemInsn);
+				if (targetType != null) {
+					code.add('(');
+					useType(code, targetType);
+					code.add(") ");
+				} else {
+					addLambdaObjectCast(code, elemInsn, ArgType.OBJECT);
+				}
+				addArg(code, elemArg, false);
+			} else {
+				if (count == 1 && (elemArg.getType().isArray()
+						|| elemArg.isZeroLiteral() && elemArg.getType().isObject())) {
+					// Without this cast a single null/array value can bind to the whole
+					// varargs array parameter instead of becoming one element.
+					code.add('(');
+					useType(code, elementType);
+					code.add(") ");
+				}
+				addArgWithExpectedType(code, elemArg, elementType);
+			}
 			if (i < count - 1) {
 				code.add(", ");
+			}
+		}
+		return true;
+	}
+
+	private static boolean sameVarargArrayErasure(ArgType formal, ArgType actual) {
+		if (formal.equals(actual)) {
+			return true;
+		}
+		ArgType formalElement = formal.getArrayElement();
+		ArgType actualElement = actual.getArrayElement();
+		return formalElement.isObject() && actualElement.isObject()
+				&& formalElement.getObject().equals(actualElement.getObject());
+	}
+
+	@Nullable
+	private ArgType inferMethodRefVarArgType(InvokeCustomNode lambda) {
+		ArgType interfaceType = lambda.getCallMth().getReturnType();
+		MethodInfo instantiated = lambda.getInstantiatedMthInfo();
+		if (instantiated == null) {
+			return null;
+		}
+		List<ArgType> typeVars = root.getTypeUtils().getClassGenerics(interfaceType);
+		if (typeVars.isEmpty()) {
+			return interfaceType;
+		}
+		ClassNode resolved = root.resolveClass(interfaceType);
+		ArgType directTarget = inferMethodRefTypeFromClass(interfaceType, typeVars, instantiated,
+				interfaceType, Map.of());
+		if (directTarget != null) {
+			return directTarget;
+		}
+		if (resolved != null) {
+			ClassTypeVarsAttr typeVarsAttr = root.getTypeUtils().getClassTypeVars(interfaceType);
+			if (typeVarsAttr != null) {
+				ArgType[] inheritedTarget = new ArgType[1];
+				root.getTypeUtils().visitSuperTypes(interfaceType, (source, parent) -> {
+					if (inheritedTarget[0] == null) {
+						Map<ArgType, ArgType> inheritedMap = typeVarsAttr.getTypeVarsMapFor(parent);
+						if (!inheritedMap.isEmpty()) {
+							inheritedTarget[0] = inferMethodRefTypeFromClass(interfaceType, typeVars,
+									instantiated, parent, inheritedMap);
+						}
+					}
+				});
+				return inheritedTarget[0];
+			}
+		}
+		return null;
+	}
+
+	@Nullable
+	private ArgType inferMethodRefTypeFromClass(ArgType interfaceType, List<ArgType> typeVars,
+			MethodInfo instantiated, ArgType declaringType, Map<ArgType, ArgType> typeVarMap) {
+		ClassNode resolved = root.resolveClass(declaringType);
+		if (resolved != null) {
+			for (MethodNode candidate : resolved.getMethods()) {
+				if (candidate.getAccessFlags().isAbstract()
+						&& candidate.getName().equals(instantiated.getName())) {
+					ArgType target = inferMethodRefVarArgType(interfaceType, typeVars,
+							candidate.getArgTypes(), candidate.getReturnType(), instantiated, typeVarMap);
+					if (target != null) {
+						return target;
+					}
+				}
+			}
+		}
+		ClspClass clspClass = root.getClsp().getClsDetails(declaringType);
+		if (clspClass != null) {
+			for (ClspMethod candidate : clspClass.getMethodsArray()) {
+				if (AccessFlags.hasFlag(candidate.getRawAccessFlags(), AccessFlags.ABSTRACT)
+						&& candidate.getMethodInfo().getName().equals(instantiated.getName())) {
+					ArgType target = inferMethodRefVarArgType(interfaceType, typeVars,
+							candidate.getArgTypes(), candidate.getReturnType(), instantiated, typeVarMap);
+					if (target != null) {
+						return target;
+					}
+				}
+			}
+		}
+		return null;
+	}
+
+	@Nullable
+	private static ArgType inferMethodRefVarArgType(ArgType interfaceType, List<ArgType> typeVars,
+			List<ArgType> formalArgs, ArgType formalReturn, MethodInfo instantiated,
+			Map<ArgType, ArgType> typeVarMap) {
+		List<ArgType> actualArgs = instantiated.getArgumentsTypes();
+		if (formalArgs.size() != actualArgs.size()) {
+			return null;
+		}
+		Map<String, ArgType> bindings = new HashMap<>();
+		for (int i = 0; i < formalArgs.size(); i++) {
+			if (!bindMethodRefType(formalArgs.get(i), actualArgs.get(i), bindings, typeVarMap)) {
+				return null;
+			}
+		}
+		if (!bindMethodRefType(formalReturn, instantiated.getReturnType(), bindings, typeVarMap)) {
+			return null;
+		}
+		List<ArgType> resolved = new ArrayList<>(typeVars.size());
+		for (ArgType typeVar : typeVars) {
+			ArgType type = bindings.get(typeVar.getObject());
+			if (type == null || type.isPrimitive()) {
+				return null;
+			}
+			resolved.add(type);
+		}
+		return ArgType.generic(interfaceType, resolved);
+	}
+
+	private static boolean bindMethodRefType(ArgType formal, ArgType actual, Map<String, ArgType> bindings,
+			Map<ArgType, ArgType> typeVarMap) {
+		if (formal.isGenericType()) {
+			ArgType sourceVar = typeVarMap.getOrDefault(formal, formal);
+			if (!sourceVar.isGenericType()) {
+				return sourceVar.equals(actual);
+			}
+			ArgType previous = bindings.putIfAbsent(sourceVar.getObject(), actual);
+			return previous == null || previous.equals(actual);
+		}
+		if (formal.isArray() && actual.isArray()) {
+			return bindMethodRefType(formal.getArrayElement(), actual.getArrayElement(), bindings, typeVarMap);
+		}
+		if (formal.isGeneric() && actual.isGeneric() && formal.getObject().equals(actual.getObject())) {
+			List<ArgType> formalTypes = formal.getGenericTypes();
+			List<ArgType> actualTypes = actual.getGenericTypes();
+			if (formalTypes.size() != actualTypes.size()) {
+				return false;
+			}
+			for (int i = 0; i < formalTypes.size(); i++) {
+				if (!bindMethodRefType(formalTypes.get(i), actualTypes.get(i), bindings, typeVarMap)) {
+					return false;
+				}
 			}
 		}
 		return true;
@@ -1336,9 +2056,13 @@ public class InsnGen {
 		} else {
 			condGen.wrap(code, insn.getCondition());
 			code.add(" ? ");
-			addArg(code, first, false);
+			if (!addLambdaObjectOperandIfNeeded(code, first)) {
+				addArg(code, first, false);
+			}
 			code.add(" : ");
-			addArg(code, second, false);
+			if (!addLambdaObjectOperandIfNeeded(code, second)) {
+				addArg(code, second, false);
+			}
 		}
 		if (wrap) {
 			code.add(')');
@@ -1346,6 +2070,17 @@ public class InsnGen {
 	}
 
 	private void makeArith(ArithNode insn, ICodeWriter code, Set<Flags> state) throws CodegenException {
+		// String concatenation is represented as ADD by the Java input plugin.
+		// A dex numeric opcode retains its numeric result init type, even if an
+		// invalid input later causes a String operand to be inferred.
+		boolean stringConcat = insn.getOp() == ArithOp.ADD
+				&& (insn.contains(AFlag.ARITH_ONEARG)
+						? ArgType.STRING.equals(getExpressionArgType(insn.getArg(0)))
+						: insn.getResult() != null && ArgType.STRING.equals(insn.getResult().getInitType()));
+		if (!stringConcat) {
+			checkArithOperand(insn.getArg(0), insn.getOp());
+			checkArithOperand(insn.getArg(1), insn.getOp());
+		}
 		if (insn.contains(AFlag.ARITH_ONEARG)) {
 			makeArithOneArg(insn, code);
 			return;
@@ -1363,6 +2098,144 @@ public class InsnGen {
 		if (wrap) {
 			code.add(')');
 		}
+	}
+
+	private void checkArithOperand(InsnArg arg, ArithOp op) throws CodegenException {
+		if (isFallback()) {
+			return;
+		}
+		if (arg.isInsnWrap()) {
+			ArgType declared = InsnUtils.getDeclaredResultType(((InsnWrapArg) arg).getWrapInsn());
+			if (declared != null && declared.isTypeKnown() && !declared.isPrimitive()) {
+				// A dex numeric opcode does not perform Java source-level unboxing.
+				throw new CodegenException("Invalid " + op + " operand type: " + declared);
+			}
+		}
+		ArgType type = getExpressionArgType(arg);
+		if (type == null || !type.isTypeKnown() || type.isGenericType()) {
+			return;
+		}
+		boolean bitOp = op.isBitOp();
+		boolean shift = op == ArithOp.SHL || op == ArithOp.SHR || op == ArithOp.USHR;
+		if (type.isPrimitive()) {
+			if (ArgType.BOOLEAN.equals(type) && bitOp) {
+				return;
+			}
+			if (ArgType.INT.equals(type) || ArgType.LONG.equals(type)
+					|| ArgType.BYTE.equals(type) || ArgType.SHORT.equals(type) || ArgType.CHAR.equals(type)) {
+				return;
+			}
+			if (!bitOp && !shift && (ArgType.FLOAT.equals(type) || ArgType.DOUBLE.equals(type))) {
+				return;
+			}
+		} else if (type.isObject()) {
+			if (isMethodParameter(arg)) {
+				// A numeric dex opcode cannot implicitly unbox a reference parameter.
+				throw new CodegenException("Invalid " + op + " operand type: " + type);
+			}
+			String cls = type.getObject();
+			if (cls.equals("java.lang.Boolean") && bitOp) {
+				return;
+			}
+			if (cls.equals("java.lang.Integer") || cls.equals("java.lang.Long")
+					|| cls.equals("java.lang.Byte") || cls.equals("java.lang.Short")
+					|| cls.equals("java.lang.Character")) {
+				return;
+			}
+			if (!bitOp && !shift && (cls.equals("java.lang.Float") || cls.equals("java.lang.Double"))) {
+				return;
+			}
+		}
+		throw new CodegenException("Invalid " + op + " operand type: " + type);
+	}
+
+	private static ArgType getExpressionArgType(InsnArg arg) {
+		if (arg.isInsnWrap()) {
+			InsnNode wrapped = ((InsnWrapArg) arg).getWrapInsn();
+			ArgType declared = InsnUtils.getDeclaredResultType(wrapped);
+			if (declared != null) {
+				return declared;
+			}
+		}
+		return getRenderedArgType(arg);
+	}
+
+	private boolean isKnownClassType(ArgType type) {
+		ClassNode cls = root.resolveClass(type);
+		if (cls != null) {
+			return !cls.getAccessFlags().isInterface();
+		}
+		ClspClass clspCls = root.getClsp().getClsDetails(type);
+		return clspCls != null && !clspCls.isInterface();
+	}
+
+	private boolean isKnownFinalClassType(ArgType type) {
+		ClassNode cls = root.resolveClass(type);
+		if (cls != null) {
+			return !cls.getAccessFlags().isInterface() && cls.getAccessFlags().isFinal();
+		}
+		ClspClass clspCls = root.getClsp().getClsDetails(type);
+		return clspCls != null && !clspCls.isInterface() && clspCls.hasAccFlag(AccessFlags.FINAL);
+	}
+
+	private boolean isKnownInterfaceType(ArgType type) {
+		ClassNode cls = root.resolveClass(type);
+		if (cls != null) {
+			return cls.getAccessFlags().isInterface();
+		}
+		ClspClass clspCls = root.getClsp().getClsDetails(type);
+		return clspCls != null && clspCls.isInterface();
+	}
+
+	private boolean isDefinitelyIncompatibleObjectTypes(ArgType source, ArgType target) {
+		if (!source.isObject() || !target.isObject()
+				|| !root.getTypeCompare().compareTypes(source, target).isConflict()) {
+			return false;
+		}
+		return (isKnownClassType(source) && isKnownClassType(target))
+				|| (isKnownFinalClassType(source) && isKnownInterfaceType(target))
+				|| (isKnownInterfaceType(source) && isKnownFinalClassType(target));
+	}
+
+	private boolean isDefinitelyIncompatibleArrayTypes(ArgType source, ArgType target) {
+		if (!source.isArray() || !target.isArray()) {
+			return false;
+		}
+		ArgType sourceElement = source.getArrayElement();
+		ArgType targetElement = target.getArrayElement();
+		if (sourceElement.isPrimitive() || targetElement.isPrimitive()) {
+			return !sourceElement.equals(targetElement);
+		}
+		if (sourceElement.isArray()) {
+			return targetElement.isArray()
+					? isDefinitelyIncompatibleArrayTypes(sourceElement, targetElement)
+					: isDefinitelyIncompatibleArrayObjectTypes(targetElement);
+		}
+		if (targetElement.isArray()) {
+			return isDefinitelyIncompatibleArrayObjectTypes(sourceElement);
+		}
+		return isDefinitelyIncompatibleObjectTypes(sourceElement, targetElement);
+	}
+
+	private boolean isDefinitelyIncompatibleArrayObjectTypes(ArgType type) {
+		if (!type.isObject() || type.isGenericType()) {
+			return false;
+		}
+		String name = type.getObject();
+		return !name.equals("java.lang.Object")
+				&& !name.equals("java.lang.Cloneable")
+				&& !name.equals("java.io.Serializable");
+	}
+
+	private boolean isDefinitelyIncompatibleArrayAndObjectTypes(ArgType source, ArgType target) {
+		return (source.isArray() && target.isObject() && isDefinitelyIncompatibleArrayObjectTypes(target))
+				|| (source.isObject() && target.isArray() && isDefinitelyIncompatibleArrayObjectTypes(source));
+	}
+
+	private boolean isDefinitelyIncompatibleReferenceTypes(ArgType source, ArgType target) {
+		return isDefinitelyIncompatibleObjectTypes(source, target)
+				|| isDefinitelyIncompatibleArrayTypes(source, target)
+				|| isDefinitelyIncompatibleArrayAndObjectTypes(source, target);
 	}
 
 	private void makeArithOneArg(ArithNode insn, ICodeWriter code) throws CodegenException {

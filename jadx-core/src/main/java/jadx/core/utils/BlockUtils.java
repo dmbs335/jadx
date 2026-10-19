@@ -1471,11 +1471,10 @@ public class BlockUtils {
 			}
 			traversedBlocks.add(predecessor);
 			if (predecessor.getInstructions().isEmpty()) {
-				followEmptyUpPathWithinSet(results, start, traversableBlocks, traversedBlocks);
+				followEmptyUpPathWithinSet(results, predecessor, traversableBlocks, traversedBlocks);
 			} else {
 				results.add(predecessor);
 			}
-			start = predecessor;
 		}
 	}
 

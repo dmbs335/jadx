@@ -41,16 +41,20 @@ import jadx.core.dex.instructions.mods.TernaryInsn;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
+import jadx.core.dex.nodes.IContainer;
 import jadx.core.dex.nodes.InsnContainer;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
+import jadx.core.dex.regions.Region;
 import jadx.core.dex.regions.conditions.IfCondition;
 import jadx.core.dex.regions.conditions.IfCondition.Mode;
+import jadx.core.dex.regions.conditions.IfRegion;
 import jadx.core.dex.visitors.regions.variables.ProcessVariables;
 import jadx.core.dex.visitors.shrink.CodeShrinkVisitor;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnList;
 import jadx.core.utils.InsnRemover;
+import jadx.core.utils.RegionUtils;
 import jadx.core.utils.exceptions.JadxException;
 
 /**
@@ -100,7 +104,7 @@ public class PrepareForCodeGen extends AbstractVisitor {
 			addArrayPutCasts(mth, block);
 			collapseMarkedFloatIdentityConversions(mth, block);
 			removeParenthesis(block);
-			restoreSameCodeVarIncrementOrder(block);
+			restoreSameCodeVarIncrementOrder(mth, block);
 			modifyArith(block);
 			checkConstUsage(block);
 			addNullCasts(mth, block);
@@ -108,6 +112,30 @@ public class PrepareForCodeGen extends AbstractVisitor {
 		moveConstructorInConstructor(mth);
 		collectFieldsUsageInAnnotations(mth, mth);
 		eraseUnboundGenericLocals(mth);
+		warnOverwrittenReceiverCodeVar(mth);
+	}
+
+	private static void warnOverwrittenReceiverCodeVar(MethodNode mth) {
+		if (mth.getThisArg() == null) {
+			return;
+		}
+		for (BlockNode block : mth.getBasicBlocks()) {
+			if (block.contains(AFlag.DONT_GENERATE)) {
+				continue;
+			}
+			for (InsnNode insn : block.getInstructions()) {
+				RegisterArg result = insn.getResult();
+				if (result != null
+						&& !result.contains(AFlag.THIS)
+						&& !insn.contains(AFlag.DONT_GENERATE)
+						&& result.getSVar() != null
+						&& result.getSVar().getCodeVar() != null
+						&& result.getSVar().getCodeVar().isThis()) {
+					mth.addWarn("Overwritten receiver register merged with 'this' variable at " + block);
+					return;
+				}
+			}
+		}
 	}
 
 	private static void eraseUnboundGenericLocals(MethodNode mth) {
@@ -185,8 +213,14 @@ public class PrepareForCodeGen extends AbstractVisitor {
 					RegisterArg result = insn.getResult();
 					if (result != null
 							&& result.getSVar() != null
-							&& result.getSVar().getUseCount() == 0
-							&& result.isNameEquals(insn.getArg(0))) {
+							&& ((result.getSVar().getUseCount() == 0
+									&& result.isNameEquals(insn.getArg(0)))
+									|| result.getSVar().getCodeVar() != null
+											&& result.getSVar().getCodeVar().isThis()
+											&& insn.getArg(0).isRegister()
+											&& insn.getArg(0).contains(AFlag.THIS))) {
+						// The receiver is implicit in Java. A DEX register restored from `this`
+						// after temporary reuse must not generate the invalid `this = this`.
 						remove = true;
 					}
 					break;
@@ -424,7 +458,7 @@ public class PrepareForCodeGen extends AbstractVisitor {
 	 * by the later expression. Move a local increment past consecutive pure expressions which still
 	 * consume the old SSA version. Stop at any operation that can expose the timing of the update.
 	 */
-	private static void restoreSameCodeVarIncrementOrder(BlockNode block) {
+	private static void restoreSameCodeVarIncrementOrder(MethodNode mth, BlockNode block) {
 		List<InsnNode> insns = block.getInstructions();
 		for (int index = 0; index < insns.size(); index++) {
 			InsnNode insn = insns.get(index);
@@ -465,7 +499,88 @@ public class PrepareForCodeGen extends AbstractVisitor {
 				insns.add(moveAfter, insn);
 				index = moveAfter;
 			}
+			if (block.contains(AFlag.LOOP_START) || block.contains(AFlag.LOOP_END)
+					|| block.contains(AFlag.DONT_GENERATE) || insn.contains(AFlag.DONT_GENERATE)
+					|| mth.getRegion() == null) {
+				// Loop headers have separate scopes; omitted updates need no emitted snapshot.
+				continue;
+			}
+			// A branch or a potentially throwing expression cannot be crossed by the update.
+			// Preserve the old value explicitly instead of rendering both SSA versions as
+			// the already-updated Java variable (for example, value++; if (oldValue < 0)).
+			List<RegisterArg> remainingUses = new ArrayList<>();
+			for (int nextIndex = index + 1; nextIndex < insns.size(); nextIndex++) {
+				insns.get(nextIndex).getRegisterArgs(remainingUses);
+			}
+			// Java input can split the increment and its comparison into adjacent blocks.
+			// Only include a single-entry IF, never a loop condition or a shared join.
+			if (block.getCleanSuccessors().size() == 1) {
+				BlockNode next = block.getCleanSuccessors().get(0);
+				if (next.getPredecessors().size() == 1
+						&& !next.contains(AFlag.LOOP_START) && !next.contains(AFlag.LOOP_END)
+						&& next.getInstructions().size() == 1
+						&& next.getInstructions().get(0).getType() == InsnType.IF
+						&& usesSsaVar(next.getInstructions().get(0), oldValue.getSVar())
+						&& hasFollowingIfScope(mth.getRegion(), block, next)) {
+					next.getInstructions().get(0).getRegisterArgs(remainingUses);
+				}
+			}
+			remainingUses.removeIf(arg -> arg.getSVar() != oldValue.getSVar());
+			if (!remainingUses.isEmpty()) {
+				if (!(RegionUtils.getBlockContainer(mth.getRegion(), block) instanceof Region)) {
+					// The snapshot needs an emitted statement, not a condition-only container.
+					continue;
+				}
+				RegisterArg saved = InsnArg.reg(oldValue.getRegNum(), oldValue.getType());
+				SSAVar savedVar = mth.makeNewSVar(saved);
+				savedVar.setType(oldValue.getType());
+				CodeVar codeVar = new CodeVar();
+				codeVar.setType(oldValue.getType());
+				codeVar.setDeclared(true);
+				savedVar.setCodeVar(codeVar);
+				InsnNode snapshot = new InsnNode(InsnType.MOVE, 1);
+				snapshot.setResult(saved);
+				snapshot.addArg(oldValue.duplicate());
+				snapshot.add(AFlag.DECLARE_VAR);
+				for (RegisterArg use : remainingUses) {
+					use.getParentInsn().replaceArg(use, saved.duplicate());
+				}
+				insns.add(index++, snapshot);
+			}
 		}
+	}
+
+	static boolean hasFollowingIfScope(IContainer root, BlockNode block, BlockNode condition) {
+		IContainer container = RegionUtils.getBlockContainer(root, block);
+		if (!(container instanceof Region)) {
+			return false;
+		}
+		List<IContainer> siblings = ((Region) container).getSubBlocks();
+		int index = siblings.indexOf(block);
+		if (index < 0 || index + 1 >= siblings.size()) {
+			return false;
+		}
+		IContainer following = siblings.get(index + 1);
+		// Plain Region wrappers emit their children in sequence without opening a scope.
+		// Only descend through the first child: never cross another statement or branch.
+		while (following instanceof Region) {
+			List<IContainer> children = ((Region) following).getSubBlocks();
+			if (children.isEmpty()) {
+				return false;
+			}
+			following = children.get(0);
+		}
+		if (!(following instanceof IfRegion)) {
+			return false;
+		}
+		IfRegion branch = (IfRegion) following;
+		IfCondition ifCondition = branch.getCondition();
+		// A shared/merged condition can also be emitted from another lexical scope.
+		return branch.getConditionBlocks().size() == 1
+				&& branch.getConditionBlocks().get(0) == condition
+				&& ifCondition != null && ifCondition.isCompare()
+				&& !ifCondition.getCompare().isSharedView()
+				&& ifCondition.getCompare().getInsn() == BlockUtils.getLastInsn(condition);
 	}
 
 	private static boolean usesSsaVar(InsnNode insn, SSAVar ssaVar) {
@@ -513,7 +628,7 @@ public class PrepareForCodeGen extends AbstractVisitor {
 		String callType = ctrInsn.getCallType().toString().toLowerCase();
 		BlockNode blockByInsn = BlockUtils.getBlockByInsn(mth, ctrInsn);
 		if (blockByInsn == null) {
-			mth.addWarn("Failed to move " + callType + " instruction to top");
+			mth.addError("Failed to move " + callType + " instruction to top", null);
 			return;
 		}
 
@@ -605,7 +720,7 @@ public class PrepareForCodeGen extends AbstractVisitor {
 				regArgs.removeIf(reg -> isInlineAssignmentInConstructor(ctrInsn, reg));
 			}
 			if (!regArgs.isEmpty()) {
-				mth.addWarnComment("Illegal instructions before constructor call");
+				mth.addError("Illegal instructions before constructor call", null);
 				return;
 			}
 			boolean firstInsnAfterInlining = BlockUtils.isFirstInsn(mth, ctrInsn);
@@ -616,7 +731,8 @@ public class PrepareForCodeGen extends AbstractVisitor {
 					&& !isSafeLocalConstructorPrefixMove(mth, ctrInsn, blockByInsn)
 					&& !isSafeKotlinLambdaConstructorMove(mth, ctrInsn, blockByInsn)
 					&& !isSafeKotlinContinuationConstructorMove(mth, ctrInsn, blockByInsn)) {
-				mth.addWarnComment("'" + callType + "' call moved to the top of the method (can break code semantics)");
+				mth.addError("Cannot move '" + callType + "' call to the top without changing code semantics", null);
+				return;
 			}
 		}
 

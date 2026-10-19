@@ -1,26 +1,26 @@
 package jadx.core.dex.instructions.args;
 
 public enum PrimitiveType {
-	BOOLEAN("Z", "boolean", ArgType.object("java.lang.Boolean")),
-	CHAR("C", "char", ArgType.object("java.lang.Character")),
-	BYTE("B", "byte", ArgType.object("java.lang.Byte")),
-	SHORT("S", "short", ArgType.object("java.lang.Short")),
-	INT("I", "int", ArgType.object("java.lang.Integer")),
-	FLOAT("F", "float", ArgType.object("java.lang.Float")),
-	LONG("J", "long", ArgType.object("java.lang.Long")),
-	DOUBLE("D", "double", ArgType.object("java.lang.Double")),
-	OBJECT("L", "OBJECT", ArgType.OBJECT),
-	ARRAY("[", "ARRAY", ArgType.OBJECT_ARRAY),
-	VOID("V", "void", ArgType.object("java.lang.Void"));
+	BOOLEAN("Z", "boolean", "java.lang.Boolean"),
+	CHAR("C", "char", "java.lang.Character"),
+	BYTE("B", "byte", "java.lang.Byte"),
+	SHORT("S", "short", "java.lang.Short"),
+	INT("I", "int", "java.lang.Integer"),
+	FLOAT("F", "float", "java.lang.Float"),
+	LONG("J", "long", "java.lang.Long"),
+	DOUBLE("D", "double", "java.lang.Double"),
+	OBJECT("L", "OBJECT", "java.lang.Object"),
+	ARRAY("[", "ARRAY", "java.lang.Object"),
+	VOID("V", "void", "java.lang.Void");
 
 	private final String shortName;
 	private final String longName;
-	private final ArgType boxType;
+	private final String boxClassName;
 
-	PrimitiveType(String shortName, String longName, ArgType boxType) {
+	PrimitiveType(String shortName, String longName, String boxClassName) {
 		this.shortName = shortName;
 		this.longName = longName;
-		this.boxType = boxType;
+		this.boxClassName = boxClassName;
 	}
 
 	public String getShortName() {
@@ -32,7 +32,23 @@ public enum PrimitiveType {
 	}
 
 	public ArgType getBoxType() {
-		return boxType;
+		return BoxTypes.TYPES[ordinal()];
+	}
+
+	// ArgType initializes its primitive constants from this enum. Do not initialize
+	// ArgType while constructing the enum, or either initialization order can see nulls.
+	private static final class BoxTypes {
+		private static final ArgType[] TYPES = init();
+
+		private static ArgType[] init() {
+			PrimitiveType[] primitives = values();
+			ArgType[] types = new ArgType[primitives.length];
+			for (PrimitiveType primitive : primitives) {
+				types[primitive.ordinal()] = primitive == ARRAY
+						? ArgType.OBJECT_ARRAY : ArgType.object(primitive.boxClassName);
+			}
+			return types;
+		}
 	}
 
 	@Override

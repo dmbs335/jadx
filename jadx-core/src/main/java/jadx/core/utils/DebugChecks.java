@@ -8,6 +8,7 @@ import java.util.function.Supplier;
 
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.nodes.EdgeInsnAttr;
 import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.attributes.nodes.TmpEdgeAttr;
 import jadx.core.dex.instructions.IfNode;
@@ -214,7 +215,23 @@ public class DebugChecks {
 			return false;
 		}
 		BlockNode block = BlockUtils.getBlockByInsn(mth, insn);
-		return block == null;
+		return block == null && !isEdgeInsn(mth, insn);
+	}
+
+	/**
+	 * Region construction stores synthetic control-flow instructions on CFG edges. These instructions
+	 * are not members of a basic block, but can still contain valid SSA uses (for example a rethrow of
+	 * a catch argument). Treat only instructions that are still attached to an edge as present.
+	 */
+	private static boolean isEdgeInsn(MethodNode mth, InsnNode insn) {
+		for (BlockNode block : mth.getBasicBlocks()) {
+			for (EdgeInsnAttr edgeInsn : block.getAll(AType.EDGE_INSN)) {
+				if (edgeInsn.getInsn() == insn) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	private static void checkRegisterArg(MethodNode mth, RegisterArg reg) {
@@ -230,7 +247,7 @@ public class DebugChecks {
 				throw new JadxRuntimeException("Incorrect parentInsn: " + parentInsn + ", must contains arg: " + reg);
 			}
 			BlockNode parentInsnBlock = BlockUtils.getBlockByInsn(mth, parentInsn);
-			if (parentInsnBlock == null) {
+			if (parentInsnBlock == null && !isEdgeInsn(mth, parentInsn)) {
 				throw new JadxRuntimeException("Parent insn not found in blocks tree for: " + reg
 						+ "\n insn: " + parentInsn);
 			}

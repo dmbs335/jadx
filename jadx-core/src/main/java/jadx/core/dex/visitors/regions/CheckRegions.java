@@ -1,8 +1,10 @@
 package jadx.core.dex.visitors.regions;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.slf4j.Logger;
@@ -16,6 +18,8 @@ import jadx.core.codegen.MethodGen;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.PhiInsn;
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
@@ -28,6 +32,7 @@ import jadx.core.dex.regions.loops.LoopRegion;
 import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnRemover;
+import jadx.core.utils.RegionUtils;
 import jadx.core.utils.exceptions.CodegenException;
 import jadx.core.utils.exceptions.JadxException;
 
@@ -45,6 +50,8 @@ public class CheckRegions extends AbstractVisitor {
 
 		// check if all blocks included in regions
 		Set<BlockNode> blocksInRegions = new HashSet<>();
+		Map<BlockNode, Integer> regionBlockUses = mth.contains(AType.UNSAFE_REGION_DUPLICATION)
+				? new HashMap<>() : null;
 		DepthRegionTraversal.traverse(mth, new AbstractRegionVisitor() {
 			@Override
 			public void processBlock(MethodNode mth, IBlock container) {
@@ -52,6 +59,9 @@ public class CheckRegions extends AbstractVisitor {
 					return;
 				}
 				BlockNode block = (BlockNode) container;
+				if (regionBlockUses != null) {
+					regionBlockUses.merge(block, 1, Integer::sum);
+				}
 				if (blocksInRegions.add(block)) {
 					return;
 				}
@@ -65,8 +75,17 @@ public class CheckRegions extends AbstractVisitor {
 				}
 			}
 		});
+		if (regionBlockUses != null) {
+			reportRemainingUnsafeDuplications(mth, regionBlockUses);
+		}
 		if (mth.getBasicBlocks().size() != blocksInRegions.size()) {
 			for (BlockNode block : mth.getBasicBlocks()) {
+				if (!blocksInRegions.contains(block) && inlineOrphanPhiProjectionMove(mth, block)) {
+					continue;
+				}
+				if (!blocksInRegions.contains(block) && inlineOrphanDominatedProjectionMoves(mth, block)) {
+					continue;
+				}
 				if (!blocksInRegions.contains(block) && inlineSyntheticSameRegisterMove(mth, block)) {
 					continue;
 				}
@@ -79,7 +98,7 @@ public class CheckRegions extends AbstractVisitor {
 						&& !isImplicitRemovedHandlerRethrow(mth, block)
 						&& !isGeneratedSyntheticDuplicate(block, blocksInRegions)) {
 					String blockCode = getBlockInsnStr(mth, block).replace("*/", "*\\/");
-					mth.addWarn("Code restructure failed: missing block: " + block + ", code lost:" + blockCode);
+					mth.addError("Code restructure failed: missing block: " + block + ", code lost:" + blockCode, null);
 				}
 			}
 		}
@@ -90,14 +109,95 @@ public class CheckRegions extends AbstractVisitor {
 				if (region instanceof LoopRegion) {
 					// check loop conditions
 					BlockNode loopHeader = ((LoopRegion) region).getHeader();
-					if (loopHeader != null && !loopHeader.contains(AFlag.ALLOW_MULTIPLE_INSNS_LOOP_COND)
-							&& loopHeader.getInstructions().size() != 1) {
-						mth.addWarn("Incorrect condition in loop: " + loopHeader);
+					if (hasInvalidLoopCondition(loopHeader)) {
+						mth.addError("Incorrect condition in loop: " + loopHeader, null);
 					}
 				}
 				return true;
 			}
 		});
+		// Splitting a receiver PHI can expose a missing loop continuation in the region tree.
+		// Other normalized coroutine loops may intentionally be represented by an endless loop,
+		// which has no separate exit block and is not by itself a codegen failure.
+		if (mth.contains(AType.NORMALIZED_COROUTINE_LOOP)
+				&& mth.contains(AType.UNRESOLVED_REGION_TRAVERSAL_CYCLE)
+				&& mth.getSVars().stream().anyMatch(var -> var.isCodeVarSet() && var.getCodeVar().isInitFromThis())
+				&& !ArgType.VOID.equals(mth.getReturnType())
+				&& !RegionUtils.hasExitBlock(mth.getRegion())) {
+			mth.addError("Code restructure failed: non-void coroutine has a fall-through path after a region traversal cycle", null);
+		}
+		if (!mth.contains(AType.JADX_ERROR)) {
+			List<String> unresolved = new ArrayList<>(3);
+			if (mth.contains(AType.UNSUPPORTED_MULTI_ENTRY_LOOP)) {
+				unresolved.add("unsupported multi-entry loop");
+			}
+			if (mth.contains(AType.UNRESOLVED_REGION_RECURSION)) {
+				unresolved.add("recursive region traversal");
+			}
+			// A traversal-cycle marker alone can remain after a usable loop region is
+			// constructed. It is not a proof of lost code without another unresolved
+			// restructuring failure (the non-void fall-through check above is separate).
+			if (!unresolved.isEmpty() && mth.contains(AType.UNRESOLVED_REGION_TRAVERSAL_CYCLE)) {
+				unresolved.add("region traversal cycle");
+			}
+			if (!unresolved.isEmpty()) {
+				mth.addError("Unresolved control-flow restructuring: " + String.join(", ", unresolved), null);
+			}
+		}
+	}
+
+	static boolean hasInvalidLoopCondition(BlockNode loopHeader) {
+		return loopHeader != null
+				&& !loopHeader.contains(AFlag.ALLOW_MULTIPLE_INSNS_LOOP_COND)
+				&& loopHeader.getInstructions().size() != 1;
+	}
+
+
+	private static void reportRemainingUnsafeDuplications(MethodNode mth, Map<BlockNode, Integer> regionBlockUses) {
+		var unsafeAttr = mth.get(AType.UNSAFE_REGION_DUPLICATION);
+		if (unsafeAttr == null) {
+			return;
+		}
+		List<BlockNode> remaining = findRemainingUnsafeDuplications(unsafeAttr.getList(), regionBlockUses);
+		if (remaining.isEmpty()) {
+			return;
+		}
+		BlockNode firstBlock = remaining.get(0);
+		String message = "Unsafe code duplication in " + remaining.size()
+				+ " blocks, first: " + firstBlock + ' ' + firstBlock.getAttributesString();
+		// Region simplification can eliminate a temporary duplicate. Report only blocks still
+		// emitted more than once, after CleanRegions has finalized the region tree.
+		if (mth.contains(AType.UNRESOLVED_REGION_RECURSION)
+				&& !mth.isNoExceptionHandlers()
+				&& remaining.stream().anyMatch(CheckRegions::hasCatchProtection)) {
+			// A recursive region was truncated, and a protected block is still emitted twice.
+			// Unlike a temporary duplicate removed by CleanRegions, this cannot be trusted
+			// to preserve both the normal and exceptional continuation.
+			mth.addWarn(message);
+		} else if (mth.contains(AType.NORMALIZED_COROUTINE_LOOP)
+				&& mth.contains(AType.COROUTINE_LOOP_PRE_HEADER)
+				&& mth.isNoExceptionHandlers()) {
+			mth.addWarn(message);
+		} else if (mth.contains(AType.UNSUPPORTED_MULTI_ENTRY_LOOP)) {
+			mth.addInfoComment(message + " (caused by unsupported multi-entry loop)");
+		} else if (mth.contains(AType.NORMALIZED_COROUTINE_LOOP)) {
+			mth.addInfoComment(message + " (inside normalized coroutine loop)");
+		} else {
+			mth.addWarnComment(message);
+		}
+	}
+
+	private static boolean hasCatchProtection(BlockNode block) {
+		return block.contains(AFlag.TRY_ENTER)
+				|| block.contains(AType.EXC_CATCH)
+				|| block.getInstructions().stream().anyMatch(insn -> insn.get(AType.EXC_CATCH) != null);
+	}
+
+	static List<BlockNode> findRemainingUnsafeDuplications(
+			List<BlockNode> candidates, Map<BlockNode, Integer> regionBlockUses) {
+		return candidates.stream()
+				.filter(block -> regionBlockUses.getOrDefault(block, 0) > 1)
+				.toList();
 	}
 
 	/**
@@ -221,6 +321,196 @@ public class CheckRegions extends AbstractVisitor {
 		}
 		InsnRemover.remove(mth, block, move);
 		return true;
+	}
+
+	/**
+	 * A register allocator can leave a one-instruction projection block on one incoming edge of a
+	 * finally PHI. If finally extraction already represents the edge, that block has no legal place
+	 * in the region tree even though the projected value is still valid at the PHI. Redirect the PHI
+	 * input to the dominating source and remove the bytecode-only register copy.
+	 */
+	static boolean isOrphanPhiProjectionMoveBlock(BlockNode block) {
+		if (block.getInstructions().isEmpty()) {
+			return false;
+		}
+		return block.getInstructions().stream().allMatch(move -> isPhiProjectionMove(block, move));
+	}
+
+	private static boolean isPhiProjectionMove(BlockNode block, InsnNode move) {
+		if (move.getType() != InsnType.MOVE || move.getArgsCount() != 1 || !move.getArg(0).isRegister()) {
+			return false;
+		}
+		RegisterArg result = move.getResult();
+		RegisterArg source = (RegisterArg) move.getArg(0);
+		if (result == null || result.getSVar() == null || source.getSVar() == null
+				|| result.getSVar().getUseList().isEmpty()
+				|| result.getType().isTypeKnown() && source.getType().isTypeKnown()
+						&& !result.getType().equals(source.getType())) {
+			return false;
+		}
+		for (RegisterArg use : result.getSVar().getUseList()) {
+			if (!(use.getParentInsn() instanceof PhiInsn)
+					|| ((PhiInsn) use.getParentInsn()).getBlockByArg(use) != block) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean inlineOrphanPhiProjectionMove(MethodNode mth, BlockNode block) {
+		if (!isOrphanPhiProjectionMoveBlock(block)) {
+			return false;
+		}
+		List<InsnNode> moves = new ArrayList<>(block.getInstructions());
+		for (InsnNode move : moves) {
+			RegisterArg source = (RegisterArg) move.getArg(0);
+			InsnNode sourceAssign = source.getSVar().getAssignInsn();
+			if (sourceAssign == null) {
+				if (!source.contains(AFlag.METHOD_ARGUMENT) && !source.contains(AFlag.THIS)) {
+					return false;
+				}
+			} else {
+				BlockNode sourceBlock = BlockUtils.getBlockByInsn(mth, sourceAssign);
+				if (sourceBlock == null || sourceBlock != block && !block.isDominator(sourceBlock)) {
+					return false;
+				}
+				// A MOVE fed by another MOVE in this same orphan bundle would retain a reference
+				// to an instruction removed below. PHI definitions in the block are safe sources.
+				if (sourceBlock == block && sourceAssign.getType() == InsnType.MOVE
+						&& moves.contains(sourceAssign)) {
+					return false;
+				}
+			}
+		}
+		for (InsnNode move : moves) {
+			RegisterArg source = (RegisterArg) move.getArg(0);
+			List<RegisterArg> uses = new ArrayList<>(move.getResult().getSVar().getUseList());
+			for (RegisterArg use : uses) {
+				RegisterArg replacement = source.duplicate(use.getInitType());
+				replacement.copyAttributesFrom(use);
+				if (!use.getParentInsn().replaceArg(use, replacement)) {
+					return false;
+				}
+			}
+		}
+		for (InsnNode move : moves) {
+			InsnRemover.remove(mth, block, move);
+		}
+		return true;
+	}
+
+	/**
+	 * A join immediately before a structured condition can be absorbed into that condition while a
+	 * register-to-register projection remains outside the region tree. At this late stage SSA copy
+	 * propagation is semantics preserving when the source reaches the projection and its definition
+	 * also dominates every rewritten use (including loop-carried uses). Require known compatible types
+	 * and a block containing only PHIs and MOVEs so casts, stores and user
+	 * computations cannot be erased by this recovery. Type compatibility is checked with the class
+	 * hierarchy before rewriting, allowing a reference value to be projected to a wider result type.
+	 * PHIs can share the join block, but are metadata rather than emitted assignments and stay intact.
+	 */
+	static boolean isOrphanProjectionMoveBundle(BlockNode block) {
+		if (block.getInstructions().isEmpty()) {
+			return false;
+		}
+		boolean moveFound = false;
+		for (InsnNode move : block.getInstructions()) {
+			if (move.getType() == InsnType.PHI) {
+				continue;
+			}
+			if (move.getType() != InsnType.MOVE || move.getArgsCount() != 1 || !move.getArg(0).isRegister()) {
+				return false;
+			}
+			moveFound = true;
+			RegisterArg result = move.getResult();
+			RegisterArg source = (RegisterArg) move.getArg(0);
+			if (result == null || result.getSVar() == null || source.getSVar() == null
+					|| result.getSVar().getUseList().isEmpty()
+					|| !result.getType().isTypeKnown()
+					|| !source.getType().isTypeKnown()) {
+				return false;
+			}
+		}
+		return moveFound;
+	}
+
+	private static boolean inlineOrphanDominatedProjectionMoves(MethodNode mth, BlockNode block) {
+		if (!isOrphanProjectionMoveBundle(block)) {
+			return false;
+		}
+		List<InsnNode> moves = block.getInstructions().stream()
+				.filter(insn -> insn.getType() == InsnType.MOVE)
+				.toList();
+		for (InsnNode move : moves) {
+			RegisterArg source = (RegisterArg) move.getArg(0);
+			if (!isSafeProjectionType(mth, source.getType(), move.getResult().getType())) {
+				return false;
+			}
+			InsnNode sourceAssign = source.getSVar().getAssignInsn();
+			BlockNode sourceBlock = null;
+			if (sourceAssign == null) {
+				if (!source.contains(AFlag.METHOD_ARGUMENT) && !source.contains(AFlag.THIS)) {
+					return false;
+				}
+			} else {
+				sourceBlock = BlockUtils.getBlockByInsn(mth, sourceAssign);
+				if (sourceBlock == null || sourceBlock != block && !block.isDominator(sourceBlock)
+						|| sourceBlock == block && sourceAssign.getType() == InsnType.MOVE && moves.contains(sourceAssign)) {
+					return false;
+				}
+			}
+			for (RegisterArg use : move.getResult().getSVar().getUseList()) {
+				InsnNode parentInsn = use.getParentInsn();
+				BlockNode useBlock;
+				if (parentInsn instanceof PhiInsn) {
+					useBlock = ((PhiInsn) parentInsn).getBlockByArg(use);
+				} else {
+					useBlock = BlockUtils.getBlockByInsn(mth, parentInsn);
+				}
+				if (useBlock == null || sourceBlock != null && !isAssignmentAvailableAtUse(sourceBlock, sourceAssign, useBlock, parentInsn)) {
+					return false;
+				}
+			}
+		}
+		for (InsnNode move : moves) {
+			RegisterArg source = (RegisterArg) move.getArg(0);
+			for (RegisterArg use : new ArrayList<>(move.getResult().getSVar().getUseList())) {
+				RegisterArg replacement = source.duplicate(use.getInitType());
+				replacement.copyAttributesFrom(use);
+				if (!use.getParentInsn().replaceArg(use, replacement)) {
+					return false;
+				}
+			}
+		}
+		for (InsnNode move : moves) {
+			InsnRemover.remove(mth, block, move);
+		}
+		return true;
+	}
+
+	private static boolean isAssignmentAvailableAtUse(
+			BlockNode assignBlock, InsnNode assignInsn, BlockNode useBlock, InsnNode useInsn) {
+		if (assignBlock != useBlock) {
+			return useBlock.isDominator(assignBlock);
+		}
+		int assignPos = assignBlock.getInstructions().indexOf(assignInsn);
+		int usePos = useBlock.getInstructions().indexOf(useInsn);
+		return assignPos != -1 && usePos != -1 && assignPos < usePos;
+	}
+
+	private static boolean isSafeProjectionType(MethodNode mth, ArgType sourceType, ArgType resultType) {
+		if (sourceType.equals(resultType)) {
+			return true;
+		}
+		if (!sourceType.isObject() || !resultType.isObject()) {
+			return false;
+		}
+		// java.lang.Object is always a valid widening target, including for library classes absent
+		// from the loaded classpath where TypeCompare intentionally returns UNKNOWN.
+		if (resultType.equals(ArgType.OBJECT)) {
+			return true;
+		}
+		return !ArgType.isCastNeeded(mth.root(), sourceType, resultType);
 	}
 
 	private static String getBlockInsnStr(MethodNode mth, IBlock block) {

@@ -566,6 +566,11 @@ public class TernaryMod extends AbstractRegionVisitor implements IRegionIterativ
 			}
 			insertBlock = conditionDominator.getPredecessors().get(0);
 		}
+		// Earlier ternary rewrites can remove an empty CFG block from the region tree.
+		// Adding the default assignment to such a block would silently lose it in codegen.
+		if (!RegionUtils.isRegionContainsBlock(mth.getRegion(), insertBlock)) {
+			return false;
+		}
 		RegisterArg sourceArg = (RegisterArg) insn.getArg(0);
 		InsnNode sourceAssign = sourceArg.getAssignInsn();
 		if (sourceAssign != null) {

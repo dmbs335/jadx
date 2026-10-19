@@ -15,6 +15,7 @@ public class CodeVar {
 	private boolean isThis;
 	private boolean isDeclared;
 	private boolean initAtDeclaration;
+	private boolean initFromThis;
 
 	private VarNode cachedVarNode; // set and used at codegen stage
 
@@ -115,6 +116,14 @@ public class CodeVar {
 		this.initAtDeclaration = initAtDeclaration;
 	}
 
+	public boolean isInitFromThis() {
+		return initFromThis;
+	}
+
+	public void setInitFromThis(boolean initFromThis) {
+		this.initFromThis = initFromThis;
+	}
+
 	public VarNode getCachedVarNode() {
 		return cachedVarNode;
 	}
@@ -138,6 +147,9 @@ public class CodeVar {
 		}
 		if (other.isInitAtDeclaration()) {
 			setInitAtDeclaration(true);
+		}
+		if (other.isInitFromThis()) {
+			setInitFromThis(true);
 		}
 	}
 

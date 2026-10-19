@@ -3,8 +3,10 @@ package jadx.core.dex.visitors.blocks;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -19,10 +21,13 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.CoroutineLoopCarryTailAttr;
 import jadx.core.dex.attributes.nodes.CoroutineLoopPreHeaderAttr;
+import jadx.core.dex.attributes.nodes.CoroutineRetryCatchDispatchAttr;
+import jadx.core.dex.attributes.nodes.CoroutineRetryResultJoinAttr;
 import jadx.core.dex.attributes.nodes.ExpectedTraversalCycleAttr;
 import jadx.core.dex.attributes.nodes.JadxCommentsAttr;
 import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.attributes.nodes.NormalizedCoroutineLoopAttr;
+import jadx.core.dex.attributes.nodes.ProtectedCoroutineEntrySplitAttr;
 import jadx.core.dex.attributes.nodes.ProtectedCoroutineZeroDelayAttr;
 import jadx.core.dex.attributes.nodes.SafeDuplicationAttr;
 import jadx.core.dex.attributes.nodes.SpecialEdgeAttr;
@@ -65,6 +70,7 @@ public class FixMultiEntryLoops {
 	private static final boolean VERIFY_COPIED_BLOCK_INSNS =
 			FixMultiEntryLoops.class.desiredAssertionStatus();
 	private static final int MIN_WIDE_COROUTINE_MOVE_BRIDGE_SIZE = 8;
+	private static final int MAX_WIDE_COROUTINE_MOVE_BRIDGE_SIZE = 8;
 
 	static boolean hasMultiEntryLoops(MethodNode mth) {
 		detectSpecialEdges(mth);
@@ -73,11 +79,19 @@ public class FixMultiEntryLoops {
 	}
 
 	static boolean processBeforeExceptionHandlers(MethodNode mth) {
+		if (isCoroutineMethod(mth) && mth.getExceptionHandlersCount() == 1) {
+			if (splitProtectedTwoSuspendResumeLatch(mth)) {
+				return true;
+			}
+		}
 		if (isCoroutineMethod(mth)
 				&& mth.getExceptionHandlersCount() == 1
 				&& mth.referencesMethodNamed("hasNext")
 				&& mth.referencesMethodNamed("next")) {
 			try {
+				if (normalizeSingleCatchIteratorAwaitResumeBeforeExceptionHandlers(mth)) {
+					return true;
+				}
 				if (normalizeTryProtectedIteratorMappingCompletionBeforeExceptionHandlers(mth)) {
 					return true;
 				}
@@ -106,6 +120,19 @@ public class FixMultiEntryLoops {
 				}
 			} catch (Exception e) {
 				mth.addWarnComment("Failed to normalize BroadcastChannel consumeEach loop", e);
+			}
+		}
+		if (KtorCioRecovery.isByteChannelOutputStreamCopyMethod(mth)) {
+			try {
+				detectSpecialEdges(mth);
+				List<SpecialEdgeAttr> multiEntryLoops = mth.getAll(AType.SPECIAL_EDGE).stream()
+						.filter(FixMultiEntryLoops::isMultiEntryLoop)
+						.collect(Collectors.toList());
+				if (normalizeKtorOutputStreamCopyCompletion(mth, multiEntryLoops)) {
+					return true;
+				}
+			} catch (Exception e) {
+				mth.addWarnComment("Failed to normalize Ktor OutputStream copy loop", e);
 			}
 		}
 		if (isKtorCioReaderSuspendLoop(mth)) {
@@ -189,6 +216,129 @@ public class FixMultiEntryLoops {
 			}
 		} catch (Exception e) {
 			mth.addWarnComment("Failed to normalize try-protected coroutine loop", e);
+		}
+		return false;
+	}
+
+	/**
+	 * Keep the loop's normal entry separate from both resume states. In this shape the first
+	 * resume joins before the second protected suspend, while the second resume joins at the
+	 * arithmetic latch. Copying only the latch leaves a second entry inside the loop.
+	 */
+	private static boolean splitProtectedTwoSuspendResumeLatch(MethodNode mth) {
+		if (mth.getBasicBlocks().size() > 120) {
+			return false;
+		}
+		for (BlockNode latch : new ArrayList<>(mth.getBasicBlocks())) {
+			if (!isSimpleCoroutineLatch(latch)
+					|| latch.getPredecessors().size() != 3
+					|| latch.getSuccessors().size() != 1) {
+				continue;
+			}
+			BlockNode resumeSecond = ListUtils.filterOnlyOne(latch.getPredecessors(),
+					FixMultiEntryLoops::isCoroutineResumeTail);
+			BlockNode secondCheck = ListUtils.filterOnlyOne(latch.getPredecessors(),
+					pred -> pred != resumeSecond
+							&& BlockUtils.getLastInsn(pred) instanceof IfNode
+							&& pred.getPredecessors().size() == 1
+							&& pred.getSuccessors().size() == 2
+							&& findLastResultInvoke(pred.getPredecessors().get(0)) != null);
+			BlockNode skip = ListUtils.filterOnlyOne(latch.getPredecessors(),
+					pred -> pred != resumeSecond && pred != secondCheck
+							&& pred.getSuccessors().size() == 1
+							&& pred.getPredecessors().size() == 1
+							&& BlockUtils.getLastInsn(pred.getPredecessors().get(0)) instanceof IfNode
+							&& !pred.getInstructions().isEmpty()
+							&& pred.getInstructions().stream().allMatch(insn -> insn.getType() == InsnType.MOVE));
+			if (resumeSecond == null || secondCheck == null || skip == null
+					|| secondCheck.getPredecessors().size() != 1) {
+				continue;
+			}
+			BlockNode secondCall = secondCheck.getPredecessors().get(0);
+			if (secondCall.getPredecessors().size() != 1
+					|| secondCall.getSuccessors().size() != 1
+					|| !secondCheck.getSuccessors().contains(latch)) {
+				continue;
+			}
+			BlockNode setup = secondCall.getPredecessors().get(0);
+			if (setup.getPredecessors().size() != 2
+					|| setup.getSuccessors().size() != 1) {
+				continue;
+			}
+			BlockNode resumeFirst = ListUtils.filterOnlyOne(setup.getPredecessors(),
+					pred -> isCoroutineResumeTail(pred)
+							|| containsInvoke(pred, "throwOnFailure")
+									&& pred.getPredecessors().size() == 1
+									&& containsInsnType(pred.getPredecessors().get(0), InsnType.IGET)
+									&& pred.getPredecessors().get(0).getSuccessors().stream()
+											.allMatch(successor -> successor == pred
+													|| containsInsnType(successor, InsnType.MOVE_EXCEPTION)));
+			BlockNode firstCheck = ListUtils.filterOnlyOne(setup.getPredecessors(),
+					pred -> pred != resumeFirst && isLabeledSuspendCheck(pred));
+			if (resumeFirst == null || firstCheck == null
+					|| firstCheck.getPredecessors().size() != 1
+					|| firstCheck.getSuccessors().size() != 2
+					|| !firstCheck.getSuccessors().contains(setup)
+					|| secondCheck.getSuccessors().size() != 2) {
+				continue;
+			}
+			BlockNode firstCall = firstCheck.getPredecessors().get(0);
+			IndexInsnNode firstLabel = findLabelPut(firstCall);
+			IndexInsnNode secondLabel = findLabelPut(setup);
+			InvokeNode firstInvoke = findLastResultInvoke(firstCall);
+			InvokeNode secondInvoke = findLastResultInvoke(secondCall);
+			if (firstLabel == null || secondLabel == null
+					|| !firstLabel.getIndex().equals(secondLabel.getIndex())
+					|| firstInvoke == null || secondInvoke == null
+					|| firstInvoke.get(AType.EXC_CATCH) == null
+					|| secondInvoke.get(AType.EXC_CATCH) == null
+					|| !isPathExists(latch.getSuccessors().get(0), firstCall)) {
+				continue;
+			}
+			Integer firstState = resolveStablePositiveStateKeyBeforeInsn(
+					firstCall, firstLabel, firstLabel.getArg(0));
+			Integer secondState = resolveStablePositiveStateKeyBeforeInsn(
+					setup, secondLabel, secondLabel.getArg(0));
+			if (firstState == null || secondState == null || firstState.equals(secondState)) {
+				continue;
+			}
+			BlockNode firstReturn = ListUtils.filterOnlyOne(firstCheck.getSuccessors(),
+					block -> block != setup && reachesExitOnLinearPath(block, 1));
+			BlockNode secondReturn = ListUtils.filterOnlyOne(secondCheck.getSuccessors(),
+					block -> block != latch && reachesExitOnLinearPath(block, 1));
+			if (firstReturn == null || secondReturn == null
+					|| secondReturn.getPredecessors().size() != 1
+					|| !containsInsnType(secondCall, InsnType.INVOKE)) {
+				continue;
+			}
+			List<BlockNode> originals = List.of(setup, secondCall, secondCheck, secondReturn, latch);
+			Map<BlockNode, BlockNode> copies = new LinkedHashMap<>();
+			for (BlockNode original : originals) {
+				copies.put(original, copyBlock(mth, original));
+			}
+			for (BlockNode original : originals) {
+				BlockNode copy = copies.get(original);
+				for (BlockNode successor : original.getSuccessors()) {
+					BlockNode copySuccessor = copies.getOrDefault(successor, successor);
+					BlockSplitter.connect(copy, copySuccessor);
+					BlockSplitter.replaceTarget(copy, successor, copySuccessor);
+				}
+				copy.updateCleanSuccessors();
+			}
+			BlockSplitter.replaceConnection(resumeFirst, setup, copies.get(setup));
+			BlockNode skipLatch = copyBlock(mth, latch);
+			BlockSplitter.connect(skipLatch, latch.getSuccessors().get(0));
+			BlockSplitter.replaceConnection(skip, latch, skipLatch);
+			BlockNode resumedLatch = copyBlock(mth, latch);
+			BlockSplitter.connect(resumedLatch, latch.getSuccessors().get(0));
+			BlockSplitter.replaceConnection(resumeSecond, latch, resumedLatch);
+			resumeFirst.updateCleanSuccessors();
+			resumeSecond.updateCleanSuccessors();
+			skip.updateCleanSuccessors();
+			skipLatch.updateCleanSuccessors();
+			resumedLatch.updateCleanSuccessors();
+			mth.addDebugComment("Split protected two-suspend resume tail before loop header");
+			return true;
 		}
 		return false;
 	}
@@ -519,6 +669,29 @@ public class FixMultiEntryLoops {
 				null,
 				null,
 				true,
+				null);
+		return plan != null && applyCoroutineCompletionRewritePlan(mth, plan);
+	}
+
+	private static boolean normalizeCompletionThroughCustomRestoreAndRemoveDirectPath(
+			MethodNode mth,
+			CoroutineSuspendCompletion completion,
+			BlockNode restoreTarget,
+			String debugComment) {
+		CoroutineCompletionRewritePlan plan = buildCoroutineCompletionRewritePlan(
+				List.of(completion),
+				CoroutineResultTransport.REGISTER,
+				CoroutineDirectPathMode.INSERT,
+				false,
+				true,
+				false,
+				debugComment,
+				new BlockNode[] { restoreTarget },
+				null,
+				null,
+				null,
+				null,
+				false,
 				null);
 		return plan != null && applyCoroutineCompletionRewritePlan(mth, plan);
 	}
@@ -999,10 +1172,6 @@ public class FixMultiEntryLoops {
 				BlockSplitter.replaceConnection(
 						directDispatch, originalSuccessor, dispatchTarget);
 				directDispatch.updateCleanSuccessors();
-				if (directPathMode != CoroutineDirectPathMode.DIRECT) {
-					((IfNode) BlockUtils.getLastInsn(completion.suspendCheck))
-							.initBlocks(completion.suspendCheck);
-				}
 			}
 			if (!transaction.hasValidPostconditions()) {
 				transaction.rollback();
@@ -1063,8 +1232,6 @@ public class FixMultiEntryLoops {
 					completion.directSuccess,
 					completion.stateDispatch);
 			directDispatch.updateCleanSuccessors();
-			((IfNode) BlockUtils.getLastInsn(completion.suspendCheck))
-					.initBlocks(completion.suspendCheck);
 			applied = hasValidSingleInsertedRegisterRewrite(
 					completion, directDispatch);
 		} catch (RuntimeException e) {
@@ -1138,10 +1305,6 @@ public class FixMultiEntryLoops {
 		BlockSplitter.detachBlock(directDispatch);
 		mth.getBasicBlocks().remove(directDispatch);
 		completion.suspendCheck.updateCleanSuccessors();
-		InsnNode lastInsn = BlockUtils.getLastInsn(completion.suspendCheck);
-		if (lastInsn instanceof IfNode) {
-			((IfNode) lastInsn).initBlocks(completion.suspendCheck);
-		}
 	}
 
 	private static boolean isSinglePreservedCustomRewrite(
@@ -1175,8 +1338,6 @@ public class FixMultiEntryLoops {
 			BlockSplitter.replaceConnection(
 					directDispatch, originalSuccessor, dispatchTarget);
 			directDispatch.updateCleanSuccessors();
-			((IfNode) BlockUtils.getLastInsn(completion.suspendCheck))
-					.initBlocks(completion.suspendCheck);
 			if (!hasValidSinglePreservedCustomRewrite(
 					completion,
 					directDispatch,
@@ -1250,10 +1411,6 @@ public class FixMultiEntryLoops {
 			}
 		}
 		directDispatch.updateCleanSuccessors();
-		InsnNode lastInsn = BlockUtils.getLastInsn(completion.suspendCheck);
-		if (lastInsn instanceof IfNode) {
-			((IfNode) lastInsn).initBlocks(completion.suspendCheck);
-		}
 	}
 
 	private enum CoroutineResultTransport {
@@ -1686,7 +1843,7 @@ public class FixMultiEntryLoops {
 					}
 				}
 				if (!obsoleteDirectPaths.isEmpty()) {
-					removeKtorOrphanedDirectPaths(mth, obsoleteDirectPaths);
+					removeOrphanedDirectPaths(mth, obsoleteDirectPaths);
 				}
 			}
 			if (plan.directPathMode != CoroutineDirectPathMode.DIRECT
@@ -1747,11 +1904,8 @@ public class FixMultiEntryLoops {
 					directDispatch.updateCleanSuccessors();
 				}
 				completion.suspendCheck.updateCleanSuccessors();
-				InsnNode lastInsn = BlockUtils.getLastInsn(completion.suspendCheck);
-				if (directPathMode != CoroutineDirectPathMode.DIRECT
-						&& lastInsn instanceof IfNode) {
-					((IfNode) lastInsn).initBlocks(completion.suspendCheck);
-				}
+				// replaceConnection restores IfNode targets by block identity. Do not resolve them
+				// from offsets here: sibling mutations may still be waiting for rollback.
 			}
 			rollbackLoopReentry();
 			if (plan.directPathMode != CoroutineDirectPathMode.DIRECT
@@ -1828,16 +1982,63 @@ public class FixMultiEntryLoops {
 		}
 	}
 
-	private static void removeKtorOrphanedDirectPaths(
+	private static void removeOrphanedDirectPaths(
 			MethodNode mth, Set<BlockNode> obsoleteDirectPaths) {
-		Set<BlockNode> toRemove = new LinkedHashSet<>();
-		for (BlockNode block : obsoleteDirectPaths) {
-			if (block.getPredecessors().isEmpty()) {
-				BlockSplitter.collectSuccessors(block, mth.getEnterBlock(), toRemove);
-			}
-		}
+		/*
+		 * A redirected direct path can contain a loop. The predecessor-count walk used here
+		 * previously stopped at that strongly connected component because every block in the
+		 * orphaned cycle still had an internal predecessor. Detect disconnection from the method
+		 * entry instead, then remove only the obsolete path and its disconnected descendants.
+		 */
+		Set<BlockNode> toRemove = collectOrphanedDirectPaths(
+				mth.getBasicBlocks(), mth.getEnterBlock(), obsoleteDirectPaths);
 		toRemove.forEach(BlockSplitter::detachBlock);
 		mth.getBasicBlocks().removeAll(toRemove);
+		if (!toRemove.isEmpty()) {
+			mth.updateBlockPositions();
+		}
+	}
+
+	static Set<BlockNode> collectOrphanedDirectPaths(
+			List<BlockNode> blocks, BlockNode enterBlock, Set<BlockNode> obsoleteDirectPaths) {
+		if (obsoleteDirectPaths.isEmpty()) {
+			return Set.of();
+		}
+		Set<BlockNode> unreachable = collectUnreachableBlocks(blocks, enterBlock);
+		Set<BlockNode> orphaned = new LinkedHashSet<>();
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		for (BlockNode obsolete : obsoleteDirectPaths) {
+			if (unreachable.contains(obsolete)) {
+				queue.add(obsolete);
+			}
+		}
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (orphaned.add(block)) {
+				for (BlockNode successor : block.getSuccessors()) {
+					if (unreachable.contains(successor)) {
+						queue.add(successor);
+					}
+				}
+			}
+		}
+		return orphaned;
+	}
+
+	static Set<BlockNode> collectUnreachableBlocks(
+			List<BlockNode> blocks, BlockNode enterBlock) {
+		Set<BlockNode> reachable = new HashSet<>();
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		queue.add(enterBlock);
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			if (reachable.add(block)) {
+				queue.addAll(block.getSuccessors());
+			}
+		}
+		return blocks.stream()
+				.filter(block -> !reachable.contains(block))
+				.collect(Collectors.toCollection(LinkedHashSet::new));
 	}
 
 	private static @Nullable CoroutineSuspendCompletion findKtorCioSuspendCompletion(
@@ -2630,8 +2831,6 @@ public class FixMultiEntryLoops {
 					dispatchBridge,
 					plan.directSuccess,
 					plan.stateDispatch);
-			((IfNode) BlockUtils.getLastInsn(suspendCheck))
-					.initBlocks(suspendCheck);
 			for (BlockNode block : List.of(
 					suspendCheck,
 					dispatchBridge,
@@ -2654,8 +2853,6 @@ public class FixMultiEntryLoops {
 						plan.directSuccess);
 				BlockSplitter.detachBlock(dispatchBridge);
 				mth.getBasicBlocks().remove(dispatchBridge);
-				((IfNode) BlockUtils.getLastInsn(suspendCheck))
-						.initBlocks(suspendCheck);
 				suspendCheck.updateCleanSuccessors();
 				plan.directSuccess.updateCleanSuccessors();
 				return false;
@@ -3347,10 +3544,14 @@ public class FixMultiEntryLoops {
 	 * speculative follow-up must not attach a new warning to an already reducible source loop.
 	 */
 	static boolean processAdditionalCoroutinePass(MethodNode mth) {
-		return isCoroutineMethod(mth) && process(mth, false).isChanged();
+		return (isCoroutineMethod(mth)
+				|| mth.contains(AType.NORMALIZED_COROUTINE_LOOP))
+				&& process(mth, false).isChanged();
 	}
 
 	private static ProcessResult process(MethodNode mth, boolean reportUnsupported) {
+		boolean hadNormalizedCoroutineLoop =
+				mth.contains(AType.NORMALIZED_COROUTINE_LOOP);
 		try {
 			detectSpecialEdges(mth);
 		} catch (Exception e) {
@@ -3373,6 +3574,16 @@ public class FixMultiEntryLoops {
 			return ProcessResult.CHANGED;
 		}
 		if (!multiEntryLoops.isEmpty()
+				&& normalizeTryProtectedCoroutineBooleanGateCompletion(
+						mth, multiEntryLoops)) {
+			return ProcessResult.CHANGED;
+		}
+		if (!multiEntryLoops.isEmpty()
+				&& normalizeTryProtectedSingleIteratorPredicateCompletion(
+						mth, multiEntryLoops)) {
+			return ProcessResult.CHANGED;
+		}
+		if (!multiEntryLoops.isEmpty()
 				&& isTryProtectedReadTransformSuspendLoop(mth)
 				&& normalizeTryProtectedReadTransformResumeTails(
 						mth, multiEntryLoops)) {
@@ -3391,8 +3602,6 @@ public class FixMultiEntryLoops {
 			return ProcessResult.CHANGED;
 		}
 		if (!multiEntryLoops.isEmpty()
-				&& mth.getName().equals("invokeSuspend")
-				&& isCoroutineMethod(mth)
 				&& normalizeIteratorCollectionSelectorCompletion(mth, multiEntryLoops)) {
 			return ProcessResult.CHANGED;
 		}
@@ -3406,7 +3615,6 @@ public class FixMultiEntryLoops {
 		boolean inlinedStateTwoIterator = isInlinedStateTwoIteratorSuspendOperator(
 				mth, multiEntryLoops);
 		if (!multiEntryLoops.isEmpty()
-				&& mth.getName().equals("invokeSuspend")
 				&& (isCountedIteratorSuspendOperator(mth)
 						|| (mth.getExceptionHandlersCount() == 0
 								&& isIteratorSendSuspendOperator(mth))
@@ -3414,6 +3622,12 @@ public class FixMultiEntryLoops {
 				&& (isCoroutineMethod(mth) || inlinedStateTwoIterator)
 				&& normalizeCountedIteratorSuspendCompletion(
 						mth, multiEntryLoops, inlinedStateTwoIterator)) {
+			return ProcessResult.CHANGED;
+		}
+		if (!multiEntryLoops.isEmpty()
+				&& isCoroutineStateMachineBody(mth)
+				&& normalizeThreeStateIteratorTransformActionCompletions(
+						mth, multiEntryLoops)) {
 			return ProcessResult.CHANGED;
 		}
 		if (!multiEntryLoops.isEmpty()
@@ -3446,6 +3660,11 @@ public class FixMultiEntryLoops {
 			return ProcessResult.CHANGED;
 		}
 		if (!multiEntryLoops.isEmpty()
+				&& normalizeChannelIteratorPredicateLoopPreHeader(
+						mth, multiEntryLoops)) {
+			return ProcessResult.CHANGED;
+		}
+		if (!multiEntryLoops.isEmpty()
 				&& isCoroutineMethod(mth)
 				&& normalizeNullableProgressSuspendCompletion(mth, multiEntryLoops)) {
 			return ProcessResult.CHANGED;
@@ -3459,8 +3678,22 @@ public class FixMultiEntryLoops {
 			return ProcessResult.NO_CHANGE;
 		}
 		try {
+			if (normalizeProtectedManyStateLoopCompletions(mth, multiEntryLoops)) {
+				return ProcessResult.CHANGED;
+			}
+			if (splitCoroutineProtectedLoopBackIncrementTail(mth, multiEntryLoops)) {
+				return ProcessResult.CHANGED;
+			}
 			if (splitCoroutinePendingSlotResumeTail(mth, multiEntryLoops)) {
 				return ProcessResult.CHANGED;
+			}
+			for (SpecialEdgeAttr backEdge : multiEntryLoops) {
+				if (splitUnconditionalSequenceYieldResumeReferenceAdvance(mth, backEdge)) {
+					return ProcessResult.CHANGED;
+				}
+				if (splitUnconditionalSequenceYieldResumeAdvance(mth, backEdge)) {
+					return ProcessResult.CHANGED;
+				}
 			}
 			// Split coroutine resume entries before processing individual DFS back edges.
 			// One split can make several edges reducible, so don't process the stale edge list.
@@ -3541,6 +3774,9 @@ public class FixMultiEntryLoops {
 				if (normalizeSseNestedLoopSuspendCompletions(mth, multiEntryLoops)) {
 					return ProcessResult.CHANGED;
 				}
+				if (normalizeNullableLineReadSuspendCompletions(mth, multiEntryLoops)) {
+					return ProcessResult.CHANGED;
+				}
 				if (normalizeCoroutinePollingSuspendCompletions(mth, multiEntryLoops)) {
 					return ProcessResult.CHANGED;
 				}
@@ -3555,12 +3791,12 @@ public class FixMultiEntryLoops {
 					return ProcessResult.CHANGED;
 				}
 				if (normalizeCoroutineAwaitPointerEventCompletions(mth, multiEntryLoops)) {
-					return ProcessResult.CHANGED;
+					return ProcessResult.continueCoroutinePass(true);
 				}
 				if (multiEntryLoops.size() == 1
 						&& mth.referencesMethodNamed("awaitPointerEvent")
 						&& normalizeReportedCoroutineLoopCompletion(mth, multiEntryLoops)) {
-					return ProcessResult.CHANGED;
+					return ProcessResult.continueCoroutinePass(true);
 				}
 				/*
 				 * If the complete shared-dispatch matchers above cannot prove the state family, retain
@@ -3571,6 +3807,21 @@ public class FixMultiEntryLoops {
 						&& normalizeCoroutineAwaitPointerEventBackEdge(
 								mth, multiEntryLoops.get(0))) {
 					return ProcessResult.CHANGED;
+				}
+				if (normalizePeriodicDelaySendLoopCompletion(mth, multiEntryLoops)) {
+					return ProcessResult.CHANGED;
+				}
+				/*
+				 * These complete source-level loop reconstructions need the original resume join.
+				 * The generic complete-state-map rewrite below intentionally handles a wider family,
+				 * but would erase the matcher advance or retry result ownership needed here.
+				 */
+				for (SpecialEdgeAttr backEdge : multiEntryLoops) {
+					if (splitCoroutineYieldFrameResumeLoop(mth, backEdge)
+							|| splitCoroutineYieldMatcherResumeLoop(mth, backEdge)
+							|| normalizeSingleCoroutineRetryResultJoin(mth, backEdge)) {
+						return ProcessResult.continueCoroutinePass(true);
+					}
 				}
 				if (normalizeCompleteSmallIfChainCoroutineCompletions(
 						mth, multiEntryLoops, true)) {
@@ -3619,6 +3870,11 @@ public class FixMultiEntryLoops {
 					return ProcessResult.CHANGED;
 				}
 				for (SpecialEdgeAttr backEdge : multiEntryLoops) {
+					if (splitCoroutineResumePostSuspendLoopConditionTail(mth, backEdge)) {
+						return ProcessResult.continueCoroutinePass(true);
+					}
+				}
+				for (SpecialEdgeAttr backEdge : multiEntryLoops) {
 					if (isCoroutineResumeLatch(backEdge)) {
 						boolean hasSequentialResumeLatch = hasSingleSequentialResumeLatch(mth, backEdge.getEnd());
 						if (!splitCoroutineResumeLatch(mth, backEdge)) {
@@ -3642,6 +3898,16 @@ public class FixMultiEntryLoops {
 					}
 				}
 				/*
+				 * Preserve Ktor's buffer-consume loop before the generic suspend-result rewrite
+				 * redirects its direct move bridge into the resume restore block. Once redirected,
+				 * the source loop latch is no longer distinguishable from the state restore path.
+				 */
+				for (SpecialEdgeAttr backEdge : multiEntryLoops) {
+					if (splitCoroutineResumeBufferConsumeTail(mth, backEdge)) {
+						return ProcessResult.continueCoroutinePass(true);
+					}
+				}
+				/*
 				 * Normalize a terminal delay re-entry before another edge in the same coroutine
 				 * rewrites an inner suspend path. Both transformations use the shared state
 				 * dispatcher, so processing the recorded inner edge first can make the delay
@@ -3659,10 +3925,17 @@ public class FixMultiEntryLoops {
 							mth, backEdge)) {
 						return ProcessResult.continueCoroutinePass(true);
 					}
+					if (normalizeCoroutineDelayStateBackEdge(mth, backEdge)) {
+						return ProcessResult.continueCoroutinePass(true);
+					}
 					if (normalizeCoroutineDelayResumeMergeBackEdge(mth, backEdge)) {
 						return ProcessResult.continueCoroutinePass(true);
 					}
 				}
+			}
+			if (isCoroutineMethod(mth)
+					&& splitExternalProtectedCoroutineLoopEntries(mth, multiEntryLoops)) {
+				return ProcessResult.CHANGED;
 			}
 			if (isCoroutineMethod(mth)
 					&& normalizeSharedCoroutineLoopEntriesThroughPreHeader(
@@ -3677,8 +3950,12 @@ public class FixMultiEntryLoops {
 				changed |= fixLoop(mth, backEdge, crossEdges, reportUnsupported);
 			}
 			if (changed) {
+				boolean introducedCoroutineNormalization =
+						!hadNormalizedCoroutineLoop
+								&& mth.contains(AType.NORMALIZED_COROUTINE_LOOP);
 				return ProcessResult.continueCoroutinePass(
-						isSplitResidualCountedIteratorOperator(mth));
+						introducedCoroutineNormalization
+								|| isSplitResidualCountedIteratorOperator(mth));
 			}
 			if (isCoroutineMethod(mth)
 					&& normalizeCompleteSmallIfChainCoroutineCompletions(
@@ -3694,6 +3971,195 @@ public class FixMultiEntryLoops {
 			// cannot prove that every matcher rolled back a partially-applied graph rewrite.
 			return ProcessResult.FAILED_MAY_HAVE_CHANGED;
 		}
+	}
+
+	/**
+	 * A large protected state machine can resume into several nested source loops. Some suspend
+	 * calls rejoin through a move-only bridge before an exception splitter, while an earlier call
+	 * rejoins inside the surrounding loop. Rewriting these related completions one at a time can
+	 * change DFS edge orientation before the remaining state is recognized. Match the complete
+	 * affected state family and redirect it as one transaction through the existing label switch.
+	 */
+	private static boolean normalizeProtectedManyStateLoopCompletions(
+			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
+		if (!(mth.getName().equals("invokeSuspend") || isCoroutineStateMachineBody(mth))
+				|| mth.getExceptionHandlersCount() == 0
+				|| multiEntryLoops.size() < 2
+				|| multiEntryLoops.size() > 8) {
+			return false;
+		}
+		List<BlockNode> suspendChecks = mth.getBasicBlocks().stream()
+				.filter(FixMultiEntryLoops::isLabeledSuspendCheck)
+				.collect(Collectors.toList());
+		if (suspendChecks.size() < 4 || suspendChecks.size() > 8) {
+			return false;
+		}
+		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block))
+				.collect(Collectors.toList());
+		List<BlockNode> switchBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> BlockUtils.getLastInsn(block) instanceof SwitchInsn)
+				.collect(Collectors.toList());
+		Map<BlockNode, Map<FieldInfo, BlockNode>> sharedSwitchDispatchCache =
+				new LinkedHashMap<>();
+		List<CoroutineSuspendCompletion> affected = new ArrayList<>();
+		boolean hasDirectSplitterCompletion = false;
+		boolean hasNestedLoopCompletion = false;
+		Set<Integer> stateKeys = new HashSet<>();
+		for (BlockNode suspendCheck : suspendChecks) {
+			CoroutineSuspendCompletion completion = findSwitchCoroutineSuspendCompletion(
+					mth, suspendCheck, resumeBlocks);
+			if (completion == null) {
+				completion = findSharedSwitchCoroutineSuspendCompletion(
+						mth,
+						suspendCheck,
+						resumeBlocks,
+						switchBlocks,
+						sharedSwitchDispatchCache);
+			}
+			if (completion == null || !canDispatchDirectCompletionByLabel(completion)) {
+				continue;
+			}
+			CoroutineSuspendCompletion candidate = completion;
+			boolean directSplitter = multiEntryLoops.stream().anyMatch(
+					edge -> edge.getEnd().contains(AFlag.EXC_TOP_SPLITTER)
+							&& isDirectCompletionBackEdge(candidate, edge));
+			boolean nestedLoop = multiEntryLoops.stream().anyMatch(
+					edge -> isPathWithin(edge.getEnd(), candidate.directSuccess, 80)
+							&& isPathWithin(candidate.directSuccess, edge.getStart(), 80));
+			if (!directSplitter && !nestedLoop) {
+				continue;
+			}
+			if (!stateKeys.add(completion.stateKey)) {
+				return false;
+			}
+			affected.add(completion);
+			hasDirectSplitterCompletion |= directSplitter;
+			hasNestedLoopCompletion |= nestedLoop && !directSplitter;
+		}
+		if (affected.size() < 2
+				|| affected.size() > 4
+				|| !hasDirectSplitterCompletion
+				|| !hasNestedLoopCompletion) {
+			return false;
+		}
+		CoroutineSuspendCompletion first = affected.get(0);
+		if (affected.stream().anyMatch(
+				completion -> completion.stateDispatch != first.stateDispatch
+						|| !completion.labelField.equals(first.labelField))) {
+			return false;
+		}
+		return normalizeDirectCompletionsThroughStateDispatch(
+				mth,
+				affected,
+				CoroutineResultTransport.REGISTER,
+				false,
+				true,
+				"Normalize " + affected.size()
+						+ " protected nested-loop coroutine completions through state dispatch: "
+						+ first.stateDispatch);
+	}
+
+	/**
+	 * A suspendable source loop can have a protected increment/rotation tail shared by a resumed
+	 * state and the ordinary loop latch. Its initial path enters after that tail, so the shared tail
+	 * becomes a second entry into the cycle. Copy the bounded tail for the ordinary latch and rejoin
+	 * at the existing common try splitter. The resume path keeps the original protected blocks and
+	 * every path still performs the increment exactly once.
+	 */
+	private static boolean splitCoroutineProtectedLoopBackIncrementTail(
+			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
+		if (!CoroutineMethodUtils.hasKnownContinuationParameter(mth)
+				|| multiEntryLoops.size() != 1
+				|| mth.getExceptionHandlersCount() < 2) {
+			return false;
+		}
+		SpecialEdgeAttr edge = multiEntryLoops.get(0);
+		BlockNode latch = edge.getStart();
+		BlockNode resumeTail = edge.getEnd();
+		if (!ListUtils.isSingleElement(latch.getSuccessors(), resumeTail)
+				|| latch.getInstructions().isEmpty()
+				|| latch.getInstructions().size() > 8
+				|| latch.getInstructions().stream().anyMatch(insn -> insn.getType() != InsnType.MOVE)
+				|| resumeTail.getPredecessors().size() != 2
+				|| resumeTail.getInstructions().isEmpty()
+				|| resumeTail.getInstructions().size() > 4
+				|| resumeTail.getInstructions().stream().anyMatch(insn -> insn.getType() != InsnType.MOVE)
+				|| resumeTail.getSuccessors().size() != 1) {
+			return false;
+		}
+		BlockNode resumeEntry = ListUtils.filterOnlyOne(
+				resumeTail.getPredecessors(), predecessor -> predecessor != latch);
+		if (resumeEntry == null
+				|| !isPathWithin(mth.getEnterBlock(), resumeEntry, 20)
+				|| isPathExists(resumeTail, resumeEntry)) {
+			return false;
+		}
+
+		BlockNode tryTop = resumeTail.getSuccessors().get(0);
+		tryTop.updateCleanSuccessors();
+		if (!tryTop.contains(AFlag.EXC_TOP_SPLITTER)
+				|| !tryTop.getInstructions().isEmpty()
+				|| tryTop.getSuccessors().size() != 2
+				|| tryTop.getCleanSuccessors().size() != 1) {
+			return false;
+		}
+		BlockNode increment = tryTop.getCleanSuccessors().get(0);
+		increment.updateCleanSuccessors();
+		if (increment.getInstructions().size() != 3
+				|| increment.getInstructions().get(0).getType() != InsnType.IGET
+				|| !(increment.getInstructions().get(1) instanceof ArithNode)
+				|| ((ArithNode) increment.getInstructions().get(1)).getOp() != ArithOp.ADD
+				|| increment.getInstructions().get(2).getType() != InsnType.IPUT
+				|| increment.getCleanSuccessors().size() != 1
+				|| increment.get(AType.TRY_BLOCK) == null) {
+			return false;
+		}
+		BlockNode rotation = increment.getCleanSuccessors().get(0);
+		rotation.updateCleanSuccessors();
+		if (rotation.getInstructions().isEmpty()
+				|| rotation.getInstructions().size() > 10
+				|| rotation.getInstructions().stream().anyMatch(insn -> insn.getType() != InsnType.MOVE
+						&& insn.getType() != InsnType.CONST)
+				|| rotation.getCleanSuccessors().size() != 1) {
+			return false;
+		}
+		BlockNode commonJoin = rotation.getCleanSuccessors().get(0);
+		commonJoin.updateCleanSuccessors();
+		if (!commonJoin.contains(AFlag.EXC_TOP_SPLITTER)
+				|| commonJoin.getPredecessors().size() < 2
+				|| commonJoin.getCleanSuccessors().size() != 1
+				|| !isPathExists(commonJoin, latch)) {
+			return false;
+		}
+
+		List<BlockNode> originals = List.of(resumeTail, tryTop, increment, rotation);
+		Map<BlockNode, BlockNode> copies = new LinkedHashMap<>(originals.size());
+		for (BlockNode original : originals) {
+			BlockNode copy = BlockSplitter.startNewBlock(mth, original.getStartOffset());
+			copy.add(AFlag.SYNTHETIC);
+			BlockSplitter.copyBlockData(original, copy);
+			copy.remove(AType.PHI_LIST);
+			TryCatchBlockAttr tryBlock = original.get(AType.TRY_BLOCK);
+			if (tryBlock != null) {
+				tryBlock.getBlocks().add(copy);
+			}
+			copies.put(original, copy);
+		}
+		for (BlockNode original : originals) {
+			BlockNode copy = copies.get(original);
+			for (BlockNode successor : original.getSuccessors()) {
+				BlockSplitter.connect(copy, copies.getOrDefault(successor, successor));
+			}
+			copy.updateCleanSuccessors();
+		}
+		BlockSplitter.replaceConnection(latch, resumeTail, copies.get(resumeTail));
+		latch.updateCleanSuccessors();
+		mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+		mth.addDebugComment(
+				"Split protected coroutine loop-back increment tail before shared join: "
+						+ commonJoin);
+		return true;
 	}
 
 	/**
@@ -3715,11 +4181,31 @@ public class FixMultiEntryLoops {
 		for (Map.Entry<BlockNode, List<SpecialEdgeAttr>> entry : edgesByHeader.entrySet()) {
 			BlockNode loopHeader = entry.getKey();
 			List<SpecialEdgeAttr> reportedEdges = entry.getValue();
-			if (reportedEdges.size() < 2
+			loopHeader.updateCleanSuccessors();
+			boolean singleSuspendIteratorLoop = reportedEdges.size() == 1
+					&& loopHeader.getPredecessors().size() >= 3
+					&& containsInvokeDeep(loopHeader, FixMultiEntryLoops::isJavaIteratorHasNextInvoke)
+					&& (isLabeledSuspendCheck(reportedEdges.get(0).getStart())
+							|| isObfuscatedLabeledSuspendCheck(mth, reportedEdges.get(0).getStart()))
+					&& reportedEdges.get(0).getStart().getSuccessors().contains(loopHeader);
+			boolean protectedByteChannelCopyLoop = reportedEdges.size() == 1
+					&& loopHeader.getPredecessors().size() >= 3
+					&& loopHeader.getCleanSuccessors().size() == 1
+					&& mth.getExceptionHandlersCount() >= 2
+					&& isKtorByteChannelCopyStateMachine(mth)
+					&& (isLabeledSuspendCheck(reportedEdges.get(0).getStart())
+							|| isObfuscatedLabeledSuspendCheck(
+									mth, reportedEdges.get(0).getStart()))
+					&& reportedEdges.get(0).getStart().getSuccessors().contains(loopHeader);
+			if ((!singleSuspendIteratorLoop
+						&& !protectedByteChannelCopyLoop
+						&& (reportedEdges.size() < 2
+								|| loopHeader.getPredecessors().size() < 4))
 					|| loopHeader.get(AType.PHI_LIST) != null
-					|| loopHeader.getPredecessors().size() < 4
-					|| loopHeader.getSuccessors().size() != 1
-					|| loopHeader.contains(AFlag.EXC_TOP_SPLITTER)
+					|| (!protectedByteChannelCopyLoop
+							&& loopHeader.getSuccessors().size() != 1)
+					|| (!protectedByteChannelCopyLoop
+							&& loopHeader.contains(AFlag.EXC_TOP_SPLITTER))
 					|| loopHeader.contains(AFlag.EXC_BOTTOM_SPLITTER)
 					|| BlockUtils.isExceptionHandlerPath(loopHeader)) {
 				continue;
@@ -3732,6 +4218,10 @@ public class FixMultiEntryLoops {
 					predecessor -> !cyclePredecessors.contains(predecessor));
 			if (cyclePredecessors.size() < reportedEdges.size()
 					|| externalPredecessors.size() < 2
+					// A protected header can be re-entered through its own handler; the
+					// Ktor shared-loop case still structures correctly with a pre-header.
+					|| loopHeader.get(AType.TRY_BLOCK) == null
+							&& hasExternalEntryIntoLoopInterior(loopHeader)
 					|| reportedEdges.stream().anyMatch(
 							edge -> !cyclePredecessors.contains(edge.getStart()))
 					|| externalPredecessors.stream().anyMatch(
@@ -3760,6 +4250,180 @@ public class FixMultiEntryLoops {
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * A resumed state can jump into the middle of a protected source loop. Copying the bounded
+	 * acyclic entry tails lets those states execute their original operations once before the
+	 * source header, without making the source loop itself multi-entry. Copies retain the original
+	 * exception descriptors; a later region pass can place each protected copy under its catch.
+	 */
+	private static boolean splitExternalProtectedCoroutineLoopEntries(
+			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
+		if (mth.getExceptionHandlersCount() < 2 || multiEntryLoops.size() < 2) {
+			return false;
+		}
+		Map<BlockNode, List<SpecialEdgeAttr>> byHeader = multiEntryLoops.stream()
+				.collect(Collectors.groupingBy(SpecialEdgeAttr::getEnd, LinkedHashMap::new, Collectors.toList()));
+		for (Map.Entry<BlockNode, List<SpecialEdgeAttr>> entry : byHeader.entrySet()) {
+			BlockNode header = entry.getKey();
+			if (entry.getValue().size() < 2 || header.get(AType.TRY_BLOCK) != null
+					|| !hasExternalEntryIntoLoopInterior(header)) {
+				continue;
+			}
+			Set<BlockNode> fromHeader = collectReachableBlocks(header, true);
+			Set<BlockNode> toHeader = collectReachableBlocks(header, false);
+			Map<BlockNode, BlockNode> externalEntries = new LinkedHashMap<>();
+			for (BlockNode target : mth.getBasicBlocks()) {
+				if (target == header || !fromHeader.contains(target) || !toHeader.contains(target)) {
+					continue;
+				}
+				for (BlockNode predecessor : target.getPredecessors()) {
+					if (!fromHeader.contains(predecessor)) {
+						if (!ListUtils.isSingleElement(predecessor.getSuccessors(), target)) {
+							externalEntries.clear();
+							break;
+						}
+						externalEntries.put(predecessor, target);
+					}
+				}
+			}
+			if (externalEntries.size() != 2) {
+				continue;
+			}
+			Map<BlockNode, Set<BlockNode>> entryTails = new LinkedHashMap<>();
+			Set<BlockNode> allTailBlocks = Collections.newSetFromMap(new IdentityHashMap<>());
+			boolean valid = true;
+			boolean hasProtectedTail = false;
+			for (Map.Entry<BlockNode, BlockNode> externalEntry : externalEntries.entrySet()) {
+				Set<BlockNode> tail = collectBoundedEntryTail(externalEntry.getValue(), header, 12);
+				if (tail == null || !Collections.disjoint(allTailBlocks, tail)) {
+					valid = false;
+					break;
+				}
+				hasProtectedTail |= tail.stream().anyMatch(block -> block.get(AType.TRY_BLOCK) != null);
+				allTailBlocks.addAll(tail);
+				entryTails.put(externalEntry.getKey(), tail);
+			}
+			if (!valid || !hasProtectedTail) {
+				continue;
+			}
+			for (Map.Entry<BlockNode, Set<BlockNode>> entryTail : entryTails.entrySet()) {
+				Map<BlockNode, BlockNode> copies = new LinkedHashMap<>();
+				for (BlockNode original : entryTail.getValue()) {
+					BlockNode copy = copyBlock(mth, original);
+					copy.remove(AType.PHI_LIST);
+					TryCatchBlockAttr tryBlock = original.get(AType.TRY_BLOCK);
+					if (tryBlock != null) {
+						tryBlock.getBlocks().add(copy);
+					}
+					copies.put(original, copy);
+				}
+				for (Map.Entry<BlockNode, BlockNode> pair : copies.entrySet()) {
+					BlockNode original = pair.getKey();
+					BlockNode copy = pair.getValue();
+					for (BlockNode successor : original.getSuccessors()) {
+						BlockNode target = copies.getOrDefault(successor, successor);
+						BlockSplitter.connect(copy, target);
+						BlockSplitter.replaceTarget(copy, successor, target);
+					}
+					copy.updateCleanSuccessors();
+				}
+				BlockNode predecessor = entryTail.getKey();
+				BlockSplitter.replaceConnection(predecessor, externalEntries.get(predecessor),
+						copies.get(externalEntries.get(predecessor)));
+				predecessor.updateCleanSuccessors();
+			}
+			mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+			mth.addAttr(ProtectedCoroutineEntrySplitAttr.INSTANCE);
+			mth.addDebugComment("Peel " + entryTails.size()
+					+ " external protected coroutine entries before shared loop: " + header);
+			return true;
+		}
+		return false;
+	}
+
+	private static Set<BlockNode> collectReachableBlocks(BlockNode start, boolean forwards) {
+		Set<BlockNode> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+		ArrayDeque<BlockNode> pending = new ArrayDeque<>();
+		pending.add(start);
+		while (!pending.isEmpty()) {
+			BlockNode block = pending.removeLast();
+			if (visited.add(block)) {
+				pending.addAll(forwards ? block.getSuccessors() : block.getPredecessors());
+			}
+		}
+		return visited;
+	}
+
+	private static Set<BlockNode> collectBoundedEntryTail(BlockNode start, BlockNode header, int limit) {
+		Set<BlockNode> tail = new LinkedHashSet<>();
+		ArrayDeque<BlockNode> pending = new ArrayDeque<>();
+		pending.add(start);
+		while (!pending.isEmpty()) {
+			BlockNode block = pending.removeLast();
+			if (block == header || block.contains(AFlag.MTH_EXIT_BLOCK)) {
+				continue;
+			}
+			if (tail.add(block)) {
+				if (tail.size() > limit || block.getSuccessors().isEmpty()) {
+					return null;
+				}
+				pending.addAll(block.getSuccessors());
+			}
+		}
+		// The copied entry tail must not include a separate loop.
+		for (BlockNode block : tail) {
+			for (BlockNode successor : block.getSuccessors()) {
+				if (tail.contains(successor)
+						&& BlockUtils.isPathExists(successor, block, tail::contains)) {
+					return null;
+				}
+			}
+		}
+		return tail;
+	}
+
+	/**
+	 * Merging predecessors of the header does not make a loop reducible if a resume state or
+	 * exception handler enters a block on a header-to-header cycle below that header. Such a
+	 * bypass still prevents the header from dominating the loop body after pre-header insertion.
+	 */
+	static boolean hasExternalEntryIntoLoopInterior(BlockNode loopHeader) {
+		Set<BlockNode> reachableFromHeader = Collections.newSetFromMap(new IdentityHashMap<>());
+		ArrayDeque<BlockNode> pending = new ArrayDeque<>();
+		pending.add(loopHeader);
+		while (!pending.isEmpty()) {
+			BlockNode block = pending.removeLast();
+			if (reachableFromHeader.add(block)) {
+				pending.addAll(block.getSuccessors());
+			}
+		}
+		Set<BlockNode> canReachHeader = Collections.newSetFromMap(new IdentityHashMap<>());
+		pending.add(loopHeader);
+		while (!pending.isEmpty()) {
+			BlockNode block = pending.removeLast();
+			if (canReachHeader.add(block)) {
+				pending.addAll(block.getPredecessors());
+			}
+		}
+		for (BlockNode block : canReachHeader) {
+			if (block != loopHeader && reachableFromHeader.contains(block)) {
+				for (BlockNode predecessor : block.getPredecessors()) {
+					if (!reachableFromHeader.contains(predecessor)) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	private static boolean isJavaIteratorHasNextInvoke(InvokeNode invoke) {
+		return invoke.getCallMth().getName().equals("hasNext")
+				&& invoke.getCallMth().getDeclClass().getFullName().equals("java.util.Iterator")
+				&& invoke.getCallMth().getArgumentsTypes().isEmpty()
+				&& ArgType.BOOLEAN.equals(invoke.getCallMth().getReturnType());
 	}
 
 	/**
@@ -3985,6 +4649,10 @@ public class FixMultiEntryLoops {
 		IndexInsnNode initialLabel = new IndexInsnNode(InsnType.IPUT, labelField, 2);
 		initialLabel.addArg(InsnArg.lit(3, ArgType.INT));
 		initialLabel.addArg(labelPut.getArg(1).duplicate());
+		CatchAttr pendingCatch = pendingLabelPut.get(AType.EXC_CATCH);
+		if (pendingCatch != null) {
+			initialLabel.addAttr(pendingCatch);
+		}
 		InsnNode initialState = new InsnNode(InsnType.CONST, 1);
 		initialState.setResult(stateArg.duplicate());
 		initialState.addArg(InsnArg.lit(3, ArgType.INT));
@@ -4008,6 +4676,9 @@ public class FixMultiEntryLoops {
 				InsnType.IPUT, labelField, 2);
 		resetLabel.addArg(InsnArg.lit(3, ArgType.INT));
 		resetLabel.addArg(labelPut.getArg(1).duplicate());
+		if (pendingCatch != null) {
+			resetLabel.addAttr(pendingCatch);
+		}
 		InsnNode resetState = new InsnNode(InsnType.CONST, 1);
 		resetState.setResult(stateArg.duplicate());
 		resetState.addArg(InsnArg.lit(3, ArgType.INT));
@@ -4335,7 +5006,7 @@ public class FixMultiEntryLoops {
 	}
 
 	/**
-	 * A static suspend serializer can resume at a nullable result/logging tail shared with
+	 * A suspend conversion can resume at a nullable result/observer tail shared with
 	 * immediate completion. The null result continues the source converter loop, while a non-null
 	 * result returns. Entering that tail directly from the label restore makes the immediate
 	 * completion bridge a second loop entry.
@@ -4378,7 +5049,12 @@ public class FixMultiEntryLoops {
 		if (optionalEffect == null
 				|| optionalEffect.getInstructions().isEmpty()
 				|| optionalEffect.getInstructions().size() > 24
-				|| !containsInvokeDeep(optionalEffect, "trace")) {
+				|| optionalEffect.getSuccessors().size() != 1
+				|| optionalEffect.getInstructions().stream()
+						.noneMatch(insn -> insn.getType() == InsnType.INVOKE)
+				|| optionalEffect.getInstructions().stream()
+						.anyMatch(insn -> insn.getResult() != null
+								&& insn.getResult().getRegNum() == resultReg)) {
 			return false;
 		}
 		BlockNode secondDecision = optionalEffect.getSuccessors().get(0);
@@ -4405,15 +5081,15 @@ public class FixMultiEntryLoops {
 				|| successTail == null
 				|| !isMoveBlock(successTail, 4)
 				|| successTail.getInstructions().isEmpty()
-				|| successTail.getSuccessors().size() != 1
-				|| successTail.getInstructions().stream()
-						.noneMatch(insn -> containsRegisterArg(insn, resultReg))) {
+				|| successTail.getSuccessors().size() != 1) {
 			return false;
 		}
 		BlockNode loopHeader = loopTail.getSuccessors().get(0);
 		BlockNode resume = ListUtils.filterOnlyOne(
 				resultJoin.getPredecessors(),
-				pred -> pred != directBridge && isCoroutineResumeBlock(pred));
+				pred -> pred != directBridge
+						&& (isCoroutineResumeBlock(pred)
+								|| findObfuscatedThrowOnFailureArg(pred) != null));
 		BlockNode suspendCheck = directBridge.getPredecessors().get(0);
 		if (resume == null
 				|| !(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
@@ -4425,11 +5101,14 @@ public class FixMultiEntryLoops {
 		}
 		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
 		InvokeNode suspendInvoke = findLastResultInvoke(suspendCall);
-		if (findLabelPut(suspendCall) == null
+		IndexInsnNode labelPut = findLabelPut(suspendCall);
+		if (labelPut == null
 				|| suspendInvoke == null
-				|| !suspendInvoke.getCallMth().getName().equals("serialize")
-				|| !suspendInvoke.getCallMth().getDeclClass().getFullName()
-						.endsWith("ContentConverter")) {
+				|| suspendInvoke.getResult() == null
+				|| !containsRegisterArg(
+						BlockUtils.getLastInsn(suspendCheck),
+						suspendInvoke.getResult().getRegNum())
+				|| !isMatchingSuspendState(resume, suspendInvoke, labelPut)) {
 			return false;
 		}
 		List<BlockNode> initialEntries = ListUtils.filter(
@@ -4488,6 +5167,37 @@ public class FixMultiEntryLoops {
 				"Split coroutine resume nullable result tail before loop header: "
 						+ loopHeader);
 		return true;
+	}
+
+	private static boolean isMatchingSuspendState(
+			BlockNode resume,
+			InvokeNode suspendInvoke,
+			IndexInsnNode labelPut) {
+		if (!(labelPut.getIndex() instanceof FieldInfo)
+				|| labelPut.getArgsCount() != 2
+				|| !(labelPut.getArg(1) instanceof RegisterArg)) {
+			return false;
+		}
+		RegisterArg continuationArg = findSuspendCallContinuationArg(suspendInvoke);
+		RegisterArg labelInstance = (RegisterArg) labelPut.getArg(1);
+		if (continuationArg == null) {
+			// In isolated smali or partially loaded inputs the continuation hierarchy can be
+			// unavailable. The ABI still places the continuation in the final call argument;
+			// accept it only when it is the exact register used for the label write.
+			InsnArg lastArg = suspendInvoke.getArgsCount() == 0
+					? null
+					: suspendInvoke.getArg(suspendInvoke.getArgsCount() - 1);
+			if (!(lastArg instanceof RegisterArg)
+					|| ((RegisterArg) lastArg).getRegNum() != labelInstance.getRegNum()) {
+				return false;
+			}
+		} else if (labelInstance.getRegNum() != continuationArg.getRegNum()) {
+			return false;
+		}
+		FieldInfo labelField = (FieldInfo) labelPut.getIndex();
+		CoroutineStateEntry stateEntry = findCoroutineLabelStateEntry(resume, labelField);
+		ResumeStateBranch stateBranch = findResumeStateBranchThroughRestore(resume, stateEntry);
+		return stateBranch != null && stateBranch.stateKey > 0;
 	}
 
 	/**
@@ -4660,8 +5370,7 @@ public class FixMultiEntryLoops {
 				.filter(block -> isLabeledSuspendCheck(block)
 						|| isObfuscatedLabeledSuspendCheck(mth, block))
 				.collect(Collectors.toCollection(LinkedHashSet::new));
-		if (mth.getExceptionHandlersCount() != 0
-				&& normalizeCompleteUnprotectedCoroutineCompletions(
+		if (normalizeCompleteUnprotectedCoroutineCompletions(
 						mth, multiEntryLoops, suspendChecks)) {
 			return true;
 		}
@@ -4697,23 +5406,35 @@ public class FixMultiEntryLoops {
 								mth, suspendChecks, completion);
 				if (hasCompetingCoroutineStateDispatch(mth, completion)) {
 					if (localCompletions.size() > 1) {
-						return normalizeLocalObfuscatedCoroutineCompletions(
+						boolean normalized = normalizeLocalObfuscatedCoroutineCompletions(
 								mth, localCompletions);
+						if (normalized) {
+							mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+						}
+						return normalized;
 					}
 					continue;
 				}
-				return normalizeDirectOrInsertedCompletionsThroughStateDispatch(
+				boolean normalized = normalizeDirectOrInsertedCompletionsThroughStateDispatch(
 						mth,
 						List.of(completion),
 						"Normalize reported obfuscated coroutine loop completion through state dispatch");
+				if (normalized) {
+					mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+				}
+				return normalized;
 			}
-			return normalizeDirectCompletionsThroughStateDispatch(
+			boolean normalized = normalizeDirectCompletionsThroughStateDispatch(
 					mth,
 					List.of(completion),
 					CoroutineResultTransport.REGISTER,
 					false,
 					true,
 					"Normalize reported coroutine loop completion through state dispatch");
+			if (normalized) {
+				mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+			}
+			return normalized;
 		}
 		return false;
 	}
@@ -5031,9 +5752,11 @@ public class FixMultiEntryLoops {
 
 	/**
 	 * A coroutine method can contain a local resource-management try while every suspend call,
-	 * resume state and state-dispatch block remains outside that exception region. Redirecting only
-	 * the reported completion is not sufficient for a multi-state dispatcher: region construction
-	 * can then merge a different resume arm into the wrong post-suspend body.
+	 * resume state and state-dispatch block remains outside that exception region. The same
+	 * multi-entry shape also occurs without any exception handlers. Redirecting only the reported
+	 * completion is not sufficient for a multi-state dispatcher: region construction can then
+	 * merge another resume arm into the wrong post-suspend body or duplicate a conditional action
+	 * tail into a branch where its input has not been defined.
 	 *
 	 * Normalize the complete, contiguous state map as one transaction. Reject the method if even
 	 * one suspend completion is missing, protected by a try, routed through an exception splitter
@@ -5072,11 +5795,18 @@ public class FixMultiEntryLoops {
 			completions.add(completion);
 		}
 		if (labelField == null
-				|| labelField.getName().equals("label")
 				|| !multiEntryLoops.stream().allMatch(
 						edge -> completions.stream().anyMatch(
 								completion -> completion.suspendCheck == edge.getStart()
 										&& completion.directSuccess == edge.getEnd()))) {
+			return false;
+		}
+		boolean namedLabel = labelField.getName().equals("label");
+		// Named-label loops without a channel iterator can require typed resume restores
+		// rather than this register-only whole-state rewrite.
+		if (namedLabel && completions.stream().noneMatch(completion ->
+				containsChannelIteratorSuspendPredicateInvoke(
+						completion.suspendCheck.getPredecessors().get(0)))) {
 			return false;
 		}
 		completions.sort(
@@ -5086,14 +5816,16 @@ public class FixMultiEntryLoops {
 				return false;
 			}
 		}
+		String reason = namedLabel
+				? "Normalize complete unprotected coroutine completions through state dispatch"
+				: "Normalize complete unprotected obfuscated coroutine completions through state dispatch";
 		return normalizeDirectCompletionsThroughStateDispatch(
 				mth,
 				completions,
 				CoroutineResultTransport.REGISTER,
 				false,
 				true,
-				"Normalize complete unprotected obfuscated coroutine completions"
-						+ " through state dispatch");
+				reason);
 	}
 
 	private static boolean isCoroutineCompletionOutsideExceptionRegions(
@@ -5290,6 +6022,11 @@ public class FixMultiEntryLoops {
 				isThreeStateSelectorLoopCandidate(mth, suspendChecks, multiEntryLoops);
 		boolean pointerInputLoopStateMachine =
 				isThreeStatePointerInputLoopCandidate(mth, suspendChecks, multiEntryLoops);
+		boolean channelFrameActionLoopStateMachine =
+				isThreeStateChannelFrameActionLoopCandidate(mth, suspendChecks, multiEntryLoops);
+		boolean threeStateDirectDispatchLoop =
+				pointerInputLoopStateMachine || channelFrameActionLoopStateMachine;
+		boolean stateMachineBody = isCoroutineStateMachineBody(mth);
 		boolean frameRequestLoopCandidate =
 				isTwoStateFrameRequestLoopCandidate(mth, suspendChecks, multiEntryLoops);
 		boolean sharedEmitReceiveLoopCandidate =
@@ -5299,23 +6036,21 @@ public class FixMultiEntryLoops {
 						block -> findLastResultInvoke(
 								block.getPredecessors().get(0)))
 				.filter(invoke -> invoke != null)
-				.anyMatch(
-						invoke -> isSuspendInvokeNamed(
-								invoke, "hasNext"));
+				.anyMatch(invoke -> isSuspendInvokeNamed(invoke, "hasNext")
+						|| isChannelIteratorSuspendPredicateInvoke(invoke));
 		boolean hasOrdinaryIteratorTraversal = blocks.stream()
 				.anyMatch(
 						block -> containsNonSuspendInvokeNamed(
-								block, "hasNext"));
+						block, "hasNext"));
 		if (suspendChecks.size() < 2
 				|| hasIteratorSuspend && !channelIteratorStateMachine
 				|| hasOrdinaryIteratorTraversal
-						&& mth.getExceptionHandlersCount() > 1) {
+						&& mth.getExceptionHandlersCount() > 1
+						&& !channelIteratorStateMachine) {
 			return false;
 		}
 		List<BlockNode> resumeBlocks = blocks.stream()
-				.filter(block -> containsInvoke(block, "throwOnFailure")
-						|| (multiEntryLoops.isEmpty()
-								&& findObfuscatedThrowOnFailureArg(block) != null))
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block))
 				.collect(Collectors.toList());
 		if (resumeBlocks.isEmpty()) {
 			return false;
@@ -5340,7 +6075,23 @@ public class FixMultiEntryLoops {
 						mth,
 						suspendCheck,
 						resumeBlocks,
-						selectorLoopStateMachine || frameRequestLoopCandidate);
+						selectorLoopStateMachine
+								|| frameRequestLoopCandidate
+								|| threeStateDirectDispatchLoop);
+			}
+			if (completion == null && threeStateDirectDispatchLoop) {
+				completion = findCoroutineSuspendCompletion(mth, suspendCheck);
+			}
+			if (completion == null && threeStateDirectDispatchLoop) {
+				completion = findSingleCoroutineSuspendCompletion(mth, suspendCheck);
+			}
+			if (completion == null && threeStateDirectDispatchLoop) {
+				completion = findDetachedIfChainCoroutineSuspendCompletion(
+						mth, suspendCheck, resumeBlocks);
+			}
+			if (completion == null && channelFrameActionLoopStateMachine) {
+				completion = findUnitNormalizedFrameCoroutineSuspendCompletion(
+						mth, suspendCheck, resumeBlocks);
 			}
 			if (completion == null && multiEntryLoops.isEmpty()) {
 				completion = findSingleCoroutineSuspendCompletion(mth, suspendCheck);
@@ -5399,7 +6150,7 @@ public class FixMultiEntryLoops {
 		if (frameRequestLoopCandidate && !frameRequestLoop) {
 			return false;
 		}
-		if (pointerInputLoopStateMachine
+		if (threeStateDirectDispatchLoop
 				&& (!stateKeys.equals(Set.of(1, 2, 3))
 						|| completions.stream()
 								.map(completion -> completion.resumeEntry)
@@ -5442,33 +6193,42 @@ public class FixMultiEntryLoops {
 					"Normalize three-state selector process completions"
 							+ " through label if-chain: " + labelDispatch);
 		}
-		if (pointerInputLoopStateMachine) {
-			RegisterArg[] directContinuationArgs = new RegisterArg[completions.size()];
-			for (int i = 0; i < completions.size(); i++) {
-				BlockNode suspendCall = completions.get(i).suspendCheck.getPredecessors().get(0);
-				IndexInsnNode labelPut = findLabelPut(suspendCall);
-				if (labelPut == null
-						|| labelPut.getArgsCount() != 2
-						|| !(labelPut.getArg(1) instanceof RegisterArg)) {
-					return false;
+		if (threeStateDirectDispatchLoop) {
+			RegisterArg[] directContinuationArgs = channelFrameActionLoopStateMachine
+					? null
+					: new RegisterArg[completions.size()];
+			if (directContinuationArgs != null) {
+				for (int i = 0; i < completions.size(); i++) {
+					CoroutineSuspendCompletion completion = completions.get(i);
+					BlockNode suspendCall = completion.suspendCheck.getPredecessors().get(0);
+					IndexInsnNode labelPut = findLabelPut(suspendCall);
+					if (labelPut == null
+							|| labelPut.getArgsCount() != 2
+							|| !(labelPut.getArg(1) instanceof RegisterArg)) {
+						return false;
+					}
+					directContinuationArgs[i] = (RegisterArg) labelPut.getArg(1);
 				}
-				directContinuationArgs[i] = (RegisterArg) labelPut.getArg(1);
 			}
 			CoroutineCompletionRewritePlan plan = buildCoroutineCompletionRewritePlan(
 					completions,
-					CoroutineResultTransport.CONTINUATION_FIELD,
+					channelFrameActionLoopStateMachine
+							? CoroutineResultTransport.REGISTER
+							: CoroutineResultTransport.CONTINUATION_FIELD,
 					CoroutineDirectPathMode.INSERT,
 					false,
 					true,
 					true,
-					"Normalize three-state pointer-input completions"
+					(channelFrameActionLoopStateMachine
+							? "Normalize three-state channel/frame/action completions"
+							: "Normalize three-state pointer-input completions")
 							+ " through shared state dispatch",
 					null,
 					null,
 					null,
 					null,
 					directContinuationArgs,
-					false,
+					channelFrameActionLoopStateMachine,
 					null);
 			return plan != null && applyCoroutineCompletionRewritePlan(mth, plan);
 		}
@@ -5477,8 +6237,8 @@ public class FixMultiEntryLoops {
 				&& !sequentialPipeline
 				&& !frameScaleAwaitLoop
 				&& !frameRequestLoop
-				&& !pointerInputLoopStateMachine
-				&& !(usedSharedResumeMatcher && mth.getName().equals("invokeSuspend"))) {
+				&& !threeStateDirectDispatchLoop
+				&& !(usedSharedResumeMatcher && stateMachineBody)) {
 			return false;
 		}
 		if (channelIteratorStateMachine && usedSharedResumeMatcher) {
@@ -5518,6 +6278,44 @@ public class FixMultiEntryLoops {
 							+ " through a single-entry loop pre-header");
 		}
 		if (canReuseDirectPaths) {
+			// The dispatcher may reload the resumed value from the continuation field.
+			// A register-only move would leave that field stale on immediate completion.
+			boolean readsResultField = completions.stream()
+					.anyMatch(completion -> findCoroutineResultGet(completion) != null);
+			if (readsResultField) {
+				RegisterArg[] directContinuationArgs = new RegisterArg[completions.size()];
+				for (int i = 0; i < completions.size(); i++) {
+					CoroutineSuspendCompletion completion = completions.get(i);
+					if (findCoroutineResultGet(completion) == null) {
+						return false;
+					}
+					BlockNode suspendCall = completion.suspendCheck.getPredecessors().get(0);
+					RegisterArg continuationArg = findSuspendCallContinuationArg(
+							findLastResultInvoke(suspendCall));
+					if (continuationArg == null || suspendCall.getInstructions().stream().noneMatch(insn ->
+							insn instanceof IndexInsnNode
+									&& insn.getType() == InsnType.IPUT
+									&& ((IndexInsnNode) insn).getIndex().equals(completion.labelField)
+									&& insn.getArgsCount() == 2
+									&& insn.getArg(1) instanceof RegisterArg
+									&& ((RegisterArg) insn.getArg(1)).getRegNum() == continuationArg.getRegNum())) {
+						return false;
+					}
+					directContinuationArgs[i] = continuationArg;
+				}
+				CoroutineCompletionRewritePlan plan = buildCoroutineCompletionRewritePlan(
+						completions,
+						CoroutineResultTransport.CONTINUATION_FIELD,
+						CoroutineDirectPathMode.REUSE,
+						true,
+						false,
+						usedSharedResumeMatcher,
+						"Normalize " + completions.size()
+								+ "-state switch coroutine completions through result-field dispatch: "
+								+ first.stateDispatch,
+						null, null, null, null, directContinuationArgs, false, null);
+				return plan != null && applyCoroutineCompletionRewritePlan(mth, plan);
+			}
 			return normalizeReusableDirectCompletionsThroughStateDispatch(
 					mth,
 					completions,
@@ -5527,7 +6325,7 @@ public class FixMultiEntryLoops {
 							+ " switch coroutine completions through state dispatch: "
 							+ first.stateDispatch);
 		}
-		return normalizeDirectCompletionsThroughStateDispatch(
+		boolean normalized = normalizeDirectCompletionsThroughStateDispatch(
 				mth,
 				completions,
 				CoroutineResultTransport.REGISTER,
@@ -5544,6 +6342,54 @@ public class FixMultiEntryLoops {
 						: "Normalize " + completions.size()
 								+ "-state switch coroutine completions"
 								+ " through shared state dispatch");
+		if (normalized) {
+			markComputedCoroutineLoopGuards(mth, completions);
+		}
+		return normalized;
+	}
+
+	/**
+	 * A value-selection diamond immediately before a loop guard is often folded into one expression.
+	 * When one guard branch directly repeats a suspend call, merging the guard into that diamond can
+	 * turn the whole value-selection branch into an unconditional {@code break} and omit the guard
+	 * block from the region tree. Keep only this narrow shape standalone: a pure IF fed by a PHI join,
+	 * one direct edge to a proven suspend call, and one non-suspend branch. This changes no CFG edges;
+	 * it only prevents unsafe condition merging during region making.
+	 */
+	private static void markComputedCoroutineLoopGuards(
+			MethodNode mth, List<CoroutineSuspendCompletion> completions) {
+		Set<BlockNode> suspendCalls = mth.getBasicBlocks().stream()
+				.filter(block -> findLabelPut(block) != null
+						&& findLastResultInvoke(block) != null)
+				.collect(Collectors.toSet());
+		Set<BlockNode> suspendChecks = completions.stream()
+				.map(completion -> completion.suspendCheck)
+				.collect(Collectors.toSet());
+		for (BlockNode guard : mth.getBasicBlocks()) {
+			if (suspendChecks.contains(guard)
+					|| guard.getInstructions().size() != 1
+					|| !(BlockUtils.getLastInsn(guard) instanceof IfNode)
+					|| guard.getPredecessors().size() != 1
+					|| guard.getSuccessors().size() != 2) {
+				continue;
+			}
+			BlockNode valueJoin = guard.getPredecessors().get(0);
+			if (valueJoin.getPredecessors().size() < 2
+					|| !ListUtils.isSingleElement(valueJoin.getSuccessors(), guard)
+					|| !(containsInsnType(valueJoin, InsnType.PHI)
+							|| containsInsnType(valueJoin, InsnType.CMP_G)
+							|| containsInsnType(valueJoin, InsnType.CMP_L))) {
+				continue;
+			}
+			BlockNode suspendCall = ListUtils.filterOnlyOne(
+					guard.getSuccessors(), suspendCalls::contains);
+			BlockNode body = suspendCall == null
+					? null
+					: getOtherSuccessor(guard, suspendCall);
+			if (body != null) {
+				guard.addAttr(StandaloneIfRegionAttr.INSTANCE);
+			}
+		}
 	}
 
 	/**
@@ -6008,19 +6854,220 @@ public class FixMultiEntryLoops {
 			if (invoke == null || invoke.getResult() == null) {
 				return false;
 			}
-			String name = invoke.getCallMth().getName();
 			String owner = invoke.getCallMth().getDeclClass().getFullName();
-			if (name.contains("awaitFirstDown")
+			if (invoke.getCallMth().getName().contains("awaitFirstDown")
 					&& owner.equals("androidx.compose.foundation.gestures.TapGestureDetectorKt")) {
 				firstDownCalls++;
-			} else if (name.contains("awaitPointerEvent")
-					&& owner.equals("androidx.compose.ui.input.pointer.AwaitPointerEventScope")) {
+			} else if (isAwaitPointerEventInvoke(invoke)) {
 				pointerEventCalls++;
 			} else {
 				return false;
 			}
 		}
 		return firstDownCalls == 1 && pointerEventCalls == 2;
+	}
+
+	/**
+	 * A conflated event consumer can combine one suspending channel receive, one frame callback and
+	 * one component-specific suspend action in the same three-state loop. Between suspensions it
+	 * drains the channel with {@code tryReceive}; direct and resumed frame/action paths consequently
+	 * enter the polling header from different blocks. The protocol is independent of generated
+	 * class and method names, so match the stable channel/frame ABIs and the complete continuation
+	 * shape before using the same all-state rewrite as pointer-input loops.
+	 */
+	private static boolean isThreeStateChannelFrameActionLoopCandidate(
+			MethodNode mth,
+			List<BlockNode> suspendChecks,
+			List<SpecialEdgeAttr> multiEntryLoops) {
+		if (!isCoroutineStateMachineBody(mth)
+				|| mth.getExceptionHandlersCount() != 0
+				|| mth.getBasicBlocks().size() > 80
+				|| suspendChecks.size() != 3
+				|| multiEntryLoops.isEmpty()) {
+			return false;
+		}
+		int receiveCalls = 0;
+		int frameCalls = 0;
+		int actionCalls = 0;
+		for (BlockNode suspendCheck : suspendChecks) {
+			if (suspendCheck.getPredecessors().size() != 1) {
+				return false;
+			}
+			InvokeNode invoke = findLastResultInvoke(suspendCheck.getPredecessors().get(0));
+			if (invoke == null || invoke.getResult() == null) {
+				return false;
+			}
+			if (isChannelReceiveSuspendInvoke(invoke)) {
+				receiveCalls++;
+			} else if (isComposeFrameSuspendInvoke(invoke)) {
+				frameCalls++;
+			} else if (isSuspendInvokeWithContinuation(invoke)) {
+				actionCalls++;
+			} else {
+				return false;
+			}
+		}
+		boolean hasNonSuspendingChannelPoll = mth.getBasicBlocks().stream()
+				.flatMap(block -> block.getInstructions().stream())
+				.filter(InvokeNode.class::isInstance)
+				.map(InvokeNode.class::cast)
+				.anyMatch(FixMultiEntryLoops::isChannelTryReceiveInvoke);
+		boolean hasChannelResultProjection = mth.getBasicBlocks().stream()
+				.flatMap(block -> block.getInstructions().stream())
+				.anyMatch(insn -> insn instanceof IndexInsnNode
+						&& insn.getType() == InsnType.INSTANCE_OF
+						&& ((IndexInsnNode) insn).getIndex() instanceof ArgType
+						&& ((ArgType) ((IndexInsnNode) insn).getIndex()).isObject()
+						&& ((ArgType) ((IndexInsnNode) insn).getIndex()).getObject()
+								.equals("kotlinx.coroutines.channels.ChannelResult$Failed"));
+		return receiveCalls == 1
+				&& frameCalls == 1
+				&& actionCalls == 1
+				&& hasNonSuspendingChannelPoll
+				&& hasChannelResultProjection;
+	}
+
+	private static boolean isChannelTryReceiveInvoke(InvokeNode invoke) {
+		return invoke.getCallMth().getDeclClass().getFullName()
+				.equals("kotlinx.coroutines.channels.ReceiveChannel")
+				&& invoke.getCallMth().getArgumentsTypes().isEmpty()
+				&& ArgType.OBJECT.equals(invoke.getCallMth().getReturnType());
+	}
+
+	/**
+	 * {@code withFrameNanos}-style implementations can normalize an immediate callback value to
+	 * {@code Unit} and test it against {@code COROUTINE_SUSPENDED} a second time. The corresponding
+	 * resume state bypasses that compiler-only diamond and joins just after it, so ordinary
+	 * completion matchers cannot walk from the direct successor to the resume block linearly.
+	 */
+	private static @Nullable CoroutineSuspendCompletion findUnitNormalizedFrameCoroutineSuspendCompletion(
+			MethodNode mth,
+			BlockNode suspendCheck,
+			List<BlockNode> resumeBlocks) {
+		if (!(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
+				|| suspendCheck.getPredecessors().size() != 1
+				|| suspendCheck.getSuccessors().size() != 2) {
+			return null;
+		}
+		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
+		InvokeNode suspendInvoke = findLastResultInvoke(suspendCall);
+		IndexInsnNode labelPut = findLabelPut(suspendCall);
+		if (!isComposeFrameSuspendInvoke(suspendInvoke)
+				|| suspendInvoke.getResult() == null
+				|| labelPut == null
+				|| !(labelPut.getIndex() instanceof FieldInfo)
+				|| labelPut.getArgsCount() != 2) {
+			return null;
+		}
+		Integer stateKey = resolveStablePositiveStateKeyBeforeInsn(
+				suspendCall, labelPut, labelPut.getArg(0));
+		BlockNode nestedSuspendCheck = ListUtils.filterOnlyOne(
+				suspendCheck.getSuccessors(),
+				candidate -> suspendCheck.getSuccessors().stream()
+						.filter(successor -> successor != candidate)
+						.anyMatch(successor -> ListUtils.isSingleElement(
+								successor.getSuccessors(), candidate)));
+		BlockNode directSuccess = getOtherSuccessor(suspendCheck, nestedSuspendCheck);
+		if (stateKey == null
+				|| nestedSuspendCheck == null
+				|| directSuccess == null
+				|| !(BlockUtils.getLastInsn(nestedSuspendCheck) instanceof IfNode)
+				|| nestedSuspendCheck.getPredecessors().size() != 2
+				|| !nestedSuspendCheck.getPredecessors().contains(suspendCheck)
+				|| !nestedSuspendCheck.getPredecessors().contains(directSuccess)
+				|| !ListUtils.isSingleElement(directSuccess.getSuccessors(), nestedSuspendCheck)
+				|| directSuccess.getInstructions().size() != 1
+				|| directSuccess.getInstructions().get(0).getType() != InsnType.MOVE) {
+			return null;
+		}
+		BlockNode suspendedExit = ListUtils.filterOnlyOne(
+				nestedSuspendCheck.getSuccessors(), block -> reachesExitOnLinearPath(block, 1));
+		BlockNode normalSuccess = getOtherSuccessor(nestedSuspendCheck, suspendedExit);
+		if (suspendedExit == null || normalSuccess == null) {
+			return null;
+		}
+
+		FieldInfo labelField = (FieldInfo) labelPut.getIndex();
+		CoroutineSuspendCompletion match = null;
+		BlockNode join = normalSuccess;
+		for (int depth = 0; depth <= 3 && join != null; depth++) {
+			for (BlockNode resume : resumeBlocks) {
+				if (!isShortNormalLinearPath(resume, join, 6)) {
+					continue;
+				}
+				CoroutineStateEntry stateEntry = findCoroutineLabelStateEntry(resume, labelField);
+				ResumeStateBranch stateBranch = findResumeStateBranchThroughRestore(resume, stateEntry);
+				RegisterArg resumeResultArg = findCoroutineFailureCheckArgOnLinearPath(
+						mth, resume, join, 6);
+				if (stateBranch == null
+						|| stateBranch.stateKey != stateKey
+						|| resumeResultArg == null) {
+					continue;
+				}
+				BlockNode stateDispatch = findCoroutineStateDispatch(
+						stateBranch.dispatchBlock, labelField);
+				if (stateDispatch == null) {
+					stateDispatch = findCoroutineStateLoadBeforeIfChain(
+							stateBranch.dispatchBlock, labelField, stateBranch.stateArg);
+				}
+				if (stateDispatch == null) {
+					continue;
+				}
+				CoroutineSuspendCompletion candidate = new CoroutineSuspendCompletion(
+						nestedSuspendCheck,
+						normalSuccess,
+						resume,
+						stateDispatch,
+						labelField,
+						stateBranch.stateArg.getRegNum(),
+						suspendInvoke.getResult(),
+						resumeResultArg,
+						stateKey);
+				if (match != null && match.resumeEntry != candidate.resumeEntry) {
+					return null;
+				}
+				match = candidate;
+			}
+			if (!isMoveBridgeWithOptionalGoto(join)
+					|| join.getSuccessors().size() != 1) {
+				break;
+			}
+			join = join.getSuccessors().get(0);
+		}
+		return match;
+	}
+
+	/**
+	 * Compose exposes this suspend operation as an interface method. Optimizers may rename the
+	 * method, but cannot change the declaring interface or its
+	 * {@code (PointerEventPass, Continuation) -> Object} contract.
+	 */
+	private static boolean isAwaitPointerEventInvoke(InvokeNode invoke) {
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		if (!invoke.getCallMth().getDeclClass().getFullName()
+				.equals("androidx.compose.ui.input.pointer.AwaitPointerEventScope")
+				|| !ArgType.OBJECT.equals(invoke.getCallMth().getReturnType())) {
+			return false;
+		}
+		if (invoke.getInvokeType() != InvokeType.STATIC) {
+			return argTypes.size() == 2
+					&& isObjectType(
+							argTypes.get(0),
+							"androidx.compose.ui.input.pointer.PointerEventPass")
+					&& CoroutineMethodUtils.isContinuationType(argTypes.get(1));
+		}
+		// Kotlin's synthetic default-argument bridge is static and prepends the receiver,
+		// then appends the mask and marker. Match that stable ABI instead of its renameable name.
+		return argTypes.size() == 5
+				&& isObjectType(
+						argTypes.get(0),
+						"androidx.compose.ui.input.pointer.AwaitPointerEventScope")
+				&& isObjectType(
+						argTypes.get(1),
+						"androidx.compose.ui.input.pointer.PointerEventPass")
+				&& CoroutineMethodUtils.isContinuationType(argTypes.get(2))
+				&& ArgType.INT.equals(argTypes.get(3))
+				&& ArgType.OBJECT.equals(argTypes.get(4));
 	}
 
 	/**
@@ -6084,7 +7131,7 @@ public class FixMultiEntryLoops {
 
 	private static boolean isTryProtectedManyStateChannelIterator(
 			MethodNode mth, List<BlockNode> suspendChecks) {
-		if (!mth.getName().equals("invokeSuspend")
+		if (!(mth.getName().equals("invokeSuspend") || isCoroutineStateMachineBody(mth))
 				|| mth.getExceptionHandlersCount() == 0
 				|| suspendChecks.size() < 4) {
 			return false;
@@ -6094,9 +7141,7 @@ public class FixMultiEntryLoops {
 					InvokeNode invoke = findLastResultInvoke(
 							block.getPredecessors().get(0));
 					return invoke != null
-							&& invoke.getCallMth().getName().equals("hasNext")
-							&& invoke.getCallMth().getDeclClass().getFullName()
-									.equals("kotlinx.coroutines.channels.ChannelIterator");
+							&& isChannelIteratorSuspendPredicateInvoke(invoke);
 				})
 				.count();
 		long sendSuspendCalls = suspendChecks.stream()
@@ -6104,9 +7149,7 @@ public class FixMultiEntryLoops {
 					InvokeNode invoke = findLastResultInvoke(
 							block.getPredecessors().get(0));
 					return invoke != null
-							&& invoke.getCallMth().getName().equals("send")
-							&& invoke.getCallMth().getDeclClass().getFullName()
-									.startsWith("kotlinx.coroutines.channels.");
+							&& isChannelSuspendActionInvoke(invoke);
 				})
 				.count();
 		boolean hasIteratorNext = mth.getBasicBlocks().stream()
@@ -6117,12 +7160,9 @@ public class FixMultiEntryLoops {
 								.getFullName()
 								.equals("kotlinx.coroutines.channels.ChannelIterator")));
 		boolean hasCancelConsumed = mth.getBasicBlocks().stream()
-				.anyMatch(block -> block.getInstructions().stream().anyMatch(insn -> insn instanceof InvokeNode
-						&& ((InvokeNode) insn).getCallMth().getName()
-								.equals("cancelConsumed")
-						&& ((InvokeNode) insn).getCallMth().getDeclClass()
-								.getFullName()
-								.startsWith("kotlinx.coroutines.channels.")));
+				.anyMatch(block -> block.getInstructions().stream()
+						.anyMatch(insn -> insn instanceof InvokeNode
+								&& isChannelConsumeCleanupInvoke((InvokeNode) insn)));
 		return hasNextSuspendCalls == 1
 				&& sendSuspendCalls >= 2
 				&& hasIteratorNext
@@ -6666,6 +7706,9 @@ public class FixMultiEntryLoops {
 		}
 		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
 		InvokeNode suspendInvoke = findLastResultInvoke(suspendCall);
+		if (suspendInvoke == null) {
+			suspendInvoke = findSingleResultInvokeDeep(suspendCheck);
+		}
 		IndexInsnNode labelPut = findLabelPut(suspendCall);
 		if (labelPut == null
 				|| !(labelPut.getIndex() instanceof FieldInfo)
@@ -6817,7 +7860,7 @@ public class FixMultiEntryLoops {
 	 */
 	private static boolean normalizeIteratorCollectionSelectorCompletion(
 			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
-		if (!mth.getName().equals("invokeSuspend")) {
+		if (!isCoroutineStateMachineBody(mth)) {
 			return false;
 		}
 		List<BlockNode> blocks = mth.getBasicBlocks();
@@ -6830,8 +7873,8 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		List<CoroutineSuspendCompletion> completions = new ArrayList<>(3);
-		Set<String> suspendNames = new HashSet<>();
 		Set<Integer> stateKeys = new HashSet<>();
+		CoroutineSuspendCompletion predicateCompletion = null;
 		CoroutineSuspendCompletion selectorCompletion = null;
 		CoroutineSuspendCompletion sendCompletion = null;
 		for (BlockNode suspendCheck : suspendChecks) {
@@ -6846,12 +7889,23 @@ public class FixMultiEntryLoops {
 			if (!stateKeys.add(completion.stateKey)) {
 				return false;
 			}
-			String suspendName = suspendInvoke.getCallMth().getName();
-			suspendNames.add(suspendName);
-			if (suspendName.equals("send")) {
+			if (isChannelIteratorSuspendPredicateInvoke(suspendInvoke)) {
+				if (predicateCompletion != null) {
+					return false;
+				}
+				predicateCompletion = completion;
+			} else if (isChannelSuspendActionInvoke(suspendInvoke)) {
+				if (sendCompletion != null) {
+					return false;
+				}
 				sendCompletion = completion;
-			} else if (!suspendName.equals("hasNext")) {
+			} else if (isFunction2SuspendTransformInvoke(suspendInvoke)) {
+				if (selectorCompletion != null) {
+					return false;
+				}
 				selectorCompletion = completion;
+			} else {
+				return false;
 			}
 			completions.add(completion);
 		}
@@ -6859,9 +7913,7 @@ public class FixMultiEntryLoops {
 		Set<BlockNode> resumeEntries = completions.stream()
 				.map(completion -> completion.resumeEntry)
 				.collect(Collectors.toSet());
-		if (!suspendNames.contains("hasNext")
-				|| !suspendNames.contains("send")
-				|| suspendNames.size() != 3
+		if (predicateCompletion == null
 				|| selectorCompletion == null
 				|| sendCompletion == null
 				|| resumeEntries.size() != completions.size()
@@ -6894,9 +7946,11 @@ public class FixMultiEntryLoops {
 				true,
 				false,
 				debugComment);
-		if (sendBackEdge == null
-				|| selectorPlan == null
-				|| !splitCoroutineResumeCollectionAddTail(mth, sendBackEdge)) {
+		if (sendBackEdge == null || selectorPlan == null) {
+			return false;
+		}
+		boolean split = splitCoroutineResumeCollectionAddTail(mth, sendBackEdge);
+		if (!split) {
 			return false;
 		}
 		return applyCoroutineCompletionRewritePlan(mth, selectorPlan);
@@ -6905,7 +7959,7 @@ public class FixMultiEntryLoops {
 	private static @Nullable CoroutineSuspendCompletion findSmallIfChainCoroutineSuspendCompletion(
 			MethodNode mth, BlockNode suspendCheck) {
 		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
-				.filter(block -> containsInvoke(block, "throwOnFailure"))
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block))
 				.collect(Collectors.toList());
 		return findSmallIfChainCoroutineSuspendCompletion(mth, suspendCheck, resumeBlocks);
 	}
@@ -6928,6 +7982,9 @@ public class FixMultiEntryLoops {
 		}
 		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
 		InvokeNode suspendInvoke = findLastResultInvoke(suspendCall);
+		if (suspendInvoke == null) {
+			suspendInvoke = findSingleResultInvokeDeep(suspendCheck);
+		}
 		IndexInsnNode labelPut = findLabelPut(suspendCall);
 		if (labelPut == null
 				|| !(labelPut.getIndex() instanceof FieldInfo)
@@ -6958,8 +8015,16 @@ public class FixMultiEntryLoops {
 				CoroutineStateEntry stateEntry = findCoroutineLabelStateEntry(resume, labelField);
 				ResumeStateBranch stateBranch = findResumeStateBranchThroughRestore(resume, stateEntry);
 				RegisterArg resumeResultArg = findThrowOnFailureArgOnLinearPath(resume, join, 6);
+				if (resumeResultArg == null) {
+					resumeResultArg = findRepeatedObfuscatedFailureCheckArgOnLinearPath(
+							mth, resume, join, 6);
+				}
 				if (resumeResultArg == null && allowSideEffectingDispatchPrefix) {
 					resumeResultArg = findObfuscatedThrowOnFailureArg(resume);
+				}
+				if (resumeResultArg == null && isCoroutineStateMachineBody(mth)) {
+					resumeResultArg = findCoroutineFailureCheckArgOnLinearPath(
+							mth, resume, join, 6);
 				}
 				boolean stableState = stateBranch != null
 						&& hasStableConstValueBeforeInsn(
@@ -7264,22 +8329,54 @@ public class FixMultiEntryLoops {
 		List<Integer> normalizedStates = completionsToNormalize.stream()
 				.map(completion -> completion.stateKey)
 				.collect(Collectors.toList());
+		BlockNode stateDispatch = first.stateDispatch;
+		boolean splitInlinedDispatchPrologue = inlinedStateTwoStateMap
+				&& hasInlinedIteratorDispatchPrologue(stateDispatch, matchingCompletion);
+		if (inlinedStateTwoStateMap && !splitInlinedDispatchPrologue) {
+			return false;
+		}
+		BlockNode originalEntry = splitInlinedDispatchPrologue
+				? stateDispatch.getPredecessors().get(0)
+				: null;
 		if (!normalizeDirectCompletionsThroughStateDispatch(
 				mth,
 				completionsToNormalize,
-				inlinedStateTwoStateMap
-						? CoroutineResultTransport.AUTO
-						: CoroutineResultTransport.REGISTER,
+				CoroutineResultTransport.REGISTER,
 				false,
 				true,
 				"Normalize counted iterator states " + normalizedStates
 						+ " through state dispatch: " + first.stateDispatch)) {
 			return false;
 		}
+		if (splitInlinedDispatchPrologue) {
+			splitCoroutineDispatchPrologue(mth, stateDispatch, originalEntry, 3);
+		}
 		for (SpecialEdgeAttr edge : multiEntryLoops) {
 			clearResolvedMultiEntryWarning(mth, edge);
 		}
 		return true;
+	}
+
+	private static boolean hasInlinedIteratorDispatchPrologue(
+			BlockNode stateDispatch, CoroutineSuspendCompletion completion) {
+		List<InsnNode> insns = stateDispatch.getInstructions();
+		return stateDispatch.getPredecessors().size() == 1
+				&& stateDispatch.getSuccessors().size() == 1
+				&& insns.size() >= 4
+				&& isCoroutineResultProloguePut(insns.get(0))
+				&& insns.get(0).getArgsCount() == 2
+				&& insns.get(0).getArg(0) instanceof RegisterArg
+				&& ((RegisterArg) insns.get(0).getArg(0)).getRegNum()
+						== completion.resumeResultArg.getRegNum()
+				&& insns.get(1) instanceof InvokeNode
+				&& insns.get(1).getResult() != null
+				&& insns.get(2).getType() == InsnType.IGET
+				&& insns.get(2) instanceof IndexInsnNode
+				&& ((IndexInsnNode) insns.get(2)).getIndex() instanceof FieldInfo
+				&& ((FieldInfo) ((IndexInsnNode) insns.get(2)).getIndex()).getName().equals("result")
+				&& insns.get(2).getResult() != null
+				&& insns.get(2).getResult().getRegNum() == completion.resumeResultArg.getRegNum()
+				&& isCoroutineLabelGet(insns.get(3));
 	}
 
 	private static @Nullable String classifyCountedIteratorSuspendCall(
@@ -7394,21 +8491,19 @@ public class FixMultiEntryLoops {
 	}
 
 	/**
-	 * A three-state channel zip loop suspends at the outer {@code hasNext}, the paired
-	 * {@code hasNext}, and an optional {@code send}. The paired iterator's false branch and the
-	 * immediately completed send share a move-only latch back to the outer iterator. Route the
-	 * paired predicate and send results through their complete states before generic loop repair
-	 * duplicates that latch.
+	 * Channel mapping operators suspend at the iterator predicate, a user transform and the send.
+	 * Minification commonly renames all three calls and the state-machine body, so classify the
+	 * protocol from declaring types and suspend ABIs. The transform and send direct completions are
+	 * the secondary entries; routing them through their existing states preserves the result values
+	 * and leaves the iterator predicate as the single source loop header.
 	 */
-	private static boolean normalizeThreeStateIteratorPredicateActionCompletions(
+	private static boolean normalizeThreeStateIteratorTransformActionCompletions(
 			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
-		if (!mth.getName().equals("invokeSuspend")
+		if (!isCoroutineStateMachineBody(mth)
 				|| mth.getExceptionHandlersCount() < 1
 				|| mth.getExceptionHandlersCount() > 3
-				|| multiEntryLoops.size() != 1
-				|| !mth.referencesMethodNamed("hasNext")
-				|| !mth.referencesMethodNamed("next")
-				|| !mth.referencesMethodNamed("send")) {
+				|| multiEntryLoops.isEmpty()
+				|| multiEntryLoops.size() > 3) {
 			return false;
 		}
 		List<BlockNode> suspendChecks = mth.getBasicBlocks().stream()
@@ -7419,14 +8514,18 @@ public class FixMultiEntryLoops {
 		}
 		Map<Integer, CoroutineSuspendCompletion> completionsByState =
 				new LinkedHashMap<>(3);
+		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block))
+				.collect(Collectors.toList());
 		for (BlockNode suspendCheck : suspendChecks) {
 			if (suspendCheck.getPredecessors().size() != 1) {
 				return false;
 			}
-			InvokeNode suspendInvoke =
-					findLastResultInvoke(suspendCheck.getPredecessors().get(0));
+			InvokeNode suspendInvoke = findLastResultInvoke(
+					suspendCheck.getPredecessors().get(0));
 			CoroutineSuspendCompletion completion =
-					findSmallIfChainCoroutineSuspendCompletion(mth, suspendCheck);
+					findSmallIfChainCoroutineSuspendCompletion(
+							mth, suspendCheck, resumeBlocks, true);
 			if (suspendInvoke == null
 					|| completion == null
 					|| completion.stateKey < 1
@@ -7434,13 +8533,119 @@ public class FixMultiEntryLoops {
 					|| completionsByState.put(completion.stateKey, completion) != null) {
 				return false;
 			}
-			String owner = suspendInvoke.getCallMth().getDeclClass().getFullName();
-			String name = suspendInvoke.getCallMth().getName();
+			boolean expectedRole;
+			if (completion.stateKey == 1) {
+				expectedRole = isChannelIteratorSuspendPredicateInvoke(suspendInvoke);
+			} else if (completion.stateKey == 2) {
+				expectedRole = isFunction2SuspendTransformInvoke(suspendInvoke);
+			} else {
+				expectedRole = isChannelSuspendActionInvoke(suspendInvoke);
+			}
+			if (!expectedRole) {
+				return false;
+			}
+		}
+		CoroutineSuspendCompletion predicate = completionsByState.get(1);
+		CoroutineSuspendCompletion transform = completionsByState.get(2);
+		CoroutineSuspendCompletion action = completionsByState.get(3);
+		if (predicate == null || transform == null || action == null) {
+			return false;
+		}
+		List<CoroutineSuspendCompletion> completions =
+				List.of(predicate, transform, action);
+		if (completions.stream()
+				.map(completion -> completion.resumeEntry)
+				.distinct()
+				.count() != 3
+				|| completions.stream().anyMatch(
+						completion -> completion.stateDispatch != predicate.stateDispatch
+								|| !completion.labelField.equals(predicate.labelField)
+								|| !completion.directSuccess.getPredecessors()
+										.contains(completion.suspendCheck)
+								|| completion.directSuccess.getSuccessors().size() != 1)
+				|| !isMoveBridgeWithOptionalGoto(transform.directSuccess)
+				|| !isMoveBridgeWithOptionalGoto(action.directSuccess)) {
+			return false;
+		}
+		long iteratorNextCount = mth.getBasicBlocks().stream()
+				.flatMap(block -> block.getInstructions().stream())
+				.filter(InvokeNode.class::isInstance)
+				.map(InvokeNode.class::cast)
+				.filter(invoke -> invoke.getCallMth().getDeclClass().getFullName()
+						.equals("kotlinx.coroutines.channels.ChannelIterator")
+						&& invoke.getCallMth().getName().equals("next"))
+				.count();
+		long cleanupCount = mth.getBasicBlocks().stream()
+				.flatMap(block -> block.getInstructions().stream())
+				.filter(InvokeNode.class::isInstance)
+				.map(InvokeNode.class::cast)
+				.filter(FixMultiEntryLoops::isChannelConsumeCleanupInvoke)
+				.count();
+		if (iteratorNextCount != 1 || cleanupCount < 1 || cleanupCount > 2) {
+			return false;
+		}
+		BlockNode loopHeader = predicate.suspendCheck.getPredecessors().get(0);
+		if (!isPathExists(predicate.directSuccess, transform.suspendCheck)
+				|| !isPathExists(transform.directSuccess, action.suspendCheck)
+				|| !isPathExists(action.directSuccess, loopHeader)
+				|| multiEntryLoops.stream().noneMatch(edge -> isPathExists(edge.getEnd(), loopHeader))) {
+			return false;
+		}
+		return normalizeDirectCompletionsThroughStateDispatch(
+				mth,
+				List.of(transform, action),
+				CoroutineResultTransport.REGISTER,
+				false,
+				true,
+				"Normalize three-state iterator transform/action completions"
+						+ " through state dispatch");
+	}
+
+	/**
+	 * A three-state channel zip loop suspends at the outer {@code hasNext}, the paired
+	 * {@code hasNext}, and an optional {@code send}. The paired iterator's false branch and the
+	 * immediately completed send share a move-only latch back to the outer iterator. Route the
+	 * paired predicate and send results through their complete states before generic loop repair
+	 * duplicates that latch.
+	 */
+	private static boolean normalizeThreeStateIteratorPredicateActionCompletions(
+			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
+		if (!isCoroutineStateMachineBody(mth)
+				|| mth.getExceptionHandlersCount() < 1
+				|| mth.getExceptionHandlersCount() > 3
+				|| multiEntryLoops.size() != 1) {
+			return false;
+		}
+		List<BlockNode> suspendChecks = mth.getBasicBlocks().stream()
+				.filter(FixMultiEntryLoops::isLabeledSuspendCheck)
+				.collect(Collectors.toList());
+		if (suspendChecks.size() != 3) {
+			return false;
+		}
+		Map<Integer, CoroutineSuspendCompletion> completionsByState =
+				new LinkedHashMap<>(3);
+		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block))
+				.collect(Collectors.toList());
+		for (BlockNode suspendCheck : suspendChecks) {
+			if (suspendCheck.getPredecessors().size() != 1) {
+				return false;
+			}
+			InvokeNode suspendInvoke =
+					findLastResultInvoke(suspendCheck.getPredecessors().get(0));
+			CoroutineSuspendCompletion completion =
+					findSmallIfChainCoroutineSuspendCompletion(
+							mth, suspendCheck, resumeBlocks, true);
+			if (suspendInvoke == null
+					|| completion == null
+					|| completion.stateKey < 1
+					|| completion.stateKey > 3
+					|| completionsByState.put(completion.stateKey, completion) != null) {
+				return false;
+			}
 			boolean expectedCall = completion.stateKey <= 2
-					? owner.equals("kotlinx.coroutines.channels.ChannelIterator")
-							&& name.equals("hasNext")
-					: owner.equals("kotlinx.coroutines.channels.SendChannel")
-							&& name.equals("send");
+					? isChannelIteratorSuspendPredicateInvoke(suspendInvoke)
+					: isChannelSuspendActionInvoke(suspendInvoke);
 			if (!expectedCall) {
 				return false;
 			}
@@ -7518,17 +8723,14 @@ public class FixMultiEntryLoops {
 					}
 					InvokeNode invoke = (InvokeNode) inner;
 					String owner = invoke.getCallMth().getDeclClass().getFullName();
-					String name = invoke.getCallMth().getName();
-					if (owner.equals(
+					if (isChannelIteratorSuspendPredicateInvoke(invoke)) {
+						counts[0]++;
+					} else if (owner.equals(
 							"kotlinx.coroutines.channels.ChannelIterator")) {
-						if (name.equals("hasNext")) {
-							counts[0]++;
-						} else if (name.equals("next")) {
+						if (invoke.getCallMth().getName().equals("next")) {
 							counts[1]++;
 						}
-					} else if (owner.equals(
-							"kotlinx.coroutines.channels.SendChannel")
-							&& name.equals("send")) {
+					} else if (isChannelSuspendActionInvoke(invoke)) {
 						counts[2]++;
 					}
 				});
@@ -7658,7 +8860,8 @@ public class FixMultiEntryLoops {
 	 */
 	private static boolean normalizeTwoStateIteratorPredicateActionCompletions(
 			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
-		if (!mth.getName().equals("invokeSuspend")
+		if (!(isCoroutineStateMachineBody(mth)
+				|| mth.getName().equals("invokeSuspend"))
 				|| mth.getExceptionHandlersCount() != 0
 				|| multiEntryLoops.size() != 1) {
 			return false;
@@ -7668,7 +8871,7 @@ public class FixMultiEntryLoops {
 		List<BlockNode> suspendChecks = blocks.stream()
 				.filter(FixMultiEntryLoops::isLabeledSuspendCheck)
 				.collect(Collectors.toList());
-		if (!containsInvokeOnCleanLinearPath(loopHeader, "hasNext", 1)
+		if (!containsChannelIteratorSuspendPredicateOnCleanLinearPath(loopHeader, 1)
 				|| suspendChecks.size() != 2) {
 			return false;
 		}
@@ -7903,25 +9106,45 @@ public class FixMultiEntryLoops {
 		Set<Integer> stateKeys = new HashSet<>();
 		CoroutineSuspendCompletion hasNextCompletion = null;
 		CoroutineSuspendCompletion actionCompletion = null;
+		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block))
+				.collect(Collectors.toList());
 		for (BlockNode suspendCheck : suspendChecks) {
 			InvokeNode suspendInvoke = findLastResultInvoke(suspendCheck.getPredecessors().get(0));
 			CoroutineSuspendCompletion completion =
-					findSmallIfChainCoroutineSuspendCompletion(mth, suspendCheck);
+					findSmallIfChainCoroutineSuspendCompletion(
+							mth,
+							suspendCheck,
+							resumeBlocks,
+							isCoroutineStateMachineBody(mth));
+			if (completion == null) {
+				completion = findKtorCioSuspendCompletion(mth, suspendCheck);
+			}
+			if (completion == null) {
+				completion = findSingleCoroutineSuspendCompletion(mth, suspendCheck);
+			}
 			if (suspendInvoke == null
 					|| completion == null
 					|| !stateKeys.add(completion.stateKey)) {
 				return false;
 			}
-			if (suspendInvoke.getCallMth().getName().equals("hasNext")) {
+			boolean iteratorPredicate =
+					isChannelIteratorSuspendPredicateInvoke(suspendInvoke)
+							|| suspendInvoke.getCallMth().getName().equals("hasNext");
+			if (iteratorPredicate) {
 				if (hasNextCompletion != null || completion.stateKey != 1) {
 					return false;
 				}
 				hasNextCompletion = completion;
-			} else {
+			} else if (isIteratorBodySuspendActionInvoke(suspendInvoke)
+					|| completion.stateKey == 2
+							&& findSuspendCallContinuationArg(suspendInvoke) != null) {
 				if (actionCompletion != null || completion.stateKey != 2) {
 					return false;
 				}
 				actionCompletion = completion;
+			} else {
+				return false;
 			}
 			completions.add(completion);
 		}
@@ -7931,6 +9154,14 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		CoroutineSuspendCompletion first = completions.get(0);
+		if (protectedActionOnlyEntry
+				&& splitProtectedIteratorPredicateCallForActionResume(
+						mth,
+						hasNextCompletion,
+						actionCompletion,
+						multiEntryLoops)) {
+			return true;
+		}
 		boolean sharedProtectedOptionalActionLatch =
 				protectedActionOnlyEntry
 						&& isSharedProtectedOptionalActionLatch(
@@ -7987,9 +9218,9 @@ public class FixMultiEntryLoops {
 						&& hasActionDirectEntry
 						&& (protectedForwardAction
 								|| isTryProtectedTwoStateIteratorAction(
-										mth,
-										hasNextCompletion,
-										actionCompletion));
+									mth,
+									hasNextCompletion,
+									actionCompletion));
 		if (!hasActionDirectEntry
 				|| unprotectedIteratorAction && !hasIteratorHeaderEntry
 				|| protectedActionOnlyEntry && !protectedActionOnly) {
@@ -8010,6 +9241,120 @@ public class FixMultiEntryLoops {
 								? "Normalize try-protected two-state iterator/action completions"
 										+ " through state dispatch"
 						: "Normalize two-state iterator/action completions through state dispatch");
+	}
+
+	/**
+	 * A minified channel operator can use the next predicate call itself as the shared loop latch.
+	 * The nullable-item skip and an immediately completed action enter that latch from inside the
+	 * loop, while the action resume state reaches it through a move-only restore bridge. Duplicate
+	 * only the predicate call for that external resume path; the predicate result check remains the
+	 * single loop header and all source-visible branches retain their original value transport.
+	 */
+	private static boolean splitProtectedIteratorPredicateCallForActionResume(
+			MethodNode mth,
+			CoroutineSuspendCompletion predicateCompletion,
+			CoroutineSuspendCompletion actionCompletion,
+			List<SpecialEdgeAttr> multiEntryLoops) {
+		BlockNode predicateCall = predicateCompletion.suspendCheck.getPredecessors().get(0);
+		predicateCall.updateCleanSuccessors();
+		if (actionCompletion.directSuccess != predicateCall
+				|| predicateCall.getPredecessors().size() != 3
+				|| !ListUtils.isSingleElement(
+						predicateCall.getCleanSuccessors(), predicateCompletion.suspendCheck)
+				|| multiEntryLoops.size() != 2
+				|| multiEntryLoops.stream().anyMatch(edge -> edge.getEnd() != predicateCall)) {
+			return false;
+		}
+		BlockNode actionResumeTail = findMoveOnlyTailBefore(
+				actionCompletion.resumeEntry, predicateCall, 2);
+		if (actionResumeTail == null
+				|| multiEntryLoops.stream().anyMatch(
+						edge -> edge.getStart() == actionResumeTail)) {
+			return false;
+		}
+		BlockNode optionalDecision = ListUtils.filterOnlyOne(
+				predicateCall.getPredecessors(),
+				predecessor -> predecessor != actionResumeTail
+						&& predecessor != actionCompletion.suspendCheck);
+		if (optionalDecision == null
+				|| !(BlockUtils.getLastInsn(optionalDecision) instanceof IfNode)
+				|| optionalDecision.getSuccessors().size() != 2
+				|| !optionalDecision.getSuccessors().contains(predicateCall)
+				|| multiEntryLoops.stream().noneMatch(
+						edge -> edge.getStart() == optionalDecision)
+				|| multiEntryLoops.stream().noneMatch(
+						edge -> edge.getStart() == actionCompletion.suspendCheck)) {
+			return false;
+		}
+		BlockNode actionCall = actionCompletion.suspendCheck.getPredecessors().get(0);
+		InvokeNode predicateInvoke = findLastResultInvoke(predicateCall);
+		InvokeNode actionInvoke = findLastResultInvoke(actionCall);
+		if (predicateInvoke == null
+				|| actionInvoke == null
+				|| !isChannelIteratorSuspendPredicateInvoke(predicateInvoke)
+				|| !isChannelSuspendActionInvoke(actionInvoke)
+				|| predicateCall.get(AType.TRY_BLOCK) == null
+				|| actionCall.get(AType.TRY_BLOCK) == null
+				|| !isPathExists(predicateCompletion.directSuccess, optionalDecision)
+				|| !isPathExists(optionalDecision, actionCall)
+				|| mth.getBasicBlocks().stream().noneMatch(
+						block -> containsInvoke(block, "next")
+								&& isPathExists(predicateCompletion.directSuccess, block)
+								&& isPathExists(block, optionalDecision))) {
+			return false;
+		}
+		long cleanupCount = mth.getBasicBlocks().stream()
+				.filter(block -> block.getInstructions().stream().anyMatch(
+						insn -> insn instanceof InvokeNode
+								&& isChannelConsumeCleanupInvoke((InvokeNode) insn)))
+				.count();
+		if (cleanupCount < 1 || cleanupCount > 2) {
+			return false;
+		}
+		BlockNode predicateCallCopy = copyBlock(mth, predicateCall);
+		BlockNode predicateCheckCopy = copyBlock(mth, predicateCompletion.suspendCheck);
+		BlockSplitter.replaceConnection(
+				actionResumeTail, predicateCall, predicateCallCopy);
+		BlockSplitter.connect(predicateCallCopy, predicateCheckCopy);
+		for (BlockNode successor : predicateCompletion.suspendCheck.getSuccessors()) {
+			BlockSplitter.connect(predicateCheckCopy, successor);
+		}
+		InsnNode copiedCheckInsn = BlockUtils.getLastInsn(predicateCheckCopy);
+		if (!(copiedCheckInsn instanceof IfNode)) {
+			throw new IllegalStateException(
+					"Copied protected iterator predicate check lost its condition");
+		}
+		((IfNode) copiedCheckInsn).initBlocks(predicateCheckCopy);
+		actionResumeTail.updateCleanSuccessors();
+		predicateCall.updateCleanSuccessors();
+		predicateCallCopy.updateCleanSuccessors();
+		predicateCheckCopy.updateCleanSuccessors();
+		predicateCompletion.suspendCheck.updateCleanSuccessors();
+		mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+		mth.addDebugComment(
+				"Split protected iterator predicate call for action resume: "
+						+ predicateCall);
+		return true;
+	}
+
+	private static @Nullable BlockNode findMoveOnlyTailBefore(
+			BlockNode start, BlockNode target, int maxDepth) {
+		BlockNode block = start;
+		for (int depth = 0; depth <= maxDepth; depth++) {
+			if (block.getSuccessors().contains(target)) {
+				return block;
+			}
+			if (block.getSuccessors().size() != 1) {
+				return null;
+			}
+			block = block.getSuccessors().get(0);
+			if (block == target
+					|| !isMoveBridgeWithOptionalGoto(block)
+					|| block.getPredecessors().size() != 1) {
+				return null;
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -8148,20 +9493,136 @@ public class FixMultiEntryLoops {
 			CoroutineSuspendCompletion hasNextCompletion,
 			CoroutineSuspendCompletion actionCompletion) {
 		List<ArgType> argTypes = mth.getArgTypes();
-		if (argTypes.size() != 3
-				|| !argTypes.get(0).isObject()
-				|| !argTypes.get(0).getObject()
+		boolean loweredSuspendFunction = argTypes.size() == 3
+				&& argTypes.get(0).isObject()
+				&& argTypes.get(0).getObject()
 						.equals("kotlinx.coroutines.channels.ReceiveChannel")
-				|| !argTypes.get(1).isObject()
-				|| !argTypes.get(1).getObject()
+				&& argTypes.get(1).isObject()
+				&& argTypes.get(1).getObject()
 						.equals("kotlinx.coroutines.channels.SendChannel")
-				|| !argTypes.get(2).isObject()
-				|| !argTypes.get(2).getObject()
-						.equals("kotlin.coroutines.Continuation")) {
+				&& argTypes.get(2).isObject()
+				&& argTypes.get(2).getObject()
+						.equals("kotlin.coroutines.Continuation");
+		if (!loweredSuspendFunction
+				&& !CoroutineMethodUtils.isStateMachineBody(mth)) {
 			return false;
 		}
 		return hasTryProtectedChannelIteratorForwardActionShape(
 				mth, hasNextCompletion, actionCompletion);
+	}
+
+	private static boolean isChannelIteratorSuspendPredicateInvoke(InvokeNode invoke) {
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		return invoke.getCallMth().getDeclClass().getFullName()
+				.equals("kotlinx.coroutines.channels.ChannelIterator")
+				&& argTypes.size() == 1
+				&& argTypes.get(0).isObject()
+				&& argTypes.get(0).getObject().equals("kotlin.coroutines.Continuation")
+				&& ArgType.OBJECT.equals(invoke.getCallMth().getReturnType());
+	}
+
+	private static boolean isSuspendInvokeWithContinuation(InvokeNode invoke) {
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		return !argTypes.isEmpty()
+				&& CoroutineMethodUtils.isKnownContinuationType(
+						argTypes.get(argTypes.size() - 1))
+				&& invoke.getCallMth().getReturnType().isObject();
+	}
+
+	private static boolean isChannelSuspendActionInvoke(InvokeNode invoke) {
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		String owner = invoke.getCallMth().getDeclClass().getFullName();
+		return (owner.equals("kotlinx.coroutines.channels.SendChannel")
+				|| owner.equals("kotlinx.coroutines.channels.ProducerScope"))
+				&& argTypes.size() == 2
+				&& argTypes.get(1).isObject()
+				&& argTypes.get(1).getObject().equals("kotlin.coroutines.Continuation")
+				&& ArgType.OBJECT.equals(invoke.getCallMth().getReturnType());
+	}
+
+	private static boolean isIteratorBodySuspendActionInvoke(InvokeNode invoke) {
+		if (isChannelSuspendActionInvoke(invoke)) {
+			return true;
+		}
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		return invoke.getCallMth().getDeclClass().getFullName()
+				.equals("kotlinx.coroutines.flow.FlowCollector")
+				&& argTypes.size() == 2
+				&& argTypes.get(1).isObject()
+				&& argTypes.get(1).getObject().equals("kotlin.coroutines.Continuation")
+				&& ArgType.OBJECT.equals(invoke.getCallMth().getReturnType());
+	}
+
+	/**
+	 * After both direct completions of a two-state iterator/action coroutine have been routed
+	 * through the label dispatcher, the iterator predicate can still have two ordinary source-loop
+	 * latches: the completed action and a conditional skip. If the initial state enters that same
+	 * predicate directly, DFS can mistake either latch for a second loop entry. Insert the canonical
+	 * empty pre-header only on the unique acyclic initial edge, leaving both source continue edges
+	 * attached to the predicate loop header.
+	 */
+	private static boolean normalizeChannelIteratorPredicateLoopPreHeader(
+			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
+		if (!mth.contains(AType.NORMALIZED_COROUTINE_LOOP)
+				|| !mth.isNoExceptionHandlers()
+				|| multiEntryLoops.size() != 1) {
+			return false;
+		}
+		SpecialEdgeAttr edge = multiEntryLoops.get(0);
+		BlockNode predicateCall = edge.getEnd();
+		if (edge.getType() != SpecialEdgeType.BACK_EDGE
+				|| !containsChannelIteratorSuspendPredicateInvoke(predicateCall)
+				|| predicateCall.getPredecessors().size() < 3
+				|| predicateCall.getPredecessors().size() > 4
+				|| !isMoveBlock(edge.getStart(), 4)) {
+			return false;
+		}
+		BlockNode predicateCheck = ListUtils.filterOnlyOne(
+				predicateCall.getSuccessors(), FixMultiEntryLoops::isLabeledSuspendCheck);
+		if (predicateCheck == null) {
+			return false;
+		}
+		List<BlockNode> suspendChecks = mth.getBasicBlocks().stream()
+				.filter(FixMultiEntryLoops::isLabeledSuspendCheck)
+				.collect(Collectors.toList());
+		if (suspendChecks.size() != 2) {
+			return false;
+		}
+		if (mth.getBasicBlocks().stream()
+						.filter(block -> containsInvoke(block, "next"))
+						.count() != 1) {
+			return false;
+		}
+		BlockNode initialEntry = ListUtils.filterOnlyOne(
+				predicateCall.getPredecessors(),
+				predecessor -> containsInvoke(predecessor, "iterator"));
+		if (initialEntry == null
+				|| !ListUtils.isSingleElement(initialEntry.getSuccessors(), predicateCall)
+				|| predicateCall.getPredecessors().stream()
+						.filter(predecessor -> predecessor != initialEntry)
+						.anyMatch(predecessor -> !isPathExists(
+								predicateCall, predecessor))) {
+			return false;
+		}
+		BlockNode loopPreHeader = BlockSplitter.insertBlockBetween(
+				mth, initialEntry, predicateCall);
+		loopPreHeader.add(AFlag.SYNTHETIC);
+		mth.addAttr(new CoroutineLoopPreHeaderAttr(loopPreHeader));
+		mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+		clearResolvedMultiEntryWarning(mth, edge);
+		mth.addDebugComment(
+				"Insert channel-iterator predicate loop pre-header: " + predicateCall);
+		return true;
+	}
+
+	private static boolean isFunction2SuspendTransformInvoke(InvokeNode invoke) {
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		return invoke.getCallMth().getDeclClass().getFullName()
+				.equals("kotlin.jvm.functions.Function2")
+				&& argTypes.size() == 2
+				&& argTypes.get(0).isObject()
+				&& argTypes.get(1).isObject()
+				&& ArgType.OBJECT.equals(invoke.getCallMth().getReturnType());
 	}
 
 	private static boolean hasTryProtectedChannelIteratorForwardActionShape(
@@ -8178,12 +9639,8 @@ public class FixMultiEntryLoops {
 		InvokeNode actionInvoke = findLastResultInvoke(actionCall);
 		if (hasNextInvoke == null
 				|| actionInvoke == null
-				|| !hasNextInvoke.getCallMth().getName().equals("hasNext")
-				|| !hasNextInvoke.getCallMth().getDeclClass().getFullName()
-						.equals("kotlinx.coroutines.channels.ChannelIterator")
-				|| !actionInvoke.getCallMth().getName().equals("send")
-				|| !actionInvoke.getCallMth().getDeclClass().getFullName()
-						.equals("kotlinx.coroutines.channels.SendChannel")
+				|| !isChannelIteratorSuspendPredicateInvoke(hasNextInvoke)
+				|| !isChannelSuspendActionInvoke(actionInvoke)
 				|| hasNextCall.get(AType.TRY_BLOCK) == null
 				|| actionCall.get(AType.TRY_BLOCK) == null
 				|| !isPathExists(hasNextCompletion.directSuccess, actionCall)
@@ -8197,13 +9654,232 @@ public class FixMultiEntryLoops {
 						&& isPathExists(block, actionCall));
 		long cancelConsumedCount = mth.getBasicBlocks().stream()
 				.filter(block -> block.getInstructions().stream().anyMatch(insn -> insn instanceof InvokeNode
-						&& ((InvokeNode) insn).getCallMth().getName().equals("cancelConsumed")
-						&& ((InvokeNode) insn).getCallMth().getDeclClass().getFullName()
-								.startsWith("kotlinx.coroutines.channels.")))
+						&& isChannelConsumeCleanupInvoke((InvokeNode) insn)))
 				.count();
 		return iteratorNext != null
 				&& cancelConsumedCount >= 1
 				&& cancelConsumedCount <= 2;
+	}
+
+	private static boolean isChannelConsumeCleanupInvoke(InvokeNode invoke) {
+		if (!invoke.getCallMth().getDeclClass().getFullName()
+				.startsWith("kotlinx.coroutines.channels.")) {
+			return false;
+		}
+		if (invoke.getCallMth().getName().equals("cancelConsumed")) {
+			return true;
+		}
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		if (!ArgType.VOID.equals(invoke.getCallMth().getReturnType())) {
+			return false;
+		}
+		if (invoke.getCallMth().getDeclClass().getFullName()
+				.equals("kotlinx.coroutines.channels.ReceiveChannel")) {
+			return argTypes.size() == 1
+					&& argTypes.get(0).isObject()
+					&& argTypes.get(0).getObject()
+							.equals("java.util.concurrent.CancellationException");
+		}
+		return argTypes.size() == 2
+				&& argTypes.get(0).isObject()
+				&& argTypes.get(0).getObject()
+						.equals("kotlinx.coroutines.channels.ReceiveChannel")
+				&& argTypes.get(1).isObject()
+				&& argTypes.get(1).getObject().equals("java.lang.Throwable");
+	}
+
+	/**
+	 * A periodic producer performs an initial delay (state 1), sends one value (state 2), then
+	 * repeats through a second delay state (state 3). States 1 and 3 deliberately share the same
+	 * restore block before the send, so generic coroutine matching rejects the duplicated resume
+	 * entry and the direct state-3 completion is reported as a loop entry. Route only that repeated
+	 * delay completion through the existing dispatcher after proving the complete delay/send state
+	 * family and the shared {1,3} restore branch.
+	 */
+	private static boolean normalizePeriodicDelaySendLoopCompletion(
+			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
+		if (!isCoroutineStateMachineBody(mth)
+				|| mth.getExceptionHandlersCount() != 0
+				|| mth.getBasicBlocks().size() > 32
+				|| multiEntryLoops.size() != 1) {
+			return false;
+		}
+		SpecialEdgeAttr entry = multiEntryLoops.get(0);
+		BlockNode repeatedDelayCheck = entry.getStart();
+		BlockNode sendBlock = entry.getEnd();
+		if (!isLabeledSuspendCheck(repeatedDelayCheck)
+				|| !repeatedDelayCheck.getSuccessors().contains(sendBlock)
+				|| repeatedDelayCheck.getPredecessors().size() != 1
+				|| sendBlock.getPredecessors().size() != 3) {
+			return false;
+		}
+		BlockNode repeatedDelaySetup = repeatedDelayCheck.getPredecessors().get(0);
+		InvokeNode repeatedDelay = findLastResultInvoke(repeatedDelaySetup);
+		IndexInsnNode repeatedLabelPut = findLabelPut(repeatedDelaySetup);
+		if (!isDelaySuspendInvoke(repeatedDelay)
+				|| repeatedLabelPut == null
+				|| !(repeatedLabelPut.getIndex() instanceof FieldInfo)
+				|| repeatedLabelPut.getArgsCount() != 2) {
+			return false;
+		}
+		Integer repeatedStateKey = resolveStablePositiveStateKeyBeforeInsn(
+				repeatedDelaySetup,
+				repeatedLabelPut,
+				repeatedLabelPut.getArg(0));
+		if (!Integer.valueOf(3).equals(repeatedStateKey)
+				|| findCoroutineSuspendedReturnSuccessor(
+						repeatedDelayCheck, repeatedDelay) == null) {
+			return false;
+		}
+
+		FieldInfo labelField = (FieldInfo) repeatedLabelPut.getIndex();
+		List<BlockNode> suspendChecks = mth.getBasicBlocks().stream()
+				.filter(FixMultiEntryLoops::isLabeledSuspendCheck)
+				.collect(Collectors.toList());
+		if (suspendChecks.size() != 3) {
+			return false;
+		}
+		Set<Integer> stateKeys = new HashSet<>(3);
+		int delayCount = 0;
+		int sendCount = 0;
+		for (BlockNode suspendCheck : suspendChecks) {
+			BlockNode setup = suspendCheck.getPredecessors().get(0);
+			InvokeNode suspendInvoke = findLastResultInvoke(setup);
+			IndexInsnNode labelPut = findLabelPut(setup);
+			if (suspendInvoke == null
+					|| labelPut == null
+					|| !labelField.equals(labelPut.getIndex())
+					|| labelPut.getArgsCount() != 2) {
+				return false;
+			}
+			Integer stateKey = resolveStablePositiveStateKeyBeforeInsn(
+					setup, labelPut, labelPut.getArg(0));
+			if (stateKey == null || !stateKeys.add(stateKey)) {
+				return false;
+			}
+			if (isDelaySuspendInvoke(suspendInvoke)) {
+				delayCount++;
+			} else if (isSendChannelSuspendInvoke(suspendInvoke)) {
+				sendCount++;
+			} else {
+				return false;
+			}
+		}
+		if (!stateKeys.equals(Set.of(1, 2, 3))
+				|| delayCount != 2
+				|| sendCount != 1
+				|| !containsInvokeDeep(
+						sendBlock, FixMultiEntryLoops::isSendChannelSuspendInvoke)) {
+			return false;
+		}
+
+		BlockNode stateDispatch = ListUtils.filterOnlyOne(
+				mth.getBasicBlocks(), block -> findLabelGet(block, labelField) != null);
+		IndexInsnNode labelGet = stateDispatch == null
+				? null
+				: findLabelGet(stateDispatch, labelField);
+		if (labelGet == null || labelGet.getResult() == null) {
+			return false;
+		}
+		int stateReg = labelGet.getResult().getRegNum();
+		BlockNode sharedResume = ListUtils.filterOnlyOne(
+				mth.getBasicBlocks(), block -> {
+					RegisterArg resultArg = findThrowOnFailureArg(block);
+					return resultArg != null
+							&& findExactIfChainStateKeysForResume(block, stateReg)
+									.equals(Set.of(1, 3))
+							&& isShortNormalLinearPath(block, sendBlock, 2);
+				});
+		RegisterArg resumeResultArg = sharedResume == null
+				? null
+				: findThrowOnFailureArg(sharedResume);
+		if (sharedResume == null
+				|| resumeResultArg == null
+				|| repeatedDelay.getResult() == null
+				|| repeatedDelay.getResult().getRegNum() != resumeResultArg.getRegNum()
+				|| !isPathExists(stateDispatch, sharedResume)) {
+			return false;
+		}
+		CoroutineSuspendCompletion completion = new CoroutineSuspendCompletion(
+				repeatedDelayCheck,
+				sendBlock,
+				sharedResume,
+				stateDispatch,
+				labelField,
+				stateReg,
+				repeatedDelay.getResult(),
+				resumeResultArg,
+				3);
+		BlockNode state3Entry = ListUtils.filterOnlyOne(
+				sharedResume.getPredecessors(), predecessor -> {
+					Set<Integer> keys = new HashSet<>();
+					return collectExactIfChainStateKey(
+							predecessor, sharedResume, stateReg, 0, keys, new HashSet<>())
+							&& keys.equals(Set.of(3));
+				});
+		if (state3Entry == null) {
+			return false;
+		}
+		if (sharedResume.getSuccessors().size() != 1) {
+			return false;
+		}
+		if (!hasCoroutineResultMarkerDispatchPrologue(stateDispatch)) {
+			return false;
+		}
+		BlockNode originalEntry = stateDispatch.getPredecessors().get(0);
+		BlockNode restoreSuccessor = sharedResume.getSuccessors().get(0);
+		boolean normalized = normalizeDirectCompletionsThroughStateDispatch(
+				mth,
+				List.of(completion),
+				CoroutineResultTransport.REGISTER,
+				false,
+				false,
+				"Normalize periodic delay/send loop completion through state dispatch: "
+						+ stateDispatch);
+		if (!normalized) {
+			return false;
+		}
+		splitCoroutineDispatchPrologue(mth, stateDispatch, originalEntry, 2);
+		if (!state3Entry.getSuccessors().contains(sharedResume)) {
+			mth.addWarn("Periodic delay/send resume edge changed during normalization");
+			return true;
+		}
+		// State 1 and state 3 share the original restore block, but enter different
+		// source paths. Give state 3 its own restore so region making cannot place
+		// the repeated delay before L$0 has been read.
+		BlockNode state3Restore = BlockSplitter.startNewBlock(mth, sharedResume.getStartOffset());
+		BlockSplitter.copyBlockData(sharedResume, state3Restore);
+		BlockSplitter.replaceConnection(state3Entry, sharedResume, state3Restore);
+		BlockSplitter.connect(state3Restore, restoreSuccessor);
+		state3Entry.updateCleanSuccessors();
+		state3Restore.updateCleanSuccessors();
+		return true;
+	}
+
+	private static boolean isDelaySuspendInvoke(@Nullable InvokeNode invoke) {
+		if (invoke == null
+				|| !invoke.getCallMth().getDeclClass().getFullName()
+						.equals("kotlinx.coroutines.DelayKt")
+				|| !ArgType.OBJECT.equals(invoke.getCallMth().getReturnType())) {
+			return false;
+		}
+		List<ArgType> args = invoke.getCallMth().getArgumentsTypes();
+		return args.size() == 2
+				&& ArgType.LONG.equals(args.get(0))
+				&& CoroutineMethodUtils.isKnownContinuationType(args.get(1));
+	}
+
+	private static boolean isSendChannelSuspendInvoke(@Nullable InvokeNode invoke) {
+		if (invoke == null
+				|| !invoke.getCallMth().getDeclClass().getFullName()
+						.equals("kotlinx.coroutines.channels.SendChannel")
+				|| !ArgType.OBJECT.equals(invoke.getCallMth().getReturnType())) {
+			return false;
+		}
+		List<ArgType> args = invoke.getCallMth().getArgumentsTypes();
+		return args.size() == 2
+				&& ArgType.OBJECT.equals(args.get(0))
+				&& CoroutineMethodUtils.isKnownContinuationType(args.get(1));
 	}
 
 	/**
@@ -8254,7 +9930,9 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		List<BlockNode> resumeBlocks = blocks.stream()
-				.filter(block -> containsInvoke(block, "throwOnFailure"))
+				.filter(block -> containsInvoke(block, "throwOnFailure")
+						|| findRepeatedObfuscatedFailureCheckArgOnLinearPath(
+								mth, block, block, 0) != null)
 				.collect(Collectors.toList());
 		List<CoroutineSuspendCompletion> completions =
 				new ArrayList<>(suspendChecks.size());
@@ -8344,8 +10022,8 @@ public class FixMultiEntryLoops {
 		List<CoroutineSuspendCompletion> transportableCompletions =
 				completions.stream()
 						.filter(completion -> completion.directResultArg.getRegNum() == completion.resumeResultArg.getRegNum()
-								|| hasDirectContinuationResultTransport(
-										completion))
+								|| hasDirectContinuationResultTransport(completion)
+								|| findLabeledSuspendContinuationArg(completion) != null)
 						.collect(Collectors.toList());
 		if (!transportableCompletions.containsAll(matchingCompletions)) {
 			return false;
@@ -8353,15 +10031,43 @@ public class FixMultiEntryLoops {
 		List<Integer> normalizedStates = transportableCompletions.stream()
 				.map(completion -> completion.stateKey)
 				.collect(Collectors.toList());
-		boolean normalized = normalizeDirectCompletionsThroughStateDispatch(
-				mth,
-				transportableCompletions,
-				CoroutineResultTransport.AUTO,
-				false,
-				true,
-				"Normalize object-register states " + normalizedStates + " of complete "
-						+ completions.size()
-						+ "-state if-chain coroutine through state dispatch");
+		RegisterArg[] directContinuationArgs = transportableCompletions.stream()
+				.map(FixMultiEntryLoops::findLabeledSuspendContinuationArg)
+				.toArray(RegisterArg[]::new);
+		boolean useContinuationFieldTransport = Arrays.stream(directContinuationArgs)
+				.allMatch(arg -> arg != null)
+				&& transportableCompletions.stream()
+						.allMatch(completion -> findCoroutineResultGet(completion) != null);
+		String debugComment = "Normalize object-register states " + normalizedStates + " of complete "
+				+ completions.size()
+				+ "-state if-chain coroutine through state dispatch";
+		boolean normalized;
+		if (useContinuationFieldTransport) {
+			CoroutineCompletionRewritePlan plan = buildCoroutineCompletionRewritePlan(
+					transportableCompletions,
+					CoroutineResultTransport.CONTINUATION_FIELD,
+					CoroutineDirectPathMode.INSERT,
+					false,
+					true,
+					false,
+					debugComment,
+					null,
+					null,
+					null,
+					null,
+					directContinuationArgs,
+					false,
+					null);
+			normalized = plan != null && applyCoroutineCompletionRewritePlan(mth, plan);
+		} else {
+			normalized = normalizeDirectCompletionsThroughStateDispatch(
+					mth,
+					transportableCompletions,
+					CoroutineResultTransport.AUTO,
+					false,
+					true,
+					debugComment);
+		}
 		if (normalized) {
 			mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
 			for (SpecialEdgeAttr edge : multiEntryLoops) {
@@ -8382,6 +10088,9 @@ public class FixMultiEntryLoops {
 		}
 		InvokeNode suspendInvoke = findLastResultInvoke(
 				completion.suspendCheck.getPredecessors().get(0));
+		if (suspendInvoke == null) {
+			suspendInvoke = findSingleResultInvokeDeep(completion.suspendCheck);
+		}
 		if (suspendInvoke == null
 				|| suspendInvoke.getArgsCount() == 0
 				|| !(suspendInvoke.getArg(
@@ -8390,6 +10099,104 @@ public class FixMultiEntryLoops {
 		}
 		return ((RegisterArg) resultGet.getArg(0)).getRegNum() == ((RegisterArg) suspendInvoke.getArg(
 				suspendInvoke.getArgsCount() - 1)).getRegNum();
+	}
+
+	/**
+	 * Resolve the actual continuation register at a suspend call from the compiler's label write.
+	 * Register allocation can move the continuation far away from the register used by the state
+	 * dispatcher, especially around calls with many arguments. The label field receiver is a
+	 * stronger identity proof than following physical-register aliases across a loop.
+	 *
+	 * <p>
+	 * Require the same register to receive the known continuation label and to be passed as the
+	 * final suspend-call argument. A rewrite can then store the immediate result through this
+	 * register and explicitly move it into the dispatcher's receiver register before dispatch.
+	 * </p>
+	 */
+	private static @Nullable RegisterArg findLabeledSuspendContinuationArg(
+			CoroutineSuspendCompletion completion) {
+		if (completion.suspendCheck.getPredecessors().size() != 1) {
+			return null;
+		}
+		BlockNode suspendSetup = completion.suspendCheck.getPredecessors().get(0);
+		InvokeNode suspendInvoke = findLastResultInvoke(suspendSetup);
+		if (suspendInvoke == null) {
+			suspendInvoke = findSingleResultInvokeDeep(completion.suspendCheck);
+		}
+		RegisterArg continuationArg = findSuspendCallContinuationArg(suspendInvoke);
+		IndexInsnNode labelPut = findLabelPut(suspendSetup);
+		if (continuationArg == null
+				|| labelPut == null
+				|| !completion.labelField.equals(labelPut.getIndex())
+				|| labelPut.getArgsCount() != 2
+				|| !(labelPut.getArg(1) instanceof RegisterArg)) {
+			return null;
+		}
+		int labelReceiverReg = ((RegisterArg) labelPut.getArg(1)).getRegNum();
+		if (labelReceiverReg != continuationArg.getRegNum()
+				&& !isMoveAliasBetween(
+						suspendSetup,
+						completion.suspendCheck,
+						labelPut,
+						suspendInvoke,
+						labelReceiverReg,
+						continuationArg.getRegNum())) {
+			return null;
+		}
+		return continuationArg;
+	}
+
+	static boolean isMoveAliasBetween(
+			BlockNode startBlock,
+			BlockNode endBlock,
+			InsnNode startInsn,
+			InsnNode endInsn,
+			int sourceReg,
+			int targetReg) {
+		Set<Integer> aliases = new HashSet<>();
+		aliases.add(sourceReg);
+		boolean started = false;
+		for (BlockNode block : startBlock == endBlock
+				? List.of(startBlock)
+				: List.of(startBlock, endBlock)) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (!started) {
+					started = insn == startInsn;
+					continue;
+				}
+				if (containsInsn(insn, endInsn)) {
+					return aliases.contains(targetReg);
+				}
+				RegisterArg result = insn.getResult();
+				if (result == null) {
+					continue;
+				}
+				int resultReg = result.getRegNum();
+				if ((insn.getType() == InsnType.MOVE || insn.getType() == InsnType.CHECK_CAST)
+						&& insn.getArgsCount() == 1
+						&& insn.getArg(0) instanceof RegisterArg
+						&& aliases.contains(((RegisterArg) insn.getArg(0)).getRegNum())) {
+					aliases.add(resultReg);
+				} else {
+					aliases.remove(resultReg);
+				}
+			}
+		}
+		return false;
+	}
+
+	private static boolean containsInsn(InsnNode root, InsnNode target) {
+		if (root == target) {
+			return true;
+		}
+		boolean[] found = new boolean[1];
+		root.visitInsns(insn -> {
+			if (insn == target) {
+				found[0] = true;
+			}
+			return null;
+		});
+		return found[0];
 	}
 
 	private static boolean ownsSmallIfChainMultiEntry(
@@ -8910,6 +10717,103 @@ public class FixMultiEntryLoops {
 						+ completion.stateDispatch);
 	}
 
+	/**
+	 * The JVM OutputStream copy loop has a single await-content state. Immediate completion uses a
+	 * move-only bridge into the buffer drain, while resume restores the channel, stream and byte
+	 * count before the same drain. Clone that pure bridge for the external resume path and send it
+	 * through a shared pre-header. The immediate path stays inside the source loop, and the resume
+	 * path safely rechecks closed/empty state before draining.
+	 */
+	private static boolean normalizeKtorOutputStreamCopyCompletion(
+			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
+		if (multiEntryLoops.isEmpty() || multiEntryLoops.size() > 2) {
+			return false;
+		}
+		List<BlockNode> suspendChecks = mth.getBasicBlocks().stream()
+				.filter(block -> isLabeledSuspendCheck(block)
+						|| isObfuscatedLabeledSuspendCheck(mth, block))
+				.collect(Collectors.toList());
+		if (suspendChecks.size() != 1) {
+			return false;
+		}
+		BlockNode suspendCheck = suspendChecks.get(0);
+		if (suspendCheck.getPredecessors().size() != 1) {
+			return false;
+		}
+		InvokeNode suspendInvoke = findLastResultInvoke(suspendCheck.getPredecessors().get(0));
+		CoroutineSuspendCompletion completion = findKtorCioSuspendCompletion(mth, suspendCheck);
+		if (suspendInvoke == null
+				|| !KtorCioRecovery.isAwaitContentInvoke(suspendInvoke)
+				|| completion == null
+				|| completion.stateKey != 1
+				|| !canDispatchDirectCompletionByLabel(completion)
+				|| !isPathExists(completion.stateDispatch, completion.suspendCheck)
+				|| !isPathExists(completion.stateDispatch, completion.resumeEntry)) {
+			return false;
+		}
+		SpecialEdgeAttr completionEdge = ListUtils.filterOnlyOne(
+				multiEntryLoops, edge -> isDirectCompletionBackEdge(completion, edge));
+		if (completionEdge == null) {
+			return false;
+		}
+		BlockNode moveJoin = completion.directSuccess.getSuccessors().get(0);
+		if (!isMoveBlock(moveJoin, 8)
+				|| moveJoin.getPredecessors().size() != 2
+				|| moveJoin.getSuccessors().size() != 1) {
+			return false;
+		}
+		BlockNode resumeTail = ListUtils.filterOnlyOne(
+				moveJoin.getPredecessors(),
+				predecessor -> predecessor != completion.directSuccess
+						&& isShortLinearPath(completion.resumeEntry, predecessor, 2));
+		if (resumeTail == null || !ListUtils.isSingleElement(resumeTail.getSuccessors(), moveJoin)) {
+			return false;
+		}
+		BlockNode drainBody = moveJoin.getSuccessors().get(0);
+		BlockNode loopHeader = ListUtils.filterOnlyOne(
+				mth.getBasicBlocks(),
+				block -> containsInvokeDeep(block, KtorCioRecovery::isClosedForReadInvoke)
+						&& isPathExists(drainBody, block)
+						&& isPathExists(block, suspendCheck.getPredecessors().get(0)));
+		if (loopHeader == null
+				|| loopHeader.getSuccessors().size() != 1
+				|| !(BlockUtils.getLastInsn(loopHeader.getSuccessors().get(0)) instanceof IfNode)) {
+			return false;
+		}
+		List<BlockNode> initialEntries = ListUtils.filter(
+				loopHeader.getPredecessors(),
+				predecessor -> !isPathExists(loopHeader, predecessor));
+		if (initialEntries.size() != 1) {
+			return false;
+		}
+		if (multiEntryLoops.size() == 2) {
+			SpecialEdgeAttr drainEntry = ListUtils.filterOnlyOne(
+					multiEntryLoops, edge -> edge != completionEdge);
+			if (drainEntry == null
+					|| drainEntry.getEnd() != drainBody
+					|| !(BlockUtils.getLastInsn(drainEntry.getStart()) instanceof IfNode)
+					|| !isPathExists(drainEntry.getStart(), suspendCheck)) {
+				return false;
+			}
+		}
+
+		BlockNode initialEntry = initialEntries.get(0);
+		BlockNode loopPreHeader = BlockSplitter.insertBlockBetween(mth, initialEntry, loopHeader);
+		loopPreHeader.add(AFlag.SYNTHETIC);
+		mth.addAttr(new CoroutineLoopPreHeaderAttr(loopPreHeader));
+		BlockNode resumeBridge = BlockSplitter.insertBlockBetween(mth, resumeTail, moveJoin);
+		resumeBridge.add(AFlag.SYNTHETIC);
+		BlockSplitter.copyBlockData(moveJoin, resumeBridge);
+		BlockSplitter.replaceConnection(resumeBridge, moveJoin, loopPreHeader);
+		resumeTail.updateCleanSuccessors();
+		resumeBridge.updateCleanSuccessors();
+		loopPreHeader.updateCleanSuccessors();
+		mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+		mth.addDebugComment("Split Ktor OutputStream copy resume bridge before loop header: "
+				+ loopHeader);
+		return true;
+	}
+
 	private static boolean normalizeSingleCoroutineAwaitPointerEventCompletion(
 			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
 		List<BlockNode> blocks = mth.getBasicBlocks();
@@ -8927,7 +10831,7 @@ public class FixMultiEntryLoops {
 				continue;
 			}
 			InvokeNode invoke = findLastResultInvoke(suspendCheck.getPredecessors().get(0));
-			if (invoke == null || !invoke.getCallMth().getName().contains("awaitPointerEvent")) {
+			if (invoke == null || !isAwaitPointerEventInvoke(invoke)) {
 				continue;
 			}
 			CoroutineSuspendCompletion completion = findCoroutineSuspendCompletion(mth, suspendCheck);
@@ -9116,6 +11020,10 @@ public class FixMultiEntryLoops {
 	private static boolean normalizeCoroutineThrowableRetryCompletions(
 			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
 		List<BlockNode> blocks = mth.getBasicBlocks();
+		if (multiEntryLoops.size() == 1) {
+			return normalizeInlineCoroutineThrowableRetryCompletion(
+					mth, blocks, multiEntryLoops.get(0));
+		}
 		if (multiEntryLoops.size() != 2
 				|| blocks.size() > 120) {
 			return false;
@@ -9262,12 +11170,77 @@ public class FixMultiEntryLoops {
 		BlockSplitter.replaceConnection(nullTail, carryJoin, completedExit);
 		carryJoin.updateCleanSuccessors();
 		nullTail.updateCleanSuccessors();
-		removeKtorOrphanedDirectPaths(mth, Set.of(retryDecision));
+		removeOrphanedDirectPaths(mth, Set.of(retryDecision));
 		mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
 		mth.addDebugComment(
 				"Normalize Throwable/Boolean retry loop and split colliding resume register: "
 						+ second.suspendCheck + " -> " + labelDispatch);
 		return true;
+	}
+
+	/**
+	 * Public inline Flow retry operators retain a compiler template in which the predicate call can
+	 * be replaced by an always-throwing stub. Only the upstream collection is then a real suspend
+	 * call, but its immediate and resumed Throwable results still enter the template loop through
+	 * different blocks. Route the immediate result through state 1 after proving the nullable
+	 * Throwable projection, the terminating non-null branch, and the back edge to the same suspend
+	 * check. This is the one-suspend counterpart of the full Throwable/Boolean protocol above.
+	 */
+	private static boolean normalizeInlineCoroutineThrowableRetryCompletion(
+			MethodNode mth,
+			List<BlockNode> blocks,
+			SpecialEdgeAttr multiEntryLoop) {
+		if (blocks.size() > 120) {
+			return false;
+		}
+		BlockNode nullableCheck = multiEntryLoop.getStart();
+		BlockNode retryPath = multiEntryLoop.getEnd();
+		InsnNode nullableIf = BlockUtils.getLastInsn(nullableCheck);
+		if (!(nullableIf instanceof IfNode)
+				|| !containsLiteralArg(nullableIf, 0)
+				|| nullableCheck.getSuccessors().size() != 2
+				|| !nullableCheck.getSuccessors().contains(retryPath)
+				|| !isPathExists(retryPath, nullableCheck)) {
+			return false;
+		}
+		BlockNode terminalPath = ListUtils.filterOnlyOne(
+				nullableCheck.getSuccessors(), successor -> successor != retryPath);
+		if (terminalPath == null || !reachesExitOnLinearPath(terminalPath, 2)) {
+			return false;
+		}
+
+		CoroutineSuspendCompletion completion = null;
+		for (BlockNode block : blocks) {
+			CoroutineSuspendCompletion candidate = findKtorCioSuspendCompletion(mth, block);
+			if (candidate == null
+					|| candidate.stateKey != 1
+					|| !isPathExists(retryPath, candidate.suspendCheck)
+					|| !isPathWithin(candidate.directSuccess, nullableCheck, 4)
+					|| !isPathWithin(candidate.resumeEntry, nullableCheck, 4)
+					|| !hasCheckCastOnLinearPath(
+							candidate.directSuccess, nullableCheck, ArgType.THROWABLE, 4)
+					|| !hasCheckCastOnLinearPath(
+							candidate.resumeEntry, nullableCheck, ArgType.THROWABLE, 4)) {
+				continue;
+			}
+			if (completion != null) {
+				return false;
+			}
+			completion = candidate;
+		}
+		if (completion == null
+				|| findCoroutineLabelIfChain(
+						completion.stateDispatch, completion.labelField) == null
+				|| !canDispatchDirectCompletionByLabel(completion)) {
+			return false;
+		}
+		return normalizeDirectCompletionsThroughStateDispatch(
+				mth,
+				List.of(completion),
+				CoroutineResultTransport.AUTO,
+				false,
+				true,
+				"Normalize inline Throwable retry completion through state 1");
 	}
 
 	/**
@@ -9290,7 +11263,9 @@ public class FixMultiEntryLoops {
 				|| blocks.size() > 100
 				|| mth.getExceptionHandlersCount() != 1
 				|| !mth.referencesMethodNamed("iterator")
-				|| !mth.referencesMethodNamed("hasNext")
+				|| blocks.stream().noneMatch(
+						block -> containsInvoke(block, "hasNext")
+								|| containsChannelIteratorSuspendPredicateInvoke(block))
 				|| !mth.referencesMethodNamed("next")
 				|| !mth.referencesMethodNamed("booleanValue")) {
 			return false;
@@ -9344,7 +11319,8 @@ public class FixMultiEntryLoops {
 		}
 		BlockNode iteratorHeader = ListUtils.filterOnlyOne(
 				blocks,
-				block -> containsInvoke(block, "hasNext")
+				block -> (containsInvoke(block, "hasNext")
+						|| containsChannelIteratorSuspendPredicateInvoke(block))
 						&& block.get(AType.TRY_BLOCK) == tryBlock
 						&& isPathWithin(booleanDecision, block, 3)
 						&& isPathExists(block, suspendCall));
@@ -9393,6 +11369,128 @@ public class FixMultiEntryLoops {
 				booleanDecision,
 				continuePath,
 				actionExit);
+	}
+
+	/**
+	 * A protected two-state loop can suspend first in a Boolean gate and then in a channel iterator
+	 * predicate. Immediate completion of the gate enters its Boolean projection directly, while
+	 * label-state resume enters the same projection after restoring the spilled iterator. The gate's
+	 * true branch runs the iterator cycle and eventually calls the same gate again, so its direct
+	 * completion is reported as a second loop entry.
+	 *
+	 * <p>
+	 * Prove both suspend states, the Boolean decision, the complete {@code hasNext/next} cycle and a
+	 * terminating gate branch. Then route the immediate gate result through its existing label switch.
+	 * Loading the label in the inserted dispatch block is essential because this path intentionally
+	 * bypasses the continuation prologue which normally loads the switch register.
+	 * </p>
+	 */
+	private static boolean normalizeTryProtectedCoroutineBooleanGateCompletion(
+			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
+		if (!isCoroutineStateMachineBody(mth)
+				|| multiEntryLoops.size() != 1
+				|| mth.getExceptionHandlersCount() == 0
+				|| mth.getExceptionHandlersCount() > 4) {
+			return false;
+		}
+		SpecialEdgeAttr edge = multiEntryLoops.get(0);
+		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block))
+				.collect(Collectors.toList());
+		CoroutineSuspendCompletion completion =
+				findSwitchCoroutineSuspendCompletion(mth, edge.getStart(), resumeBlocks);
+		if (completion == null) {
+			completion = findSharedSwitchCoroutineSuspendCompletion(
+					mth,
+					edge.getStart(),
+					resumeBlocks,
+					mth.getBasicBlocks().stream()
+							.filter(block -> BlockUtils.getLastInsn(block) instanceof SwitchInsn)
+							.collect(Collectors.toList()),
+					new LinkedHashMap<>());
+		}
+		if (completion == null
+				|| completion.stateKey <= 0
+				|| completion.suspendCheck != edge.getStart()
+				|| completion.directSuccess != edge.getEnd()
+				|| completion.directSuccess.getPredecessors().size() != 2
+				|| !completion.directSuccess.getPredecessors().contains(completion.suspendCheck)
+				|| !isPureCoroutineBooleanJoin(completion.directSuccess)) {
+			return false;
+		}
+
+		BlockNode suspendCall = completion.suspendCheck.getPredecessors().get(0);
+		InvokeNode gateInvoke = findLastResultInvoke(suspendCall);
+		TryCatchBlockAttr tryBlock = suspendCall.get(AType.TRY_BLOCK);
+		if (gateInvoke == null
+				|| gateInvoke.getResult() == null
+				|| isChannelIteratorSuspendPredicateInvoke(gateInvoke)
+				|| !isSuspendInvokeWithContinuation(gateInvoke)
+				|| tryBlock == null
+				|| completion.directSuccess.get(AType.TRY_BLOCK) != tryBlock
+				|| completion.resumeEntry.get(AType.TRY_BLOCK) != tryBlock
+				|| !isPathExists(completion.directSuccess, suspendCall)) {
+			return false;
+		}
+
+		BlockNode gateDecision = findBooleanDecisionOnCleanLinearPath(
+				completion.directSuccess, 2);
+		if (gateDecision == null || gateDecision.getSuccessors().size() != 2) {
+			return false;
+		}
+		BlockNode iteratorCall = ListUtils.filterOnlyOne(
+				mth.getBasicBlocks(),
+				block -> containsChannelIteratorSuspendPredicateInvoke(block)
+						&& block.get(AType.TRY_BLOCK) == tryBlock
+						&& isPathWithin(gateDecision, block, 3)
+						&& isPathExists(block, suspendCall));
+		if (iteratorCall == null) {
+			return false;
+		}
+		InvokeNode iteratorInvoke = findLastResultInvoke(iteratorCall);
+		IndexInsnNode iteratorLabelPut = findLabelPut(iteratorCall);
+		Integer iteratorState = iteratorLabelPut == null
+				? null
+				: resolveStablePositiveStateKeyBeforeInsn(
+						iteratorCall, iteratorLabelPut, iteratorLabelPut.getArg(0));
+		if (!isChannelIteratorSuspendPredicateInvoke(iteratorInvoke)
+				|| iteratorState == null
+				|| iteratorState == completion.stateKey) {
+			return false;
+		}
+
+		BlockNode continuePath = ListUtils.filterOnlyOne(
+				gateDecision.getSuccessors(),
+				successor -> isPathWithin(successor, iteratorCall, 2));
+		BlockNode terminalPath = ListUtils.filterOnlyOne(
+				gateDecision.getSuccessors(),
+				successor -> successor != continuePath
+						&& reachesExitOnCleanLinearPath(successor, 4));
+		boolean completeIteratorCycle = mth.getBasicBlocks().stream().anyMatch(
+				block -> block.getInstructions().stream().anyMatch(insn -> insn instanceof InvokeNode
+						&& ((InvokeNode) insn).getCallMth().getName().equals("next")
+						&& ((InvokeNode) insn).getCallMth().getDeclClass().getFullName()
+								.equals("kotlinx.coroutines.channels.ChannelIterator"))
+						&& isPathExists(iteratorCall, block)
+						&& isPathExists(block, suspendCall));
+		BlockNode labelDispatch = findCoroutineLabelSwitch(
+				completion.stateDispatch, completion.labelField);
+		if (continuePath == null
+				|| terminalPath == null
+				|| !completeIteratorCycle
+				|| labelDispatch == null
+				|| !canDispatchDirectCompletionByLabel(completion)) {
+			return false;
+		}
+		return normalizeCompletionsThroughCustomDispatch(
+				mth,
+				List.of(completion),
+				new BlockNode[] { labelDispatch },
+				new CoroutineDirectPathMode[] { CoroutineDirectPathMode.INSERT },
+				new InsnNode[] { makeCoroutineLabelGet(completion) },
+				null,
+				"Normalize protected Boolean-gate completion through label switch: "
+						+ labelDispatch);
 	}
 
 	private static boolean splitTryProtectedIteratorBooleanActionResumeTail(
@@ -9470,7 +11568,6 @@ public class FixMultiEntryLoops {
 							loopPreHeader.getSuccessors(), iteratorHeader)) {
 				rollbackTryProtectedIteratorBooleanActionSplit(
 						mth,
-						completion,
 						resumeTail,
 						resultJoin,
 						projectionCopy,
@@ -9484,7 +11581,6 @@ public class FixMultiEntryLoops {
 		} catch (RuntimeException e) {
 			rollbackTryProtectedIteratorBooleanActionSplit(
 					mth,
-					completion,
 					resumeTail,
 					resultJoin,
 					projectionCopy,
@@ -9505,7 +11601,6 @@ public class FixMultiEntryLoops {
 
 	private static void rollbackTryProtectedIteratorBooleanActionSplit(
 			MethodNode mth,
-			CoroutineSuspendCompletion completion,
 			BlockNode resumeTail,
 			BlockNode resultJoin,
 			@Nullable BlockNode projectionCopy,
@@ -9514,6 +11609,11 @@ public class FixMultiEntryLoops {
 			BlockNode iteratorHeader,
 			BlockNode loopPreHeader,
 			CoroutineLoopPreHeaderAttr preHeaderAttr) {
+		if (projectionCopy != null
+				&& resumeTail.getSuccessors().contains(projectionCopy)) {
+			// Restore the branch target before detaching the copy; connect alone only restores the edge.
+			BlockSplitter.replaceConnection(resumeTail, projectionCopy, resultJoin);
+		}
 		if (decisionCopy != null) {
 			BlockSplitter.detachBlock(decisionCopy);
 			mth.getBasicBlocks().remove(decisionCopy);
@@ -9530,10 +11630,6 @@ public class FixMultiEntryLoops {
 				mth, initialEntry, iteratorHeader, loopPreHeader);
 		resumeTail.updateCleanSuccessors();
 		resultJoin.updateCleanSuccessors();
-		InsnNode lastInsn = BlockUtils.getLastInsn(completion.suspendCheck);
-		if (lastInsn instanceof IfNode) {
-			((IfNode) lastInsn).initBlocks(completion.suspendCheck);
-		}
 	}
 
 	private static @Nullable CoroutineSuspendCompletion findTryProtectedObfuscatedSuspendCompletion(
@@ -10047,6 +12143,9 @@ public class FixMultiEntryLoops {
 				? dispatchContinuationArg
 				: directContinuationArg;
 		IndexInsnNode resultPut = new IndexInsnNode(InsnType.IPUT, resultGet.getIndex(), 2);
+		// The receiver is copied across coroutine states and can retain the Continuation
+		// interface type; this synthesized field write needs the field owner's type in Java.
+		resultPut.add(AFlag.EXPLICIT_CAST);
 		resultPut.addArg(completion.directResultArg.duplicate());
 		resultPut.addArg(storeContinuationArg.duplicate());
 		directDispatch.getInstructions().add(resultPut);
@@ -10106,7 +12205,7 @@ public class FixMultiEntryLoops {
 				continue;
 			}
 			InvokeNode invoke = findLastResultInvoke(suspendCheck.getPredecessors().get(0));
-			if (invoke == null || !invoke.getCallMth().getName().contains("awaitPointerEvent")) {
+			if (invoke == null || !isAwaitPointerEventInvoke(invoke)) {
 				continue;
 			}
 			CoroutineSuspendCompletion completion = findCoroutineSuspendCompletion(mth, suspendCheck);
@@ -10126,12 +12225,7 @@ public class FixMultiEntryLoops {
 				.collect(Collectors.toSet());
 		if (resumeEntries.size() != 2
 				|| completions.stream().anyMatch(completion -> completion.stateDispatch != first.stateDispatch
-						|| !completion.labelField.equals(first.labelField)
-						|| completion.directSuccess.getPredecessors().size() != 1
-						|| completion.directSuccess.getPredecessors().get(0) != completion.suspendCheck
-						|| completion.directSuccess.getSuccessors().size() != 1
-						|| completion.directSuccess.getInstructions().stream()
-								.anyMatch(insn -> insn.getType() != InsnType.MOVE))) {
+						|| !completion.labelField.equals(first.labelField))) {
 			return false;
 		}
 		return normalizeDirectCompletionsThroughStateDispatch(
@@ -10156,7 +12250,7 @@ public class FixMultiEntryLoops {
 		if (labelPut == null || !(labelPut.getIndex() instanceof FieldInfo)
 				|| labelPut.getArgsCount() != 2
 				|| suspendInvoke == null || suspendInvoke.getResult() == null
-				|| !suspendInvoke.getCallMth().getName().contains("awaitPointerEvent")
+				|| !isAwaitPointerEventInvoke(suspendInvoke)
 				|| !(labelPut.getArg(0) instanceof RegisterArg)) {
 			return null;
 		}
@@ -10171,11 +12265,12 @@ public class FixMultiEntryLoops {
 		BlockNode join = directSuccess;
 		for (int directDepth = 0; directDepth <= 2 && join != null; directDepth++) {
 			for (BlockNode resume : mth.getBasicBlocks()) {
-				if (!containsInvoke(resume, "throwOnFailure") || !isShortLinearPath(resume, join, 3)) {
+				if (!isCoroutineFailureCheckBlock(mth, resume) || !isShortLinearPath(resume, join, 3)) {
 					continue;
 				}
 				BlockNode stateDispatch = findStateDispatchForResume(mth, resume, labelField);
-				RegisterArg resumeResultArg = findThrowOnFailureArgOnLinearPath(resume, join, 3);
+				RegisterArg resumeResultArg = findCoroutineFailureCheckArgOnLinearPath(
+						mth, resume, join, 3);
 				if (stateDispatch != null && resumeResultArg != null) {
 					return new CoroutineSuspendCompletion(suspendCheck, directSuccess, resume, stateDispatch,
 							labelField, stateValueReg, suspendInvoke.getResult(), resumeResultArg);
@@ -10194,7 +12289,7 @@ public class FixMultiEntryLoops {
 				continue;
 			}
 			BlockNode stateDispatch = findCoroutineStateDispatch(
-					branch, labelField, mth.getName().equals("invokeSuspend"));
+					branch, labelField, isCoroutineStateMachineBody(mth));
 			if (stateDispatch != null) {
 				return stateDispatch;
 			}
@@ -10310,6 +12405,73 @@ public class FixMultiEntryLoops {
 		}
 		normalizeSseCloseReentry(mth, completions);
 		return true;
+	}
+
+	/**
+	 * Ktor's SSE event parser repeatedly suspends on the nullable line-read ABI. Some Kotlin
+	 * versions lower the three resume states to an if-chain in the enclosing static method instead
+	 * of a generated {@code invokeSuspend} body. Direct results then enter the parsing loop below
+	 * its header. Prove the complete three-state protocol by ABI, state keys, shared dispatcher,
+	 * and reported secondary-entry edges before routing direct results through the dispatcher.
+	 */
+	private static boolean normalizeNullableLineReadSuspendCompletions(
+			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
+		if (!isCoroutineMethod(mth)
+				|| !mth.isNoExceptionHandlers()
+				|| multiEntryLoops.size() < 2 || multiEntryLoops.size() > 4
+				|| mth.getBasicBlocks().size() > 140) {
+			return false;
+		}
+		List<BlockNode> suspendChecks = mth.getBasicBlocks().stream()
+				.filter(FixMultiEntryLoops::isLabeledSuspendCheck)
+				.collect(Collectors.toList());
+		if (suspendChecks.size() != 3) {
+			return false;
+		}
+		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block)
+						|| findObfuscatedThrowOnFailureArg(block) != null)
+				.collect(Collectors.toList());
+		List<CoroutineSuspendCompletion> completions = new ArrayList<>(3);
+		Set<Integer> stateKeys = new HashSet<>();
+		for (BlockNode suspendCheck : suspendChecks) {
+			if (suspendCheck.getPredecessors().size() != 1) {
+				return false;
+			}
+			InvokeNode suspendInvoke = findLastResultInvoke(suspendCheck.getPredecessors().get(0));
+			CoroutineSuspendCompletion completion = findSmallIfChainCoroutineSuspendCompletion(
+					mth, suspendCheck, resumeBlocks, true);
+			if (suspendInvoke == null
+					|| !KtorCioRecovery.isByteReadChannelLineInvoke(suspendInvoke)
+					|| completion == null
+					|| !stateKeys.add(completion.stateKey)) {
+				return false;
+			}
+			completions.add(completion);
+		}
+		if (!stateKeys.equals(Set.of(1, 2, 3))) {
+			return false;
+		}
+		CoroutineSuspendCompletion first = completions.get(0);
+		Set<BlockNode> resumeEntries = completions.stream()
+				.map(completion -> completion.resumeEntry)
+				.collect(Collectors.toSet());
+		if (resumeEntries.size() != 3
+				|| completions.stream().anyMatch(completion -> completion.stateDispatch != first.stateDispatch
+						|| !completion.labelField.equals(first.labelField))
+				|| multiEntryLoops.stream().anyMatch(backEdge -> completions.stream()
+						.noneMatch(completion -> isDirectCompletionBackEdge(completion, backEdge)
+								|| isSharedDirectCompletionBackEdge(completion, backEdge)))) {
+			return false;
+		}
+		return normalizeDirectCompletionsThroughStateDispatch(
+				mth,
+				completions,
+				CoroutineResultTransport.REGISTER,
+				false,
+				true,
+				"Normalize 3-state nullable line-read completions through state dispatch: "
+						+ first.stateDispatch);
 	}
 
 	/**
@@ -10536,33 +12698,62 @@ public class FixMultiEntryLoops {
 		List<CoroutineSuspendCompletion> completions = new ArrayList<>(4);
 		Set<Integer> stateKeys = new HashSet<>();
 		Map<String, Integer> callCounts = new LinkedHashMap<>();
+		BlockNode terminalSuspendCheck = null;
 		for (BlockNode suspendCheck : suspendChecks) {
-			InvokeNode suspendInvoke =
-					findLastResultInvoke(suspendCheck.getPredecessors().get(0));
+			BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
+			InvokeNode suspendInvoke = findLastResultInvoke(suspendCall);
 			CoroutineSuspendCompletion completion =
 					findKtorCioSuspendCompletion(mth, suspendCheck);
-			if (suspendInvoke == null
-					|| completion == null
-					|| !stateKeys.add(completion.stateKey)) {
+			if (suspendInvoke == null) {
 				return false;
 			}
-			callCounts.merge(suspendInvoke.getCallMth().getName(), 1, Integer::sum);
-			completions.add(completion);
+			String callKind = classifyPooledObservableSuspendInvoke(suspendInvoke);
+			if (callKind == null) {
+				return false;
+			}
+			Integer stateKey;
+			if (completion == null) {
+				stateKey = findStablePositiveCoroutineStateKey(suspendCall, suspendInvoke);
+				if (stateKey == null && callKind.equals("progress")) {
+					// A terminal suspend can clear all spills in the same block as the label
+					// write. Register restoration then has no stable completion edge from which
+					// to recover the constant. In the validated four-state observable protocol,
+					// the only progress call without a completion edge is the terminal state.
+					stateKey = 4;
+				}
+			} else {
+				stateKey = completion.stateKey;
+			}
+			if (stateKey == null || !stateKeys.add(stateKey)) {
+				return false;
+			}
+			if (completion == null) {
+				if (stateKey != 4 || !callKind.equals("progress")) {
+					return false;
+				}
+				terminalSuspendCheck = suspendCheck;
+			} else {
+				completions.add(completion);
+				if (stateKey == 4) {
+					terminalSuspendCheck = suspendCheck;
+				}
+			}
+			callCounts.merge(callKind, 1, Integer::sum);
 		}
 		if (!stateKeys.equals(Set.of(1, 2, 3, 4))
 				|| !callCounts.equals(Map.of(
-						"readAvailable$default", 1,
-						"writeFully", 1,
-						"onProgress", 2))) {
+						"read", 1,
+						"write", 1,
+						"progress", 2))) {
 			return false;
 		}
 		List<BlockNode> closedChecks = mth.getBasicBlocks().stream()
 				.filter(
 						block -> BlockUtils.getLastInsn(block) instanceof IfNode
-								&& (containsInvokeDeep(block, "isClosedForRead")
+								&& (containsInvokeDeep(block, KtorCioRecovery::isClosedForReadInvoke)
 										|| block.getPredecessors().stream()
 												.anyMatch(predecessor -> containsInvokeDeep(
-														predecessor, "isClosedForRead"))))
+														predecessor, KtorCioRecovery::isClosedForReadInvoke))))
 				.collect(Collectors.toList());
 		if (closedChecks.size() != 1) {
 			return false;
@@ -10571,11 +12762,9 @@ public class FixMultiEntryLoops {
 		List<CoroutineSuspendCompletion> loopCompletions = completions.stream()
 				.filter(completion -> completion.stateKey != 4)
 				.collect(Collectors.toList());
-		CoroutineSuspendCompletion terminalCompletion = ListUtils.filterOnlyOne(
-				completions, completion -> completion.stateKey == 4);
-		BlockNode terminalCall = terminalCompletion == null
+		BlockNode terminalCall = terminalSuspendCheck == null
 				? null
-				: terminalCompletion.suspendCheck.getPredecessors().get(0);
+				: terminalSuspendCheck.getPredecessors().get(0);
 		BlockNode terminalZeroCheck = terminalCall == null
 				? null
 				: ListUtils.filterOnlyOne(
@@ -10630,13 +12819,22 @@ public class FixMultiEntryLoops {
 	}
 
 	private static boolean isPooledByteChannelObservableSuspendLoop(MethodNode mth) {
-		if (!mth.getName().equals("invokeSuspend")
-				|| !isCoroutineMethod(mth)
-				|| !mth.referencesMethodNamed("readAvailable$default")
-				|| !mth.referencesMethodNamed("writeFully")
-				|| !mth.referencesMethodNamed("onProgress")
-				|| !mth.referencesMethodNamed("borrow")
-				|| !mth.referencesMethodNamed("recycle")) {
+		if (!isCoroutineStateMachineBody(mth)
+				|| !(mth.referencesMethodNamed("readAvailable$default")
+						|| containsInvokeDeep(
+								mth, FixMultiEntryLoops::isPooledObservableReadInvoke))
+				|| !(mth.referencesMethodNamed("writeFully")
+						|| containsInvokeDeep(
+								mth, FixMultiEntryLoops::isPooledObservableWriteInvoke))
+				|| !(mth.referencesMethodNamed("onProgress")
+						|| containsInvokeDeep(
+								mth, FixMultiEntryLoops::isPooledObservableProgressInvoke))
+				|| !(mth.referencesMethodNamed("borrow")
+						|| containsInvokeDeep(
+								mth, FixMultiEntryLoops::isPooledObservableBorrowInvoke))
+				|| !(mth.referencesMethodNamed("recycle")
+						|| containsInvokeDeep(
+								mth, FixMultiEntryLoops::isPooledObservableRecycleInvoke))) {
 			return false;
 		}
 		Map<String, String> fieldTypes = mth.getParentClass().getFields().stream()
@@ -10645,6 +12843,60 @@ public class FixMultiEntryLoops {
 						field -> field.getType().toString(),
 						(first, second) -> first));
 		return KtorCioRecovery.matchesPooledObservableFields(fieldTypes);
+	}
+
+	private static @Nullable String classifyPooledObservableSuspendInvoke(
+			InvokeNode invoke) {
+		String name = invoke.getCallMth().getName();
+		if (name.equals("readAvailable$default")) {
+			return "read";
+		}
+		if (name.equals("writeFully")) {
+			return "write";
+		}
+		if (name.equals("onProgress")) {
+			return "progress";
+		}
+		if (isPooledObservableReadInvoke(invoke)) {
+			return "read";
+		}
+		if (isPooledObservableWriteInvoke(invoke)) {
+			return "write";
+		}
+		if (isPooledObservableProgressInvoke(invoke)) {
+			return "progress";
+		}
+		return null;
+	}
+
+	private static @Nullable Integer findStablePositiveCoroutineStateKey(
+			BlockNode suspendCall, InvokeNode suspendInvoke) {
+		IndexInsnNode statePut = findStablePositiveCoroutineStatePut(
+				suspendCall, suspendInvoke);
+		return statePut == null
+				? null
+				: resolveStablePositiveStateKeyBeforeInsn(
+						suspendCall, statePut, statePut.getArg(0));
+	}
+
+	private static boolean isPooledObservableReadInvoke(InvokeNode invoke) {
+		return KtorCioRecovery.isPooledObservableReadInvoke(invoke);
+	}
+
+	private static boolean isPooledObservableWriteInvoke(InvokeNode invoke) {
+		return KtorCioRecovery.isPooledObservableWriteInvoke(invoke);
+	}
+
+	private static boolean isPooledObservableProgressInvoke(InvokeNode invoke) {
+		return KtorCioRecovery.isPooledObservableProgressInvoke(invoke);
+	}
+
+	private static boolean isPooledObservableBorrowInvoke(InvokeNode invoke) {
+		return KtorCioRecovery.isPooledObservableBorrowInvoke(invoke);
+	}
+
+	private static boolean isPooledObservableRecycleInvoke(InvokeNode invoke) {
+		return KtorCioRecovery.isPooledObservableRecycleInvoke(invoke);
 	}
 
 	private static boolean isIteratorTerminalSuspendOperator(MethodNode mth) {
@@ -11026,6 +13278,8 @@ public class FixMultiEntryLoops {
 				isTryProtectedWebSocketChannelIteratorCompletion(mth, completion);
 		boolean sequenceYieldCompletion = isIteratorSequenceYieldCompletion(mth, completion);
 		boolean ktorByteChannelCopyCompletion = isKtorByteChannelCopyCompletion(mth, completion);
+		boolean ktorReadUntilByteWriteCompletion =
+				isKtorReadUntilByteWriteCompletion(mth, completion);
 		boolean ktorOkHttpSourceFlushCompletion =
 				isKtorOkHttpSourceFlushCompletion(mth, completion);
 		if (!iteratorCompletion
@@ -11033,6 +13287,7 @@ public class FixMultiEntryLoops {
 				&& !webSocketIteratorCompletion
 				&& !sequenceYieldCompletion
 				&& !ktorByteChannelCopyCompletion
+				&& !ktorReadUntilByteWriteCompletion
 				&& !ktorOkHttpSourceFlushCompletion
 				&& !isFrameAnimationCompletion(mth, completion)) {
 			return false;
@@ -11055,6 +13310,167 @@ public class FixMultiEntryLoops {
 				false,
 				"Normalize single coroutine completion through state dispatch: "
 						+ completion.stateDispatch);
+	}
+
+	/**
+	 * A direct suspend completion can first pass through a move-only bridge and only then join the
+	 * label-resume path. In that shape the reported multi-entry edge starts at the bridge instead of
+	 * the suspend check, so the regular single-completion matcher cannot see it. Prove the same
+	 * coroutine state contract at the common join and route direct completion through the dispatcher.
+	 */
+	private static boolean normalizeCoroutinePostSuspendJoinCompletion(
+			MethodNode mth, SpecialEdgeAttr backEdge) {
+		CoroutineSuspendCompletion completion =
+				findSingleCoroutineSuspendCompletionAtJoin(
+						mth, backEdge.getStart(), backEdge.getEnd());
+		if (completion == null
+				|| !isPostSuspendDirectBridgeCompletion(completion)) {
+			return false;
+		}
+		boolean normalized = normalizeCompletionThroughCustomRestoreAndRemoveDirectPath(
+				mth,
+				completion,
+				completion.resumeEntry,
+				"Normalize post-suspend direct bridge through resume restore: "
+						+ completion.resumeEntry);
+		if (normalized) {
+			mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+		}
+		return normalized;
+	}
+
+	private static boolean isPostSuspendDirectBridgeCompletion(
+			CoroutineSuspendCompletion completion) {
+		BlockNode directBridge = completion.directSuccess;
+		if (completion.stateKey <= 0
+				|| directBridge.contains(AFlag.SYNTHETIC)
+				|| directBridge.getSuccessors().size() != 1
+				|| directBridge.getInstructions().isEmpty()
+				|| directBridge.getInstructions().size() > 8
+				|| directBridge.getInstructions().stream()
+						.anyMatch(insn -> insn.getType() != InsnType.MOVE)
+				|| !isPathExists(directBridge, completion.suspendCheck)) {
+			return false;
+		}
+		BlockNode join = directBridge.getSuccessors().get(0);
+		if (join.getPredecessors().size() != 2
+				|| !join.getPredecessors().contains(directBridge)
+				|| !isShortLinearPath(completion.resumeEntry, join, 6)) {
+			return false;
+		}
+		BlockNode suspendCall = completion.suspendCheck.getPredecessors().get(0);
+		InvokeNode suspendInvoke = findLastResultInvoke(suspendCall);
+		if (suspendInvoke == null
+				|| suspendInvoke.getResult() == null
+				|| !ArgType.OBJECT.equals(suspendInvoke.getCallMth().getReturnType())
+				|| suspendInvoke.getArgsCount() == 0) {
+			return false;
+		}
+		List<ArgType> declaredArgs = suspendInvoke.getCallMth().getArgumentsTypes();
+		return !declaredArgs.isEmpty()
+				&& CoroutineMethodUtils.isKnownContinuationType(
+						declaredArgs.get(declaredArgs.size() - 1));
+	}
+
+	private static boolean splitKtorReadUntilOuterLoopJoin(
+			MethodNode mth, SpecialEdgeAttr backEdge) {
+		if (!isKtorReadUntilStateMachine(mth)) {
+			return false;
+		}
+		BlockNode path = backEdge.getStart();
+		BlockNode join = backEdge.getEnd();
+		if (!(BlockUtils.getLastInsn(path) instanceof IfNode)
+				|| !path.getSuccessors().contains(join)
+				|| path.getSuccessors().stream()
+						.filter(successor -> successor != join)
+						.noneMatch(successor -> reachesExitOnLinearPath(successor, 2))
+				|| join.getPredecessors().size() != 2
+				|| join.getSuccessors().size() != 1
+				|| join.getInstructions().isEmpty()
+				|| join.getInstructions().size() > 12
+				|| join.getInstructions().stream()
+						.anyMatch(insn -> insn.getType() != InsnType.MOVE)) {
+			return false;
+		}
+		BlockNode postSuspendJoin = ListUtils.filterOnlyOne(
+				join.getPredecessors(), predecessor -> predecessor != path);
+		if (postSuspendJoin == null) {
+			return false;
+		}
+		CoroutineSuspendCompletion completion = null;
+		for (BlockNode directBridge : postSuspendJoin.getPredecessors()) {
+			completion = findSingleCoroutineSuspendCompletionAtJoin(
+					mth, directBridge, postSuspendJoin);
+			if (completion != null
+					&& isKtorReadUntilByteWriteCompletion(mth, completion)) {
+				break;
+			}
+			completion = null;
+		}
+		if (completion == null) {
+			return false;
+		}
+		BlockNode joinCopy = BlockSplitter.insertBlockBetween(mth, path, join);
+		joinCopy.add(AFlag.SYNTHETIC);
+		BlockSplitter.copyBlockData(join, joinCopy);
+		BlockSplitter.replaceConnection(
+				joinCopy, join, join.getSuccessors().get(0));
+		((IfNode) BlockUtils.getLastInsn(path)).initBlocks(path);
+		path.updateCleanSuccessors();
+		joinCopy.updateCleanSuccessors();
+		mth.addDebugComment(
+				"Split post-suspend outer-loop state join on matched path: " + backEdge);
+		return true;
+	}
+
+	private static boolean isKtorReadUntilByteWriteCompletion(
+			MethodNode mth, CoroutineSuspendCompletion completion) {
+		if (!isKtorReadUntilStateMachine(mth)
+				|| completion.stateKey != 3
+				|| completion.suspendCheck.getPredecessors().size() != 1
+				|| completion.directSuccess.getInstructions().size() > 16
+				|| !isPathExists(completion.directSuccess, completion.suspendCheck)) {
+			return false;
+		}
+		InvokeNode suspendInvoke = findLastResultInvoke(
+				completion.suspendCheck.getPredecessors().get(0));
+		if (!isKtorByteWriteByteSuspendInvoke(suspendInvoke)) {
+			return false;
+		}
+		return true;
+	}
+
+	private static boolean isKtorReadUntilStateMachine(MethodNode mth) {
+		if (!isCoroutineStateMachineBody(mth)
+				|| !mth.isNoExceptionHandlers()
+				|| !KtorCioRecovery.isByteReadChannelOperationsClass(mth.getParentClass().getRawName())) {
+			return false;
+		}
+		boolean hasByteState = mth.getParentClass().getFields().stream()
+				.anyMatch(field -> ArgType.BYTE.equals(field.getType()));
+		boolean hasLongState = mth.getParentClass().getFields().stream()
+				.anyMatch(field -> ArgType.LONG.equals(field.getType()));
+		long objectFields = mth.getParentClass().getFields().stream()
+				.filter(field -> field.getType().isObject())
+				.count();
+		return hasByteState
+				&& hasLongState
+				&& objectFields >= 7
+				&& containsInvokeDeep(mth, FixMultiEntryLoops::isByteStringIndexInvoke)
+				&& containsInvokeDeep(mth, FixMultiEntryLoops::isKtorByteWriteByteSuspendInvoke);
+	}
+
+	private static boolean isKtorByteWriteByteSuspendInvoke(@Nullable InvokeNode invoke) {
+		return KtorCioRecovery.isByteWriteByteSuspendInvoke(invoke);
+	}
+
+	private static boolean isByteStringIndexInvoke(InvokeNode invoke) {
+		List<ArgType> args = invoke.getCallMth().getArgumentsTypes();
+		return invoke.getCallMth().getDeclClass().getFullName()
+				.equals("kotlinx.io.bytestring.ByteString")
+				&& args.size() == 1
+				&& ArgType.INT.equals(args.get(0))
+				&& ArgType.BYTE.equals(invoke.getCallMth().getReturnType());
 	}
 
 	private static boolean isKtorOkHttpSourceFlushCompletion(
@@ -11153,6 +13569,144 @@ public class FixMultiEntryLoops {
 	}
 
 	/**
+	 * {@code whileSelect} has one Boolean suspend state. Immediate completion crosses a move-only
+	 * register bridge into the Boolean decision, while label-1 resume enters that decision directly.
+	 * Prove the select implementation ABI and the complete decision-to-select loop before routing
+	 * the immediate result through the existing continuation dispatcher.
+	 */
+	private static boolean normalizeWhileSelectBooleanLoopCompletion(
+			MethodNode mth, SpecialEdgeAttr backEdge) {
+		if (!isCoroutineStateMachineBody(mth)
+				|| !mth.isNoExceptionHandlers()
+				|| mth.getBasicBlocks().stream()
+						.filter(FixMultiEntryLoops::isLabeledSuspendCheck)
+						.count() != 1) {
+			return false;
+		}
+		BlockNode directBridge = backEdge.getStart();
+		BlockNode resultDecision = backEdge.getEnd();
+		if (!isMoveBlock(directBridge, 8)
+				|| directBridge.getInstructions().isEmpty()
+				|| directBridge.getPredecessors().size() != 1
+				|| !ListUtils.isSingleElement(directBridge.getSuccessors(), resultDecision)
+				|| !containsInvokeOnCleanLinearPath(resultDecision, "booleanValue", 1)) {
+			return false;
+		}
+		BlockNode suspendCheck = directBridge.getPredecessors().get(0);
+		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block)
+						|| findObfuscatedThrowOnFailureArg(block) != null)
+				.collect(Collectors.toList());
+		CoroutineSuspendCompletion completion = findSmallIfChainCoroutineSuspendCompletion(
+				mth, suspendCheck, resumeBlocks, true);
+		if (completion == null
+				|| completion.stateKey != 1
+				|| !isDirectCompletionBackEdge(completion, backEdge)
+				|| !isPathExists(resultDecision, suspendCheck)) {
+			return false;
+		}
+		InvokeNode selectInvoke = findLastResultInvoke(suspendCheck.getPredecessors().get(0));
+		if (!isSelectImplementationSuspendInvoke(selectInvoke)) {
+			return false;
+		}
+		BlockNode stateDispatch = completion.stateDispatch;
+		if (!hasCoroutineResultMarkerDispatchPrologue(stateDispatch)) {
+			return false;
+		}
+		BlockNode originalEntry = stateDispatch.getPredecessors().get(0);
+		if (!normalizeDirectCompletionsThroughStateDispatch(
+				mth,
+				List.of(completion),
+				CoroutineResultTransport.REGISTER,
+				false,
+				true,
+				"Normalize whileSelect Boolean completion through state dispatch: "
+						+ stateDispatch)) {
+			return false;
+		}
+		splitCoroutineDispatchPrologue(mth, stateDispatch, originalEntry, 2);
+		return true;
+	}
+
+	private static boolean hasCoroutineResultMarkerDispatchPrologue(BlockNode stateDispatch) {
+		List<InsnNode> insns = stateDispatch.getInstructions();
+		return stateDispatch.getPredecessors().size() == 1
+				&& stateDispatch.getSuccessors().size() == 1
+				&& insns.size() >= 3
+				&& isCoroutineResultProloguePut(insns.get(0))
+				&& isCoroutineSuspendedMarkerGet(insns.get(1))
+				&& isCoroutineLabelGet(insns.get(2));
+	}
+
+	private static boolean isCoroutineResultProloguePut(InsnNode insn) {
+		return insn.getType() == InsnType.IPUT
+				&& insn instanceof IndexInsnNode
+				&& ((IndexInsnNode) insn).getIndex() instanceof FieldInfo
+				&& ((FieldInfo) ((IndexInsnNode) insn).getIndex()).getName().equals("result");
+	}
+
+	private static boolean isCoroutineSuspendedMarkerGet(InsnNode insn) {
+		return insn instanceof InvokeNode
+				&& ((InvokeNode) insn).getCallMth().getName().equals("getCOROUTINE_SUSPENDED");
+	}
+
+	private static boolean isCoroutineLabelGet(InsnNode insn) {
+		return insn.getType() == InsnType.IGET
+				&& insn instanceof IndexInsnNode
+				&& ((IndexInsnNode) insn).getIndex() instanceof FieldInfo
+				&& ((FieldInfo) ((IndexInsnNode) insn).getIndex()).getName().equals("label");
+	}
+
+	/**
+	 * The original method-entry prologue must execute once per invocation. A direct suspend
+	 * completion redirected to the state dispatcher must bypass that prologue, otherwise the
+	 * generated loop repeats field writes and marker calls absent from the bytecode.
+	 */
+	private static BlockNode splitCoroutineDispatchPrologue(
+			MethodNode mth, BlockNode stateDispatch, BlockNode originalEntry, int firstDispatchInsn) {
+		BlockNode directDispatch = null;
+		for (BlockNode predecessor : stateDispatch.getPredecessors()) {
+			if (predecessor != originalEntry) {
+				if (directDispatch != null) {
+					throw new IllegalStateException("Ambiguous coroutine direct dispatch predecessors");
+				}
+				directDispatch = predecessor;
+			}
+		}
+		if (directDispatch == null || !directDispatch.contains(AFlag.SYNTHETIC)) {
+			throw new IllegalStateException("Missing coroutine direct dispatch predecessor");
+		}
+		List<InsnNode> instructions = stateDispatch.getInstructions();
+		BlockNode loopDispatch = BlockSplitter.startNewBlock(mth, instructions.get(firstDispatchInsn).getOffset());
+		loopDispatch.add(AFlag.SYNTHETIC);
+		loopDispatch.getInstructions().addAll(instructions.subList(firstDispatchInsn, instructions.size()));
+		instructions.subList(firstDispatchInsn, instructions.size()).clear();
+		for (BlockNode successor : new ArrayList<>(stateDispatch.getSuccessors())) {
+			BlockSplitter.removeConnection(stateDispatch, successor);
+			BlockSplitter.connect(loopDispatch, successor);
+		}
+		BlockSplitter.connect(stateDispatch, loopDispatch);
+		BlockSplitter.replaceConnection(directDispatch, stateDispatch, loopDispatch);
+		stateDispatch.updateCleanSuccessors();
+		directDispatch.updateCleanSuccessors();
+		loopDispatch.updateCleanSuccessors();
+		mth.updateBlockPositions();
+		return loopDispatch;
+	}
+
+	private static boolean isSelectImplementationSuspendInvoke(@Nullable InvokeNode invoke) {
+		if (invoke == null
+				|| !invoke.getCallMth().getDeclClass().getFullName()
+						.equals("kotlinx.coroutines.selects.SelectImplementation")
+				|| !ArgType.OBJECT.equals(invoke.getCallMth().getReturnType())) {
+			return false;
+		}
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		return argTypes.size() == 1
+				&& CoroutineMethodUtils.isKnownContinuationType(argTypes.get(0));
+	}
+
+	/**
 	 * Ktor copyTo/copyAndClose loops alternate a non-suspending buffer transfer with flush and
 	 * awaitContent suspend calls. Immediate awaitContent completion enters the register-rotation
 	 * loop header directly, while state-2 resume reaches the same header through the continuation
@@ -11161,8 +13715,8 @@ public class FixMultiEntryLoops {
 	 */
 	private static boolean isKtorByteChannelCopyCompletion(
 			MethodNode mth, CoroutineSuspendCompletion completion) {
-		if (!KtorCioRecovery.isByteReadChannelOperations(mth)
-				|| !(mth.getName().equals("copyTo") || mth.getName().equals("copyAndClose"))
+		if (!(KtorCioRecovery.isByteChannelCopyMethod(mth)
+				|| isKtorByteChannelCopyStateMachine(mth))
 				|| mth.getExceptionHandlersCount() < 2
 				|| completion.suspendCheck.getPredecessors().size() != 1
 				|| !isMoveBlock(completion.directSuccess, 4)) {
@@ -11176,16 +13730,91 @@ public class FixMultiEntryLoops {
 						&& labelPut.getArgsCount() == 2
 						&& hasStableConstValueBeforeInsn(
 								suspendCall, labelPut, labelPut.getArg(0), 2);
-		boolean copyOperation = mth.getBasicBlocks().stream().anyMatch(
-				block -> containsInvoke(block, "transferTo") || containsInvoke(block, "readTo"));
+		boolean copyOperation = containsInvokeDeep(mth, KtorCioRecovery::isSourceTransferToBufferInvoke)
+				|| containsInvokeDeep(mth, KtorCioRecovery::isSourceReadToBufferInvoke);
 		boolean loopSuspend = suspendInvoke != null
-				&& (suspendInvoke.getCallMth().getName().contains("awaitContent")
-						|| suspendInvoke.getCallMth().getName().equals("flush"));
+				&& (KtorCioRecovery.isAwaitContentInvoke(suspendInvoke)
+						|| KtorCioRecovery.isByteWriteChannelSuspendInvoke(suspendInvoke));
 		return stateTwo
 				&& loopSuspend
 				&& copyOperation
-				&& mth.getBasicBlocks().stream().anyMatch(block -> containsInvoke(block, "awaitContent"))
-				&& mth.getBasicBlocks().stream().anyMatch(block -> containsInvoke(block, "flush"));
+				&& containsInvokeDeep(mth, KtorCioRecovery::isAwaitContentInvoke)
+				&& containsInvokeDeep(mth, KtorCioRecovery::isByteWriteChannelSuspendInvoke);
+	}
+
+	/**
+	 * R8 can merge the body of a Ktor {@code copyTo} facade into its generated continuation. Such
+	 * a state-machine method no longer has the facade's channel arguments, so identify it by the
+	 * continuation shape and the complete byte-channel protocol instead of the source method name.
+	 */
+	private static boolean isKtorByteChannelCopyStateMachine(MethodNode mth) {
+		if (!isCoroutineStateMachineBody(mth)
+				|| !KtorCioRecovery.isByteReadChannelOperationsClass(mth.getParentClass().getRawName())
+				|| mth.getMethodInfo().getArgumentsTypes().size() != 1) {
+			return false;
+		}
+		long objectFields = mth.getParentClass().getFields().stream()
+				.filter(field -> field.getType().isObject())
+				.count();
+		boolean hasLongState = mth.getParentClass().getFields().stream()
+				.anyMatch(field -> ArgType.LONG.equals(field.getType()));
+		return objectFields >= 2
+				&& hasLongState
+				&& containsInvokeDeep(mth, KtorCioRecovery::isAwaitContentInvoke)
+				&& containsInvokeDeep(mth, KtorCioRecovery::isByteWriteChannelSuspendInvoke)
+				&& (containsInvokeDeep(mth, KtorCioRecovery::isSourceReadToBufferInvoke)
+						|| containsInvokeDeep(mth, KtorCioRecovery::isSourceTransferToBufferInvoke));
+	}
+
+	/**
+	 * The JVM FileChannel copy overload has one {@code awaitContent} suspend state embedded in a
+	 * limit/availability loop. Its immediately completed result crosses a move-only bridge while
+	 * resume restores the same channel and callback directly at the closed-channel decision. Once
+	 * that direct result is routed through label state 1, both apparent entries collapse back into
+	 * the single compiler state-machine loop.
+	 */
+	private static boolean normalizeKtorFileChannelCopyCompletion(MethodNode mth) {
+		if (!KtorCioRecovery.isByteChannelFileChannelCopyMethod(mth)
+				|| !mth.isNoExceptionHandlers()
+				|| mth.getBasicBlocks().size() > 80) {
+			return false;
+		}
+		List<BlockNode> suspendChecks = mth.getBasicBlocks().stream()
+				.filter(FixMultiEntryLoops::isLabeledSuspendCheck)
+				.collect(Collectors.toList());
+		if (suspendChecks.size() != 1) {
+			return false;
+		}
+		BlockNode suspendCheck = suspendChecks.get(0);
+		if (suspendCheck.getPredecessors().size() != 1) {
+			return false;
+		}
+		InvokeNode suspendInvoke = findLastResultInvoke(suspendCheck.getPredecessors().get(0));
+		if (suspendInvoke == null || !KtorCioRecovery.isAwaitContentInvoke(suspendInvoke)) {
+			return false;
+		}
+		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block)
+						|| findObfuscatedThrowOnFailureArg(block) != null)
+				.collect(Collectors.toList());
+		CoroutineSuspendCompletion completion = findSmallIfChainCoroutineSuspendCompletion(
+				mth, suspendCheck, resumeBlocks, true);
+		if (completion == null
+				|| completion.stateKey != 1
+				|| !isMoveBlock(completion.directSuccess, 8)
+				|| completion.directSuccess.getInstructions().isEmpty()
+				|| completion.directSuccess.getSuccessors().size() != 1
+				|| !isPathExists(completion.directSuccess, suspendCheck)) {
+			return false;
+		}
+		return normalizeDirectCompletionsThroughStateDispatch(
+				mth,
+				List.of(completion),
+				CoroutineResultTransport.REGISTER,
+				false,
+				true,
+				"Normalize Ktor FileChannel copy completion through state dispatch: "
+						+ completion.stateDispatch);
 	}
 
 	/**
@@ -11661,6 +14290,118 @@ public class FixMultiEntryLoops {
 		return match;
 	}
 
+	private static @Nullable CoroutineSuspendCompletion findSingleCoroutineSuspendCompletionAtJoin(
+			MethodNode mth, BlockNode directBridge, BlockNode resumeJoin) {
+		if (!isMoveBlock(directBridge, 8)
+				|| !ListUtils.isSingleElement(directBridge.getSuccessors(), resumeJoin)
+				|| directBridge.getPredecessors().size() != 1
+				|| !resumeJoin.getPredecessors().contains(directBridge)) {
+			return null;
+		}
+		BlockNode suspendCheck = directBridge.getPredecessors().get(0);
+		if (!(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
+				|| suspendCheck.getPredecessors().size() != 1
+				|| suspendCheck.getSuccessors().size() != 2
+				|| !suspendCheck.getSuccessors().contains(directBridge)) {
+			return null;
+		}
+		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
+		InvokeNode suspendInvoke = findLastResultInvoke(suspendCall);
+		if (suspendInvoke == null
+				|| suspendInvoke.getResult() == null
+				|| suspendInvoke.getArgsCount() == 0
+				|| !(suspendInvoke.getArg(
+						suspendInvoke.getArgsCount() - 1) instanceof RegisterArg)) {
+			return null;
+		}
+		BlockNode exitPath = ListUtils.filterOnlyOne(
+				suspendCheck.getSuccessors(), block -> reachesExitOnLinearPath(block, 2));
+		if (exitPath == null || exitPath == directBridge) {
+			return null;
+		}
+		int continuationReg = ((RegisterArg) suspendInvoke.getArg(
+				suspendInvoke.getArgsCount() - 1)).getRegNum();
+		List<IndexInsnNode> statePuts = new ArrayList<>(2);
+		for (InsnNode insn : suspendCall.getInstructions()) {
+			if (!(insn instanceof IndexInsnNode)
+					|| insn.getType() != InsnType.IPUT
+					|| insn.getArgsCount() != 2
+					|| !(insn.getArg(1) instanceof RegisterArg)
+					|| ((RegisterArg) insn.getArg(1)).getRegNum() != continuationReg
+					|| !(((IndexInsnNode) insn).getIndex() instanceof FieldInfo)
+					|| !((FieldInfo) ((IndexInsnNode) insn).getIndex())
+							.getType().equals(ArgType.INT)) {
+				continue;
+			}
+			statePuts.add((IndexInsnNode) insn);
+		}
+		CoroutineSuspendCompletion match = null;
+		for (IndexInsnNode statePut : statePuts) {
+			FieldInfo stateField = (FieldInfo) statePut.getIndex();
+			for (BlockNode resume : mth.getBasicBlocks()) {
+				RegisterArg obfuscatedResult = findObfuscatedThrowOnFailureArg(resume);
+				if ((!containsInvoke(resume, "throwOnFailure") && obfuscatedResult == null)
+						|| !isShortLinearPath(resume, resumeJoin, 6)) {
+					continue;
+				}
+				CoroutineStateEntry stateEntry =
+						findCoroutineLabelStateEntry(resume, stateField);
+				ResumeStateBranch stateBranch =
+						findResumeStateBranchThroughRestore(resume, stateEntry);
+				if (stateBranch == null && stateEntry != null) {
+					stateBranch = findKtorResumeStateBranch(
+							mth, resume, stateEntry.stateArg);
+				}
+				RegisterArg resumeResultArg = findThrowOnFailureArgOnLinearPath(
+						resume, resumeJoin, 6);
+				if (resumeResultArg == null) {
+					resumeResultArg = obfuscatedResult;
+				}
+				if (stateBranch == null
+						|| stateBranch.stateKey <= 0
+						|| resumeResultArg == null
+						|| !hasStableConstValueBeforeInsn(
+								suspendCall,
+								statePut,
+								statePut.getArg(0),
+								stateBranch.stateKey)) {
+					continue;
+				}
+				BlockNode stateDispatch = findSequentialCoroutineStateDispatch(
+						stateBranch.dispatchBlock, stateField);
+				if (stateDispatch == null) {
+					stateDispatch = findKtorCoroutineStateDispatch(
+							mth, stateField, suspendCheck);
+				}
+				if (stateDispatch == null
+						&& isSafeKtorCoroutineStateDispatch(
+								mth, stateBranch.dispatchBlock)) {
+					stateDispatch = stateBranch.dispatchBlock;
+				}
+				if (stateDispatch == null) {
+					continue;
+				}
+				if (match != null
+						&& (match.resumeEntry != resume
+								|| !match.labelField.equals(stateField)
+								|| match.stateKey != stateBranch.stateKey)) {
+					return null;
+				}
+				match = new CoroutineSuspendCompletion(
+						suspendCheck,
+						directBridge,
+						resume,
+						stateDispatch,
+						stateField,
+						stateBranch.stateArg.getRegNum(),
+						suspendInvoke.getResult(),
+						resumeResultArg,
+						stateBranch.stateKey);
+			}
+		}
+		return match;
+	}
+
 	/**
 	 * Match an acyclic lowered suspend pipeline after obfuscation renamed both the continuation label
 	 * and {@code throwOnFailure}. Direct completion can pass through a short move-only bridge before
@@ -11758,7 +14499,7 @@ public class FixMultiEntryLoops {
 	private static @Nullable CoroutineSuspendCompletion findSwitchCoroutineSuspendCompletion(
 			MethodNode mth, BlockNode suspendCheck) {
 		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
-				.filter(block -> containsInvoke(block, "throwOnFailure"))
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block))
 				.collect(Collectors.toList());
 		return findSwitchCoroutineSuspendCompletion(mth, suspendCheck, resumeBlocks);
 	}
@@ -11808,8 +14549,8 @@ public class FixMultiEntryLoops {
 					continue;
 				}
 				BlockNode stateDispatch = findCoroutineStateDispatch(stateEntry.dispatchBlock, labelField);
-				RegisterArg resumeResultArg = findThrowOnFailureArgOnLinearPath(
-						resume, join, 6);
+				RegisterArg resumeResultArg = findCoroutineFailureCheckArgOnLinearPath(
+						mth, resume, join, 6);
 				if (stateDispatch != null && resumeResultArg != null) {
 					if (match != null) {
 						return null;
@@ -11888,7 +14629,7 @@ public class FixMultiEntryLoops {
 					continue;
 				}
 				RegisterArg resumeResultArg =
-						findThrowOnFailureArgOnLinearPath(resume, join, 6);
+						findCoroutineFailureCheckArgOnLinearPath(mth, resume, join, 6);
 				if (resumeResultArg == null) {
 					continue;
 				}
@@ -12004,7 +14745,7 @@ public class FixMultiEntryLoops {
 							|| !resumeToDirect && !sharedResultJoin) {
 						continue;
 					}
-					RegisterArg resumeResultArg = findThrowOnFailureArg(resume);
+					RegisterArg resumeResultArg = findCoroutineFailureCheckArg(mth, resume);
 					if (resumeResultArg == null) {
 						continue;
 					}
@@ -12380,6 +15121,24 @@ public class FixMultiEntryLoops {
 		return null;
 	}
 
+	private static @Nullable RegisterArg findCoroutineFailureCheckArgOnLinearPath(
+			MethodNode mth, BlockNode start, BlockNode target, int maxDepth) {
+		BlockNode block = start;
+		for (int depth = 0; depth <= maxDepth && block != null; depth++) {
+			RegisterArg arg = findCoroutineFailureCheckArg(mth, block);
+			if (arg != null) {
+				return arg;
+			}
+			if (block == target) {
+				return null;
+			}
+			block = block.getSuccessors().size() == 1
+					? block.getSuccessors().get(0)
+					: null;
+		}
+		return null;
+	}
+
 	private static final class CoroutineSuspendCompletion {
 		private final BlockNode suspendCheck;
 		private final BlockNode directSuccess;
@@ -12410,6 +15169,30 @@ public class FixMultiEntryLoops {
 			this.directResultArg = directResultArg;
 			this.resumeResultArg = resumeResultArg;
 			this.stateKey = stateKey;
+		}
+	}
+
+	private static final class CoroutineRetryLoopPlan {
+		private final CoroutineSuspendCompletion delayCompletion;
+		private final BlockNode loopEntry;
+		private final BlockNode requestEntry;
+		private final BlockNode requestResultJoin;
+		private final BlockNode requestResume;
+		private final List<BlockNode> initialPredecessors;
+
+		private CoroutineRetryLoopPlan(
+				CoroutineSuspendCompletion delayCompletion,
+				BlockNode loopEntry,
+				BlockNode requestEntry,
+				BlockNode requestResultJoin,
+				BlockNode requestResume,
+				List<BlockNode> initialPredecessors) {
+			this.delayCompletion = delayCompletion;
+			this.loopEntry = loopEntry;
+			this.requestEntry = requestEntry;
+			this.requestResultJoin = requestResultJoin;
+			this.requestResume = requestResume;
+			this.initialPredecessors = initialPredecessors;
 		}
 	}
 
@@ -12449,6 +15232,12 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		if (splitCoroutineShortCircuitProjectionJoin(mth, backEdge)) {
+			return true;
+		}
+		if (normalizeKtorFileChannelCopyCompletion(mth)) {
+			return true;
+		}
+		if (normalizeWhileSelectBooleanLoopCompletion(mth, backEdge)) {
 			return true;
 		}
 		if (normalizeSingleStateDirectBridgeCompletion(mth, backEdge)) {
@@ -12556,6 +15345,9 @@ public class FixMultiEntryLoops {
 		if (normalizeProtectedCoroutineMultiSuspendLoopBackEdge(mth, backEdge)) {
 			return true;
 		}
+		if (normalizeProtectedCoroutineDirectCompletionBackEdge(mth, backEdge)) {
+			return true;
+		}
 		if (normalizeCoroutineDelayResumeMergeBackEdge(mth, backEdge)) {
 			return true;
 		}
@@ -12563,6 +15355,27 @@ public class FixMultiEntryLoops {
 			return true;
 		}
 		if (normalizeSingleCoroutineRetryResultJoin(mth, backEdge)) {
+			return true;
+		}
+		if (splitKtorReadUntilOuterLoopJoin(mth, backEdge)) {
+			return true;
+		}
+		// Prefer the full nullable-result tail split over the generic post-suspend bridge
+		// rewrite. The generic form preserves the join but cannot recover the source loop's
+		// null-result continue/terminal-result return ownership.
+		if (splitCoroutineResumeNullableResultLoopTail(mth, backEdge)) {
+			return true;
+		}
+		if (normalizeCoroutineSuspendCasRetryResultJoin(mth, backEdge)) {
+			return true;
+		}
+		if (normalizeCoroutineIteratorCollectionMapCompletion(mth, backEdge)) {
+			return true;
+		}
+		if (splitCoroutineResumeDecisionLoopTail(mth, backEdge)) {
+			return true;
+		}
+		if (normalizeCoroutinePostSuspendJoinCompletion(mth, backEdge)) {
 			return true;
 		}
 		if (normalizeSingleCoroutineSuspendCompletion(mth, backEdge)) {
@@ -12575,15 +15388,6 @@ public class FixMultiEntryLoops {
 			return true;
 		}
 		if (isEndBlockEntry(mth, backEdge, crossEdges)) {
-			return true;
-		}
-		if (normalizeCoroutineSuspendCasRetryResultJoin(mth, backEdge)) {
-			return true;
-		}
-		if (normalizeCoroutineIteratorCollectionMapCompletion(mth, backEdge)) {
-			return true;
-		}
-		if (splitCoroutineResumeNullableResultLoopTail(mth, backEdge)) {
 			return true;
 		}
 		if (normalizeProtectedCoroutineDirectMoveBridge(mth, backEdge)) {
@@ -12601,10 +15405,16 @@ public class FixMultiEntryLoops {
 		if (normalizeTryDirectCompletionThroughTypedRestore(mth, backEdge)) {
 			return true;
 		}
-		if (splitCoroutineResumeDecisionLoopTail(mth, backEdge)) {
+		if (normalizeReportedCoroutineLoopCompletion(mth, List.of(backEdge))) {
 			return true;
 		}
-		if (normalizeReportedCoroutineLoopCompletion(mth, List.of(backEdge))) {
+		// Prefer the semantics-preserving local split whenever the direct completion and resume
+		// paths share only a pure projection. Some buffer-drain coroutines also match the
+		// informational fallback below, but do not need to retain an irreducible CFG in this shape.
+		if (splitCoroutineDirectBridgeMoveJoin(mth, backEdge)) {
+			return true;
+		}
+		if (splitProtectedCoroutineDirectBridgeMoveJoin(mth, backEdge)) {
 			return true;
 		}
 		if (isExpectedCoroutineBufferDrainReentry(mth, backEdge)) {
@@ -12616,9 +15426,6 @@ public class FixMultiEntryLoops {
 						+ backEdge + ')');
 			}
 			return false;
-		}
-		if (splitCoroutineDirectBridgeMoveJoin(mth, backEdge)) {
-			return true;
 		}
 		if (reportUnsupported) {
 			mth.addAttr(UnsupportedMultiEntryLoopAttr.INSTANCE);
@@ -13109,7 +15916,9 @@ public class FixMultiEntryLoops {
 		IndexInsnNode labelPut = findLabelPut(suspendCall);
 		BlockNode resume = ListUtils.filterOnlyOne(
 				resultBody.getPredecessors(), block -> block != suspendCheck);
-		RegisterArg resumeResultArg = resume == null ? null : findThrowOnFailureArg(resume);
+		RegisterArg resumeResultArg = resume == null
+				? null
+				: findCoroutineFailureCheckArg(mth, resume);
 		if (suspendedReturn == null
 				|| !reachesExitOnLinearPath(suspendedReturn, 1)
 				|| labelPut == null
@@ -13781,6 +16590,18 @@ public class FixMultiEntryLoops {
 						suspendCall, labelPut, labelPut.getArg(0), completion.stateKey)) {
 			return false;
 		}
+		BlockNode selectedSuspendCheck = suspendCheck;
+		BlockNode resumeJoinPred = ListUtils.filterOnlyOne(
+				directSuccess.getPredecessors(),
+				block -> block != selectedSuspendCheck);
+		if (resumeJoinPred == null
+				|| !isPathWithin(completion.resumeEntry, resumeJoinPred, 2)) {
+			return false;
+		}
+		if (!isCoroutineStateMachineBody(mth)) {
+			return splitNamedTryProtectedCoroutineResumeTail(
+					mth, completion, resumeJoinPred);
+		}
 		TryCatchBlockAttr tryBlock = suspendCheck.get(AType.TRY_BLOCK);
 		if (tryBlock == null) {
 			tryBlock = suspendCall.get(AType.TRY_BLOCK);
@@ -13791,39 +16612,35 @@ public class FixMultiEntryLoops {
 				|| completion.resumeEntry.get(AType.TRY_BLOCK) != tryBlock) {
 			return false;
 		}
-		BlockNode selectedSuspendCheck = suspendCheck;
-		BlockNode resumeJoinPred = ListUtils.filterOnlyOne(
-				directSuccess.getPredecessors(),
-				block -> block != selectedSuspendCheck);
-		if (resumeJoinPred == null
-				|| !isPathWithin(completion.resumeEntry, resumeJoinPred, 2)) {
-			return false;
-		}
-		if (!mth.getName().equals("invokeSuspend")) {
-			return splitNamedTryProtectedCoroutineResumeTail(
-					mth, completion, resumeJoinPred);
-		}
 		if (!canDispatchDirectCompletionByLabel(completion)) {
 			return false;
 		}
-		BlockNode labelSwitch =
+		BlockNode labelDispatch =
 				findCoroutineLabelSwitch(completion.stateDispatch, completion.labelField);
-		if (labelSwitch == null || labelSwitch == completion.stateDispatch) {
+		if (labelDispatch == null) {
+			labelDispatch = findCoroutineLabelIfChain(
+					completion.stateDispatch, completion.labelField);
+		}
+		if (labelDispatch == null || labelDispatch == completion.stateDispatch) {
 			return false;
 		}
-		CoroutineLoopReentryPlan loopReentryPlan =
+		CoroutineLoopReentryPlan receiveLoopReentryPlan =
 				buildTryProtectedReceiveLoopReentryPlan(
-						mth, completion, labelSwitch);
+						mth, completion, labelDispatch);
 		List<CoroutineSuspendCompletion> completions = new ArrayList<>(2);
-		if (loopReentryPlan != null) {
+		CoroutineLoopReentryPlan loopReentryPlan = receiveLoopReentryPlan;
+		if (receiveLoopReentryPlan != null) {
 			CoroutineSuspendCompletion receiveCompletion =
 					findTryProtectedReceiveCompletion(
-							mth, loopReentryPlan, completion);
+							mth, receiveLoopReentryPlan, completion);
 			if (receiveCompletion == null) {
 				loopReentryPlan = null;
 			} else {
 				completions.add(receiveCompletion);
 			}
+		} else {
+			loopReentryPlan = buildTryProtectedNullableResultLoopReentryPlan(
+					mth, completion, labelDispatch);
 		}
 		completions.add(completion);
 		int completionsCount = completions.size();
@@ -13833,7 +16650,7 @@ public class FixMultiEntryLoops {
 		InsnNode[] suffixInsns = new InsnNode[completionsCount];
 		for (int i = 0; i < completionsCount; i++) {
 			CoroutineSuspendCompletion candidate = completions.get(i);
-			dispatchTargets[i] = labelSwitch;
+			dispatchTargets[i] = labelDispatch;
 			directPathModes[i] = CoroutineDirectPathMode.INSERT;
 			suffixInsns[i] = makeCoroutineLabelGet(candidate);
 		}
@@ -13845,7 +16662,7 @@ public class FixMultiEntryLoops {
 				suffixInsns,
 				loopReentryPlan,
 				"Normalize try-protected coroutine suspend completion through state dispatch: "
-						+ labelSwitch);
+						+ labelDispatch);
 	}
 
 	/**
@@ -13863,16 +16680,25 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		BlockNode sharedEffect = completion.directSuccess;
+		BlockNode sharedDecision = getOnlyNormalSuccessor(sharedEffect);
 		if (!ListUtils.isSingleElement(resumeTail.getSuccessors(), sharedEffect)
 				|| !isCoroutineResumeMoveTail(resumeTail)
 				|| sharedEffect.getPredecessors().size() != 2
 				|| !sharedEffect.getPredecessors().contains(completion.suspendCheck)
 				|| !sharedEffect.getPredecessors().contains(resumeTail)
 				|| !isSingleCoroutineEffectWithOptionalGoto(sharedEffect)
-				|| sharedEffect.getSuccessors().size() != 1) {
+				|| sharedDecision == null) {
 			return false;
 		}
-		BlockNode decision = sharedEffect.getSuccessors().get(0);
+		BlockNode decisionPrefix = null;
+		BlockNode decision = sharedDecision;
+		if (!(BlockUtils.getLastInsn(decision) instanceof IfNode)) {
+			if (!isSingleCompareBridge(decision, sharedEffect)) {
+				return false;
+			}
+			decisionPrefix = decision;
+			decision = decisionPrefix.getSuccessors().get(0);
+		}
 		if (decision.getInstructions().size() != 1
 				|| !(BlockUtils.getLastInsn(decision) instanceof IfNode)
 				|| decision.getSuccessors().size() != 2) {
@@ -13890,8 +16716,13 @@ public class FixMultiEntryLoops {
 				|| isPathExists(exitPath, completion.suspendCheck)) {
 			return false;
 		}
-		BlockNode initialEntry = ListUtils.filterOnlyOne(
-				loopHeader.getPredecessors(), predecessor -> predecessor != decision);
+		BlockNode initialEntry = null;
+		for (BlockNode predecessor : loopHeader.getPredecessors()) {
+			if (predecessor != decision) {
+				initialEntry = predecessor;
+				break;
+			}
+		}
 		if (initialEntry == null
 				|| !ListUtils.isSingleElement(initialEntry.getSuccessors(), loopHeader)
 				|| isPathExists(loopHeader, initialEntry)) {
@@ -13930,8 +16761,6 @@ public class FixMultiEntryLoops {
 			BlockSplitter.replaceConnection(
 					exitPredecessors.get(1), exitPath, exitPreHeader);
 			for (BlockNode exitPredecessor : exitPredecessors) {
-				((IfNode) BlockUtils.getLastInsn(exitPredecessor))
-						.initBlocks(exitPredecessor);
 				exitPredecessor.updateCleanSuccessors();
 			}
 
@@ -13942,6 +16771,9 @@ public class FixMultiEntryLoops {
 			decisionCopy =
 					BlockSplitter.startNewBlock(mth, decision.getStartOffset());
 			decisionCopy.add(AFlag.SYNTHETIC);
+			if (decisionPrefix != null) {
+				BlockSplitter.copyBlockData(decisionPrefix, decisionCopy);
+			}
 			BlockSplitter.copyBlockData(decision, decisionCopy);
 			BlockSplitter.replaceConnection(
 					effectCopy, sharedEffect, decisionCopy);
@@ -13976,7 +16808,11 @@ public class FixMultiEntryLoops {
 					|| !sharedEffect.getPredecessors()
 							.contains(completion.suspendCheck)
 					|| sharedEffect.getInstructions().size() != effectCopy.getInstructions().size()
-					|| decision.getInstructions().size() != decisionCopy.getInstructions().size()) {
+					|| decision.getInstructions().size()
+							+ (decisionPrefix == null
+									? 0
+									: decisionPrefix.getInstructions().size())
+							!= decisionCopy.getInstructions().size()) {
 				rollbackCopiedTwoBlockTail(
 						mth, resumeTail, sharedEffect, effectCopy, decisionCopy);
 				rollbackCoroutineExitPreHeader(
@@ -14011,10 +16847,24 @@ public class FixMultiEntryLoops {
 		return true;
 	}
 
+	private static boolean isSingleCompareBridge(
+			BlockNode block, BlockNode expectedPredecessor) {
+		if (!ListUtils.isSingleElement(block.getPredecessors(), expectedPredecessor)
+				|| block.getInstructions().size() != 1
+				|| block.getSuccessors().size() != 1
+				|| isExceptionBoundary(block)) {
+			return false;
+		}
+		InsnType type = block.getInstructions().get(0).getType();
+		return type == InsnType.CMP_G || type == InsnType.CMP_L;
+	}
+
 	private static boolean isCoroutineResumeMoveTail(BlockNode block) {
 		boolean throwOnFailure = false;
 		List<InsnNode> insns = block.getInstructions();
-		if (insns.isEmpty() || insns.size() > 4) {
+		// Kotlin/R8 can need several register rotations after restoring the spilled receiver,
+		// callbacks and scalar state. Keep the tail bounded, but do not assume only two arguments.
+		if (insns.isEmpty() || insns.size() > 8) {
 			return false;
 		}
 		for (int i = 0; i < insns.size(); i++) {
@@ -14076,10 +16926,6 @@ public class FixMultiEntryLoops {
 						predecessor, exitPreHeader, exitPath);
 			} else if (!predecessor.getSuccessors().contains(exitPath)) {
 				BlockSplitter.connect(predecessor, exitPath);
-			}
-			InsnNode lastInsn = BlockUtils.getLastInsn(predecessor);
-			if (lastInsn instanceof IfNode) {
-				((IfNode) lastInsn).initBlocks(predecessor);
 			}
 			predecessor.updateCleanSuccessors();
 		}
@@ -14244,6 +17090,122 @@ public class FixMultiEntryLoops {
 			match = candidate;
 		}
 		return match;
+	}
+
+	/**
+	 * A nullable result from a later suspend call can terminate one gesture/session and re-enter
+	 * the state-0 polling loop. Once the direct completion is routed through the coroutine
+	 * dispatcher, that null branch must remain an explicit outer-loop continue; otherwise region
+	 * construction can merge it with the non-null result path and use an unassigned projection.
+	 *
+	 * Match only the structural protocol: a nullable decision over the suspend result, a bounded
+	 * non-suspending effect on the null path, and a two-predecessor loop header whose other entry is
+	 * the state-0 failure-check path. No class or obfuscated method name is part of the contract.
+	 */
+	private static @Nullable CoroutineLoopReentryPlan buildTryProtectedNullableResultLoopReentryPlan(
+			MethodNode mth,
+			CoroutineSuspendCompletion completion,
+			BlockNode labelDispatch) {
+		IndexInsnNode sourceLabelGet =
+				findLabelGet(completion.stateDispatch, completion.labelField);
+		if (sourceLabelGet == null
+				|| sourceLabelGet.getResult() == null
+				|| sourceLabelGet.getArgsCount() != 1) {
+			return null;
+		}
+		BlockNode nullableGuard = findNullableResultGuard(
+				completion.directSuccess, completion.resumeResultArg.getRegNum(), 2);
+		if (nullableGuard == null) {
+			return null;
+		}
+		IfNode nullableIf = (IfNode) BlockUtils.getLastInsn(nullableGuard);
+		BlockNode nullEffect = getNullBranch(nullableIf);
+		BlockNode nonNullPath = getNonNullBranch(nullableIf);
+		if (nullEffect == null
+				|| nonNullPath == null
+				|| !isBoundedDiscardedLoopEffect(nullEffect)
+				|| !isPathExists(nonNullPath, completion.suspendCheck)) {
+			return null;
+		}
+		BlockNode loopHeader = nullEffect.getSuccessors().get(0);
+		if (loopHeader.getPredecessors().size() != 2
+				|| !loopHeader.getPredecessors().contains(nullEffect)
+				|| !isPathExists(loopHeader, completion.suspendCheck)) {
+			return null;
+		}
+		BlockNode stateZeroEntry = ListUtils.filterOnlyOne(
+				loopHeader.getPredecessors(),
+				predecessor -> predecessor != nullEffect
+						&& isCoroutineFailureCheckBlock(mth, predecessor)
+						&& isPathWithin(labelDispatch, predecessor, 2));
+		if (stateZeroEntry == null
+				|| !ListUtils.isSingleElement(stateZeroEntry.getSuccessors(), loopHeader)) {
+			return null;
+		}
+		return new CoroutineLoopReentryPlan(
+				loopHeader,
+				List.of(nullEffect),
+				loopHeader,
+				completion.labelField,
+				sourceLabelGet.getArg(0),
+				null);
+	}
+
+	private static @Nullable BlockNode findNullableResultGuard(
+			BlockNode start, int resultRegNum, int maxDepth) {
+		BlockNode block = start;
+		for (int depth = 0; depth <= maxDepth; depth++) {
+			InsnNode lastInsn = BlockUtils.getLastInsn(block);
+			if (lastInsn instanceof IfNode) {
+				RegisterArg compared = getNullComparedRegister((IfNode) lastInsn);
+				return compared != null && compared.getRegNum() == resultRegNum
+						? block
+						: null;
+			}
+			block = getOnlyNormalSuccessor(block);
+			if (block == null) {
+				return null;
+			}
+		}
+		return null;
+	}
+
+	private static boolean isBoundedDiscardedLoopEffect(BlockNode block) {
+		if (block.getSuccessors().size() != 1
+				|| block.getInstructions().isEmpty()
+				|| block.getInstructions().size() > 4) {
+			return false;
+		}
+		int effects = 0;
+		for (int i = 0; i < block.getInstructions().size(); i++) {
+			InsnNode insn = block.getInstructions().get(i);
+			if (insn instanceof InvokeNode) {
+				InvokeNode invoke = (InvokeNode) insn;
+				if (invoke.getResult() != null
+						|| invoke.getCallMth().getArgumentsTypes().stream()
+								.anyMatch(CoroutineMethodUtils::isKnownContinuationType)) {
+					return false;
+				}
+				effects++;
+				continue;
+			}
+			switch (insn.getType()) {
+				case IGET:
+				case SGET:
+				case CHECK_CAST:
+				case CONST:
+				case MOVE:
+					break;
+				case GOTO:
+					if (i != block.getInstructions().size() - 1) {
+						return false;
+					}
+					break;
+				default:
+					return false;
+			}
+		}
+		return effects == 1;
 	}
 
 	/**
@@ -15101,7 +18063,6 @@ public class FixMultiEntryLoops {
 				|| !isPathExists(loopHeader, rotationTail)) {
 			return false;
 		}
-
 		return splitCopiedTwoBlockTailToPreHeader(
 				mth,
 				resume,
@@ -15771,7 +18732,7 @@ public class FixMultiEntryLoops {
 	 * existing pre-header. Both completion paths still add the key exactly once.
 	 */
 	private static boolean splitCoroutineResumeCollectionAddTail(MethodNode mth, SpecialEdgeAttr backEdge) {
-		if (!mth.getName().equals("invokeSuspend") || !isCoroutineMethod(mth)) {
+		if (!isCoroutineStateMachineBody(mth)) {
 			return false;
 		}
 		BlockNode directBridge = backEdge.getStart();
@@ -15790,7 +18751,7 @@ public class FixMultiEntryLoops {
 		}
 		BlockNode resume = ListUtils.filterOnlyOne(
 				addTail.getPredecessors(),
-				pred -> pred != directBridge && isCoroutineResumeBlock(pred));
+				pred -> pred != directBridge && isCoroutineFailureCheckBlock(mth, pred));
 		BlockNode suspendCheck = directBridge.getPredecessors().get(0);
 		if (resume == null
 				|| !(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
@@ -15806,7 +18767,7 @@ public class FixMultiEntryLoops {
 		InvokeNode suspendInvoke = findLastResultInvoke(suspendCall);
 		if (findLabelPut(suspendCall) == null
 				|| suspendInvoke == null
-				|| !suspendInvoke.getCallMth().getName().equals("send")) {
+				|| !isChannelSuspendActionInvoke(suspendInvoke)) {
 			return false;
 		}
 		BlockNode merge = addTail.getSuccessors().get(0);
@@ -15818,7 +18779,8 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		BlockNode loopHeader = merge.getSuccessors().get(0);
-		if (!containsInvoke(loopHeader, "hasNext") || !isPathExists(loopHeader, suspendCheck)) {
+		if (!containsChannelIteratorSuspendPredicateInvoke(loopHeader)
+				|| !isPathExists(loopHeader, suspendCheck)) {
 			return false;
 		}
 		BlockNode initialEntry = ListUtils.filterOnlyOne(
@@ -15838,6 +18800,13 @@ public class FixMultiEntryLoops {
 				loopHeader,
 				"Split coroutine resume collection-add tail before iterator loop header: "
 						+ loopHeader);
+	}
+
+	private static boolean containsChannelIteratorSuspendPredicateInvoke(BlockNode block) {
+		return block.getInstructions().stream()
+				.filter(InvokeNode.class::isInstance)
+				.map(InvokeNode.class::cast)
+				.anyMatch(FixMultiEntryLoops::isChannelIteratorSuspendPredicateInvoke);
 	}
 
 	private static boolean isCollectionAddMoveTail(BlockNode block) {
@@ -16001,6 +18970,112 @@ public class FixMultiEntryLoops {
 		mth.addDebugComment(
 				"Split coroutine direct bridge move join: " + moveJoin);
 		return true;
+	}
+
+	/**
+	 * A suspend call protected by a catch-all region can leave its direct register rotation marked
+	 * as an exception splitter. The ordinary direct-bridge matcher deliberately rejects such a
+	 * block, although joining it with the matching typed resume projection is still a pure CFG
+	 * operation. Copy only the shared move projection for the direct edge after proving the resume
+	 * restore/failure-check chain and suspended exit.
+	 */
+	private static boolean splitProtectedCoroutineDirectBridgeMoveJoin(
+			MethodNode mth, SpecialEdgeAttr backEdge) {
+		if (!isCoroutineMethod(mth)
+				|| mth.getExceptionHandlersCount() == 0
+				|| backEdge.getType() != SpecialEdgeType.BACK_EDGE) {
+			return false;
+		}
+		BlockNode directBridge = backEdge.getStart();
+		BlockNode moveJoin = backEdge.getEnd();
+		if (!isMoveTransportBlock(directBridge, 12)
+				|| directBridge.getPredecessors().size() != 1
+				|| !ListUtils.isSingleElement(directBridge.getSuccessors(), moveJoin)
+				|| !isPureCoroutineProjectionBlock(moveJoin, 8)
+				|| moveJoin.getPredecessors().size() != 2
+				|| moveJoin.getSuccessors().size() != 1
+				|| BlockUtils.isExceptionHandlerPath(moveJoin)) {
+			return false;
+		}
+		BlockNode resumeBridge = ListUtils.filterOnlyOne(
+				moveJoin.getPredecessors(), predecessor -> predecessor != directBridge);
+		BlockNode suspendCheck = directBridge.getPredecessors().get(0);
+		if (resumeBridge == null
+				|| !isCoroutineResumeMoveBridgeAfterTryTail(mth, resumeBridge)
+				|| !(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
+				|| suspendCheck.getPredecessors().size() != 1
+				|| suspendCheck.getSuccessors().size() != 2
+				|| !suspendCheck.getSuccessors().contains(directBridge)
+				|| suspendCheck.getSuccessors().stream()
+						.filter(block -> block != directBridge)
+						.noneMatch(block -> reachesExitOnLinearPath(block, 2))
+				|| !isPathExists(moveJoin, suspendCheck)) {
+			return false;
+		}
+		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
+		if (findLabelPutOnLinearPredecessorPath(suspendCall, 4) == null
+				|| findLastResultInvoke(suspendCall) == null) {
+			return false;
+		}
+
+		BlockNode moveCopy = BlockSplitter.insertBlockBetween(mth, directBridge, moveJoin);
+		moveCopy.add(AFlag.SYNTHETIC);
+		BlockSplitter.copyBlockData(moveJoin, moveCopy);
+		BlockSplitter.replaceConnection(moveCopy, moveJoin, moveJoin.getSuccessors().get(0));
+		moveCopy.updateCleanSuccessors();
+		mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+		mth.addDebugComment("Split protected coroutine direct move projection: " + moveJoin);
+		return true;
+	}
+
+	static boolean isMoveTransportBlock(BlockNode block, int maxInstructions) {
+		List<InsnNode> insns = block.getInstructions();
+		if (insns.isEmpty() || insns.size() > maxInstructions) {
+			return false;
+		}
+		int lastIndex = insns.size() - 1;
+		for (int i = 0; i < insns.size(); i++) {
+			InsnType type = insns.get(i).getType();
+			if (type != InsnType.MOVE && (i != lastIndex || type != InsnType.GOTO)) {
+				return false;
+			}
+		}
+		return insns.stream().anyMatch(insn -> insn.getType() == InsnType.MOVE);
+	}
+
+	private static boolean isCoroutineResumeMoveBridgeAfterTryTail(
+			MethodNode mth, BlockNode block) {
+		if (isCoroutineResumeMoveBridgeAfterTryTail(block)) {
+			return true;
+		}
+		if (!isMoveTransportBlock(block, 12) || block.getPredecessors().size() != 1) {
+			return false;
+		}
+		BlockNode failureCheck = block.getPredecessors().get(0);
+		failureCheck.updateCleanSuccessors();
+		if (!ListUtils.isSingleElement(failureCheck.getCleanSuccessors(), block)
+				|| failureCheck.getPredecessors().size() != 1
+				|| findThrowOnFailureArg(failureCheck) == null
+						&& findRepeatedObfuscatedFailureCheckArg(mth, failureCheck) == null) {
+			return false;
+		}
+		BlockNode restore = failureCheck.getPredecessors().get(0);
+		if (restore.contains(AFlag.EXC_TOP_SPLITTER)
+				&& restore.getPredecessors().size() == 1) {
+			restore = restore.getPredecessors().get(0);
+		}
+		BlockNode restoreBlock = restore;
+		boolean reachesFailureCheck = restoreBlock.getSuccessors().contains(failureCheck)
+				|| restoreBlock.getSuccessors().stream().anyMatch(
+						successor -> successor.contains(AFlag.EXC_TOP_SPLITTER)
+								&& successor.getSuccessors().contains(failureCheck));
+		return reachesFailureCheck
+				&& restoreBlock.getSuccessors().stream()
+						.allMatch(successor -> successor == failureCheck
+								|| successor.contains(AFlag.EXC_TOP_SPLITTER)
+								|| successor.contains(AType.TMP_EDGE))
+				&& (containsInsnTypeDeep(restoreBlock, InsnType.IGET)
+						|| containsInsnTypeDeep(restoreBlock, InsnType.SGET));
 	}
 
 	static boolean isCoroutineDirectBridgeMoveJoinPath(
@@ -16545,6 +19620,247 @@ public class FixMultiEntryLoops {
 						+ effectLatch);
 	}
 
+	/**
+	 * An unconditional sequence yield can resume at a nullable reference advance such as
+	 * {@code frame = frame.getCallerFrame()}. A no-value branch in the source loop reaches the same
+	 * advance directly, making that branch a second loop entry. Copy the invoke-and-null-check block
+	 * for the resume state and merge its non-null arm with initial execution through a pre-header.
+	 */
+	private static boolean splitUnconditionalSequenceYieldResumeReferenceAdvance(
+			MethodNode mth, SpecialEdgeAttr backEdge) {
+		if (!isCoroutineMethod(mth)
+				|| mth.getExceptionHandlersCount() != 0
+				|| backEdge.getType() != SpecialEdgeType.BACK_EDGE) {
+			return false;
+		}
+		BlockNode valueDecision = backEdge.getStart();
+		BlockNode advance = backEdge.getEnd();
+		if (!(BlockUtils.getLastInsn(valueDecision) instanceof IfNode)
+				|| valueDecision.getSuccessors().size() != 2
+				|| !valueDecision.getSuccessors().contains(advance)
+				|| advance.getPredecessors().size() != 2
+				|| advance.getInstructions().isEmpty()
+				|| advance.getInstructions().size() > 4
+				|| advance.contains(AFlag.EXC_TOP_SPLITTER)
+				|| advance.contains(AFlag.EXC_BOTTOM_SPLITTER)) {
+			return false;
+		}
+		BlockNode advanceDecisionBlock;
+		InsnNode advanceLastInsn = BlockUtils.getLastInsn(advance);
+		if (advanceLastInsn instanceof IfNode) {
+			if (advance.getSuccessors().size() != 2) {
+				return false;
+			}
+			advanceDecisionBlock = advance;
+		} else {
+			if (advance.getSuccessors().size() != 1) {
+				return false;
+			}
+			advanceDecisionBlock = advance.getSuccessors().get(0);
+			if (advanceDecisionBlock.getPredecessors().size() != 1
+					|| advanceDecisionBlock.getSuccessors().size() != 2
+					|| advanceDecisionBlock.getInstructions().size() != 1
+					|| !(BlockUtils.getLastInsn(advanceDecisionBlock) instanceof IfNode)
+					|| advanceDecisionBlock.contains(AFlag.EXC_TOP_SPLITTER)
+					|| advanceDecisionBlock.contains(AFlag.EXC_BOTTOM_SPLITTER)) {
+				return false;
+			}
+		}
+		InvokeNode advanceInvoke = findLastResultInvoke(advance);
+		InsnNode advanceDecision = BlockUtils.getLastInsn(advanceDecisionBlock);
+		if (advanceInvoke == null
+				|| advanceInvoke.getInvokeType() == InvokeType.STATIC
+				|| advanceInvoke.getResult() == null
+				|| !advanceInvoke.getCallMth().getReturnType().isObject()
+				|| !containsRegisterArg(advanceDecision, advanceInvoke.getResult().getRegNum())
+				|| !containsLiteralArg(advanceDecision, 0)
+				|| advance.getInstructions().stream().anyMatch(
+						insn -> insn != advanceDecision
+								&& insn.getType() != InsnType.INVOKE
+								&& insn.getType() != InsnType.MOVE
+								&& insn.getType() != InsnType.CHECK_CAST)) {
+			return false;
+		}
+
+		BlockNode resume = ListUtils.filterOnlyOne(
+				advance.getPredecessors(),
+				predecessor -> predecessor != valueDecision
+						&& (isCoroutineResumeBlock(predecessor)
+								|| findObfuscatedThrowOnFailureArg(predecessor) != null));
+		BlockNode suspendCall = ListUtils.filterOnlyOne(
+				valueDecision.getSuccessors(), successor -> successor != advance);
+		if (resume == null
+				|| suspendCall == null
+				|| suspendCall.getSuccessors().size() != 1
+				|| !reachesExitOnLinearPath(suspendCall.getSuccessors().get(0), 1)) {
+			return false;
+		}
+		InvokeNode yieldInvoke = findUnconditionalSequenceYieldInvoke(suspendCall);
+		IndexInsnNode labelPut = findLabelPut(suspendCall);
+		if (yieldInvoke == null
+				|| yieldInvoke.getResult() != null
+				|| labelPut == null
+				|| !(labelPut.getIndex() instanceof FieldInfo)
+				|| labelPut.getArgsCount() != 2
+				|| !(labelPut.getArg(1) instanceof RegisterArg)) {
+			return false;
+		}
+		RegisterArg continuationArg = findSuspendCallContinuationArg(yieldInvoke);
+		FieldInfo labelField = (FieldInfo) labelPut.getIndex();
+		CoroutineStateEntry stateEntry = findCoroutineLabelStateEntry(resume, labelField);
+		ResumeStateBranch stateBranch = findResumeStateBranchThroughRestore(resume, stateEntry);
+		if (continuationArg == null
+				|| ((RegisterArg) labelPut.getArg(1)).getRegNum() != continuationArg.getRegNum()
+				|| stateBranch == null
+				|| stateBranch.stateKey != 1) {
+			return false;
+		}
+
+		BlockNode completedExit = ListUtils.filterOnlyOne(
+				advanceDecisionBlock.getSuccessors(), block -> reachesExitOnLinearPath(block, 1));
+		BlockNode loopHeader = ListUtils.filterOnlyOne(
+				advanceDecisionBlock.getSuccessors(), block -> block != completedExit);
+		if (completedExit == null
+				|| loopHeader == null
+				|| loopHeader.getPredecessors().size() != 2
+				|| !(BlockUtils.getLastInsn(loopHeader) instanceof IfNode)
+				|| !isPathExists(loopHeader, valueDecision)
+				|| !isPathExists(loopHeader, suspendCall)) {
+			return false;
+		}
+		BlockNode initialEntry = ListUtils.filterOnlyOne(
+				loopHeader.getPredecessors(), predecessor -> predecessor != advanceDecisionBlock);
+		if (initialEntry == null
+				|| !ListUtils.isSingleElement(initialEntry.getSuccessors(), loopHeader)
+				|| isPathExists(loopHeader, initialEntry)) {
+			return false;
+		}
+
+		BlockNode loopPreHeader = BlockSplitter.insertBlockBetween(mth, initialEntry, loopHeader);
+		loopPreHeader.add(AFlag.SYNTHETIC);
+		mth.addAttr(new CoroutineLoopPreHeaderAttr(loopPreHeader));
+		BlockNode resumeAdvance = BlockSplitter.startNewBlock(mth, advance.getStartOffset());
+		resumeAdvance.add(AFlag.SYNTHETIC);
+		BlockSplitter.copyBlockData(advance, resumeAdvance);
+		BlockSplitter.replaceConnection(resume, advance, resumeAdvance);
+		BlockNode resumeDecision = resumeAdvance;
+		if (advanceDecisionBlock != advance) {
+			resumeDecision = BlockSplitter.startNewBlock(mth, advanceDecisionBlock.getStartOffset());
+			resumeDecision.add(AFlag.SYNTHETIC);
+			BlockSplitter.copyBlockData(advanceDecisionBlock, resumeDecision);
+			BlockSplitter.connect(resumeAdvance, resumeDecision);
+		}
+		for (BlockNode successor : advanceDecisionBlock.getSuccessors()) {
+			BlockSplitter.connect(
+					resumeDecision,
+					successor == loopHeader ? loopPreHeader : successor);
+		}
+		((IfNode) BlockUtils.getLastInsn(resumeDecision)).initBlocks(resumeDecision);
+		resumeAdvance.updateCleanSuccessors();
+		resumeDecision.updateCleanSuccessors();
+		loopPreHeader.updateCleanSuccessors();
+		mth.addDebugComment(
+				"Split unconditional sequence-yield reference advance before loop: " + advance);
+		return true;
+	}
+
+	private static boolean splitUnconditionalSequenceYieldResumeAdvance(
+			MethodNode mth, SpecialEdgeAttr backEdge) {
+		if (mth.getExceptionHandlersCount() != 0
+				|| backEdge.getType() != SpecialEdgeType.BACK_EDGE) {
+			return false;
+		}
+		BlockNode loopCondition = backEdge.getStart();
+		BlockNode advance = backEdge.getEnd();
+		if (!(BlockUtils.getLastInsn(loopCondition) instanceof IfNode)
+				|| loopCondition.getSuccessors().size() != 2
+				|| !loopCondition.getSuccessors().contains(advance)
+				|| advance.getPredecessors().size() != 2
+				|| advance.getSuccessors().size() != 1
+				|| advance.getInstructions().size() != 2
+				|| advance.getInstructions().stream()
+						.anyMatch(insn -> insn.getType() != InsnType.ARITH)) {
+			return false;
+		}
+		BlockNode resume = ListUtils.filterOnlyOne(
+				advance.getPredecessors(),
+				predecessor -> predecessor != loopCondition
+						&& (isCoroutineResumeBlock(predecessor)
+								|| findObfuscatedThrowOnFailureArg(predecessor) != null));
+		BlockNode suspendCall = ListUtils.filterOnlyOne(
+				loopCondition.getSuccessors(), successor -> successor != advance);
+		if (resume == null
+				|| suspendCall == null
+				|| suspendCall.getSuccessors().size() != 1
+				|| !reachesExitOnLinearPath(suspendCall.getSuccessors().get(0), 1)) {
+			return false;
+		}
+		InvokeNode yieldInvoke = findUnconditionalSequenceYieldInvoke(suspendCall);
+		IndexInsnNode labelPut = findLabelPut(suspendCall);
+		if (yieldInvoke == null
+				|| yieldInvoke.getResult() != null
+				|| labelPut == null
+				|| !(labelPut.getIndex() instanceof FieldInfo)
+				|| labelPut.getArgsCount() != 2
+				|| !(labelPut.getArg(1) instanceof RegisterArg)) {
+			return false;
+		}
+		RegisterArg continuationArg = findSuspendCallContinuationArg(yieldInvoke);
+		FieldInfo labelField = (FieldInfo) labelPut.getIndex();
+		CoroutineStateEntry stateEntry = findCoroutineLabelStateEntry(resume, labelField);
+		ResumeStateBranch stateBranch = findResumeStateBranchThroughRestore(resume, stateEntry);
+		if (continuationArg == null
+				|| ((RegisterArg) labelPut.getArg(1)).getRegNum()
+						!= continuationArg.getRegNum()
+				|| stateBranch == null
+				|| stateBranch.stateKey != 1) {
+			return false;
+		}
+		BlockNode loopHeader = advance.getSuccessors().get(0);
+		BlockNode initialEntry = ListUtils.filterOnlyOne(
+				loopHeader.getPredecessors(), predecessor -> predecessor != advance);
+		if (initialEntry == null
+				|| loopHeader.getPredecessors().size() != 2
+				|| !(BlockUtils.getLastInsn(loopHeader) instanceof IfNode)
+				|| !isPathExists(loopHeader, loopCondition)
+				|| !isPathExists(loopHeader, suspendCall)) {
+			return false;
+		}
+		return splitCopiedOneBlockLatchToPreHeader(
+				mth,
+				resume,
+				advance,
+				loopHeader,
+				initialEntry,
+				"Split unconditional sequence-yield resume advance before inner loop: "
+						+ advance);
+	}
+
+	private static @Nullable InvokeNode findUnconditionalSequenceYieldInvoke(
+			BlockNode block) {
+		InvokeNode match = null;
+		for (InsnNode insn : block.getInstructions()) {
+			if (!(insn instanceof InvokeNode)) {
+				continue;
+			}
+			InvokeNode invoke = (InvokeNode) insn;
+			if (invoke.getInvokeType() == InvokeType.STATIC
+					|| !invoke.getCallMth().getDeclClass().getFullName()
+							.equals("kotlin.sequences.SequenceScope")
+					|| invoke.getCallMth().getArgumentsTypes().size() != 2
+					|| !invoke.getCallMth().getArgumentsTypes().get(1).isObject()
+					|| !invoke.getCallMth().getArgumentsTypes().get(1).getObject()
+							.equals("kotlin.coroutines.Continuation")) {
+				continue;
+			}
+			if (match != null) {
+				return null;
+			}
+			match = invoke;
+		}
+		return match;
+	}
+
 	static boolean isCoroutineResumeEffectArithmeticLatchPath(
 			SpecialEdgeAttr backEdge) {
 		if (backEdge.getType() != SpecialEdgeType.BACK_EDGE) {
@@ -16760,28 +20076,33 @@ public class FixMultiEntryLoops {
 	 */
 	private static boolean splitCoroutineResumeBufferConsumeTail(MethodNode mth, SpecialEdgeAttr backEdge) {
 		List<ArgType> argTypes = mth.getMethodInfo().getArgumentsTypes();
-		boolean discard = mth.getName().equals("discard")
-				&& argTypes.size() == 3
-				&& argTypes.get(1).equals(ArgType.LONG);
-		boolean readBuffer = mth.getName().equals("readBuffer")
-				&& argTypes.size() == 3
-				&& argTypes.get(1).equals(ArgType.INT);
+		boolean commonShape = argTypes.size() == 3
+				&& KtorCioRecovery.isByteReadChannelOperations(mth)
+				&& CoroutineMethodUtils.isKnownContinuationType(argTypes.get(2));
+		boolean discard = commonShape
+				&& argTypes.get(1).equals(ArgType.LONG)
+				&& containsInvokeDeep(mth, KtorCioRecovery::isSourceDiscardInvoke);
+		boolean readBuffer = commonShape
+				&& argTypes.get(1).equals(ArgType.INT)
+				&& containsInvokeDeep(mth, KtorCioRecovery::isSourceRemainingInvoke)
+				&& containsInvokeDeep(mth, KtorCioRecovery::isSourceReadToBufferInvoke)
+				&& !containsInvokeDeep(mth, KtorCioRecovery::isSourceTransferToBufferInvoke);
 		if ((!discard && !readBuffer)
 				|| !KtorCioRecovery.isByteReadChannelOperations(mth)) {
 			return false;
 		}
 		BlockNode directBridge = backEdge.getStart();
 		BlockNode moveJoin = backEdge.getEnd();
-		if (!isMoveBlock(directBridge, 4)
+		if (!isMoveBlock(directBridge, MAX_WIDE_COROUTINE_MOVE_BRIDGE_SIZE)
 				|| directBridge.getPredecessors().size() != 1
 				|| !ListUtils.isSingleElement(directBridge.getSuccessors(), moveJoin)
-				|| !isMoveBlock(moveJoin, 4)
+				|| !isMoveBlock(moveJoin, MAX_WIDE_COROUTINE_MOVE_BRIDGE_SIZE)
 				|| moveJoin.getPredecessors().size() != 2
 				|| moveJoin.getSuccessors().size() != 1) {
 			return false;
 		}
 		BlockNode resume = ListUtils.filterOnlyOne(moveJoin.getPredecessors(),
-				pred -> pred != directBridge && isCoroutineResumeBlock(pred));
+				pred -> pred != directBridge && isKtorCoroutineResumeBlock(mth, pred));
 		BlockNode suspendCheck = directBridge.getPredecessors().get(0);
 		if (resume == null
 				|| !(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
@@ -16794,7 +20115,7 @@ public class FixMultiEntryLoops {
 		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
 		BlockNode discardTail = moveJoin.getSuccessors().get(0);
 		if (findLabelPut(suspendCall) == null
-				|| findResultInvoke(suspendCall, "awaitContent") == null
+				|| !containsInvokeDeep(suspendCall, KtorCioRecovery::isAwaitContentInvoke)
 				|| discardTail.getSuccessors().size() != 1
 				|| discardTail.getInstructions().isEmpty()
 				|| discardTail.getInstructions().size() > 8
@@ -16802,17 +20123,19 @@ public class FixMultiEntryLoops {
 						.anyMatch(insn -> insn.getType() != InsnType.INVOKE
 								&& insn.getType() != InsnType.ARITH
 								&& insn.getType() != InsnType.CAST)
-				|| !containsInvokeDeep(discardTail, "getReadBuffer")
+				|| !containsInvokeDeep(discardTail, KtorCioRecovery::isReadBufferInvoke)
 				|| !containsInvokeDeep(discardTail, "min")
-				|| discard && !containsInvokeDeep(discardTail, "discard")
-				|| readBuffer && (!containsInvokeDeep(discardTail, "getRemaining")
-						|| !containsInvokeDeep(discardTail, "readTo"))) {
+				|| discard && !containsInvokeDeep(discardTail, KtorCioRecovery::isSourceDiscardInvoke)
+				|| readBuffer && (!containsInvokeDeep(discardTail, KtorCioRecovery::isSourceRemainingInvoke)
+						|| !containsInvokeDeep(discardTail, KtorCioRecovery::isSourceReadToBufferInvoke))) {
 			return false;
 		}
 		BlockNode loopEntry = discardTail.getSuccessors().get(0);
 		BlockNode loopHeader = BlockUtils.followEmptyPath(loopEntry);
 		BlockNode initialEntry = ListUtils.filterOnlyOne(loopEntry.getPredecessors(),
-				pred -> pred != discardTail && containsInvoke(pred, "throwOnFailure"));
+				pred -> pred != discardTail
+						&& (containsInvoke(pred, "throwOnFailure")
+								|| findRepeatedObfuscatedFailureCheckArg(mth, pred) != null));
 		if (initialEntry == null || !isPathExists(loopHeader, suspendCheck)) {
 			return false;
 		}
@@ -16830,19 +20153,27 @@ public class FixMultiEntryLoops {
 
 	private static boolean isKtorByteReadChannelReadFully(MethodNode mth) {
 		List<ArgType> argTypes = mth.getMethodInfo().getArgumentsTypes();
-		return mth.getName().equals("readFully")
-				&& argTypes.size() == 5
-				&& argTypes.get(2).equals(ArgType.INT)
-				&& argTypes.get(3).equals(ArgType.INT)
-				&& KtorCioRecovery.isByteReadChannelOperations(mth);
+		boolean methodShape = argTypes.size() == 4
+				&& argTypes.get(1).isArray()
+				&& ArgType.BYTE.equals(argTypes.get(1).getArrayElement())
+				&& ArgType.INT.equals(argTypes.get(2))
+				&& CoroutineMethodUtils.isKnownContinuationType(argTypes.get(3));
+		boolean overloadShape = argTypes.size() == 5
+				&& argTypes.get(1).isArray()
+				&& ArgType.BYTE.equals(argTypes.get(1).getArrayElement())
+				&& ArgType.INT.equals(argTypes.get(2))
+				&& ArgType.INT.equals(argTypes.get(3))
+				&& CoroutineMethodUtils.isKnownContinuationType(argTypes.get(4));
+		boolean sourceRead = containsInvokeDeep(mth, KtorCioRecovery::isSourceReadToArrayInvoke);
+		boolean hasMin = mth.referencesMethodNamed("min");
+		return KtorCioRecovery.isByteReadChannelOperations(mth)
+				&& (methodShape || overloadShape)
+				&& sourceRead
+				&& hasMin;
 	}
 
 	private static boolean isKtorByteReadChannelReadPacket(MethodNode mth) {
-		List<ArgType> argTypes = mth.getMethodInfo().getArgumentsTypes();
-		return mth.getName().equals("readPacket")
-				&& argTypes.size() == 3
-				&& argTypes.get(1).equals(ArgType.INT)
-				&& KtorCioRecovery.isByteReadChannelOperations(mth);
+		return KtorCioRecovery.isReadPacketMethod(mth);
 	}
 
 	/**
@@ -16863,7 +20194,7 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		BlockNode resume = ListUtils.filterOnlyOne(moveJoin.getPredecessors(),
-				pred -> pred != directBridge && isCoroutineResumeBlock(pred));
+				pred -> pred != directBridge && isKtorCoroutineResumeBlock(mth, pred));
 		BlockNode suspendCheck = directBridge.getPredecessors().get(0);
 		if (resume == null
 				|| !(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
@@ -16876,11 +20207,11 @@ public class FixMultiEntryLoops {
 		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
 		BlockNode closeCall = moveJoin.getSuccessors().get(0);
 		if (findLabelPut(suspendCall) == null
-				|| findResultInvoke(suspendCall, "awaitContent") == null
+				|| !containsInvokeDeep(suspendCall, KtorCioRecovery::isAwaitContentInvoke)
 				|| closeCall.getPredecessors().size() != 2
 				|| closeCall.getSuccessors().size() != 1
 				|| closeCall.getInstructions().size() != 1
-				|| !containsInvoke(closeCall, "isClosedForRead")) {
+				|| !containsInvokeDeep(closeCall, KtorCioRecovery::isClosedForReadInvoke)) {
 			return false;
 		}
 		BlockNode closeCheck = closeCall.getSuccessors().get(0);
@@ -16891,10 +20222,10 @@ public class FixMultiEntryLoops {
 		}
 		BlockNode consume = ListUtils.filterOnlyOne(closeCheck.getSuccessors(),
 				block -> block.getSuccessors().size() == 1
-						&& containsInvokeDeep(block, "getReadBuffer")
-						&& containsInvokeDeep(block, "getRemaining")
+						&& containsInvokeDeep(block, KtorCioRecovery::isReadBufferInvoke)
+						&& containsInvokeDeep(block, KtorCioRecovery::isSourceRemainingInvoke)
 						&& containsInvokeDeep(block, "min")
-						&& containsInvokeDeep(block, "readTo"));
+						&& containsInvokeDeep(block, KtorCioRecovery::isSourceReadToArrayInvoke));
 		BlockNode eofPath = ListUtils.filterOnlyOne(closeCheck.getSuccessors(),
 				block -> block != consume && reachesExitOnLinearPath(block, 2));
 		if (consume == null
@@ -16967,7 +20298,7 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		BlockNode resume = ListUtils.filterOnlyOne(moveJoin.getPredecessors(),
-				pred -> pred != directBridge && isCoroutineResumeBlock(pred));
+				pred -> pred != directBridge && isKtorCoroutineResumeBlock(mth, pred));
 		BlockNode suspendCheck = directBridge.getPredecessors().get(0);
 		if (resume == null
 				|| !(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
@@ -16980,11 +20311,11 @@ public class FixMultiEntryLoops {
 		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
 		BlockNode closeCall = moveJoin.getSuccessors().get(0);
 		if (findLabelPut(suspendCall) == null
-				|| findResultInvoke(suspendCall, "awaitContent") == null
+				|| !containsInvokeDeep(suspendCall, KtorCioRecovery::isAwaitContentInvoke)
 				|| closeCall.getPredecessors().size() != 2
 				|| closeCall.getSuccessors().size() != 1
 				|| closeCall.getInstructions().size() != 1
-				|| !containsInvoke(closeCall, "isClosedForRead")) {
+				|| !containsInvokeDeep(closeCall, KtorCioRecovery::isClosedForReadInvoke)) {
 			return false;
 		}
 		BlockNode closeCheck = closeCall.getSuccessors().get(0);
@@ -16995,13 +20326,13 @@ public class FixMultiEntryLoops {
 		}
 		BlockNode consumeProjection = ListUtils.filterOnlyOne(closeCheck.getSuccessors(),
 				block -> block.getSuccessors().size() == 1
-						&& containsInvokeDeep(block, "getReadBuffer")
-						&& containsInvokeDeep(block, "getRemaining")
-						&& containsInvokeDeep(block, "getSize"));
+						&& containsInvokeDeep(block, KtorCioRecovery::isReadBufferInvoke)
+						&& containsInvokeDeep(block, KtorCioRecovery::isSourceRemainingInvoke)
+						&& containsBufferSizeReadDeep(block));
 		BlockNode completed = ListUtils.filterOnlyOne(closeCheck.getSuccessors(),
 				block -> block != consumeProjection
 						&& block.getSuccessors().size() == 1
-						&& containsInvokeDeep(block, "getSize"));
+						&& containsBufferSizeReadDeep(block));
 		if (consumeProjection == null || completed == null) {
 			return false;
 		}
@@ -17024,9 +20355,11 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		BlockNode readTo = ListUtils.filterOnlyOne(consumeCheck.getSuccessors(),
-				block -> block.getSuccessors().size() == 1 && containsInvokeDeep(block, "readTo"));
+				block -> block.getSuccessors().size() == 1
+						&& containsInvokeDeep(block, KtorCioRecovery::isSourceReadToBufferInvoke));
 		BlockNode transferTo = ListUtils.filterOnlyOne(consumeCheck.getSuccessors(),
-				block -> block.getSuccessors().size() == 1 && containsInvokeDeep(block, "transferTo"));
+				block -> block.getSuccessors().size() == 1
+						&& containsInvokeDeep(block, KtorCioRecovery::isSourceTransferToBufferInvoke));
 		if (readTo == null
 				|| transferTo == null
 				|| readTo == transferTo
@@ -17315,7 +20648,9 @@ public class FixMultiEntryLoops {
 				? (RegisterArg) cast.getArg(0)
 				: null;
 		InvokeNode suspendInvoke = findLastResultInvoke(suspendCall);
-		RegisterArg resumeResultArg = resume == null ? null : findThrowOnFailureArg(resume);
+		RegisterArg resumeResultArg = resume == null
+				? null
+				: findCoroutineFailureCheckArg(mth, resume);
 		if (resume == null
 				|| !hasCoroutineResultRestore(resume)
 				|| findLabelPut(suspendCall) == null
@@ -17623,6 +20958,120 @@ public class FixMultiEntryLoops {
 		return loopHeader != null
 				&& completedExit != null
 				&& isPathExists(loopHeader, suspendCheck);
+	}
+
+	/**
+	 * A one-state coroutine loop can test the result of its suspend call at the bottom of the
+	 * source loop. The resume state enters that test directly, while immediate completion reaches
+	 * it from the loop body. DFS therefore sees the immediate-completion edge as a second entry.
+	 *
+	 * Copy the bounded post-suspend test for the resume path and merge its continue arm with the
+	 * source loop's initial entry in a synthetic pre-header. The original result test remains in the
+	 * loop, so its back edge is dominated by the source body; both runtime paths still perform the
+	 * result assignment and condition exactly once.
+	 */
+	private static boolean splitCoroutineResumePostSuspendLoopConditionTail(
+			MethodNode mth, SpecialEdgeAttr backEdge) {
+		if (!isCoroutineMethod(mth) || mth.getExceptionHandlersCount() != 0) {
+			return false;
+		}
+		BlockNode directBridge = backEdge.getStart();
+		BlockNode resultJoin = backEdge.getEnd();
+		if (!ListUtils.isSingleElement(directBridge.getSuccessors(), resultJoin)
+				|| directBridge.getPredecessors().size() != 1
+				|| directBridge.getInstructions().isEmpty()
+				|| directBridge.getInstructions().size() > 12
+				|| directBridge.getInstructions().stream().anyMatch(insn -> insn.getType() != InsnType.MOVE)
+				|| resultJoin.getPredecessors().size() != 2
+				|| resultJoin.getSuccessors().size() != 1
+				|| resultJoin.getInstructions().isEmpty()
+				|| resultJoin.getInstructions().size() > 8
+				|| resultJoin.contains(AFlag.EXC_TOP_SPLITTER)
+				|| resultJoin.contains(AFlag.EXC_BOTTOM_SPLITTER)
+				|| resultJoin.get(AType.PHI_LIST) != null) {
+			return false;
+		}
+
+		BlockNode suspendCheck = directBridge.getPredecessors().get(0);
+		CoroutineSuspendCompletion completion = findKtorCioSuspendCompletion(mth, suspendCheck);
+		if (completion == null
+				|| completion.stateKey != 1
+				|| !completion.labelField.getName().equals("label")
+				|| completion.directSuccess != directBridge
+				|| completion.resumeEntry == directBridge
+				|| !resultJoin.getPredecessors().contains(completion.resumeEntry)
+				|| !ListUtils.isSingleElement(completion.resumeEntry.getSuccessors(), resultJoin)
+				|| isSwitchCoroutineStateDispatch(mth, completion)) {
+			return false;
+		}
+
+		BlockNode condition = resultJoin.getSuccessors().get(0);
+		if (!(BlockUtils.getLastInsn(condition) instanceof IfNode)
+				|| condition.getInstructions().size() != 1
+				|| condition.getSuccessors().size() != 2
+				|| condition.contains(AFlag.EXC_TOP_SPLITTER)
+				|| condition.contains(AFlag.EXC_BOTTOM_SPLITTER)) {
+			return false;
+		}
+		BlockNode completedPath = ListUtils.filterOnlyOne(
+				condition.getSuccessors(), block -> reachesExitOnLinearPath(block, 2));
+		BlockNode continueBridge = ListUtils.filterOnlyOne(
+				condition.getSuccessors(), block -> block != completedPath);
+		if (completedPath == null
+				|| continueBridge == null
+				|| continueBridge.getInstructions().isEmpty()
+				|| continueBridge.getInstructions().size() > 12
+				|| continueBridge.getInstructions().stream().anyMatch(insn -> insn.getType() != InsnType.MOVE)
+				|| continueBridge.getSuccessors().size() != 1
+				|| continueBridge.contains(AFlag.EXC_TOP_SPLITTER)
+				|| continueBridge.contains(AFlag.EXC_BOTTOM_SPLITTER)) {
+			return false;
+		}
+
+		BlockNode loopBody = continueBridge.getSuccessors().get(0);
+		if (loopBody.getPredecessors().size() != 2
+				|| !loopBody.getPredecessors().contains(continueBridge)
+				|| !isPathExists(loopBody, suspendCheck)) {
+			return false;
+		}
+		BlockNode initialEntry = ListUtils.filterOnlyOne(
+				loopBody.getPredecessors(), block -> block != continueBridge);
+		if (initialEntry == null
+				|| !ListUtils.isSingleElement(initialEntry.getSuccessors(), loopBody)
+				|| isPathExists(loopBody, initialEntry)) {
+			return false;
+		}
+
+		BlockNode loopPreHeader = BlockSplitter.insertBlockBetween(mth, initialEntry, loopBody);
+		loopPreHeader.add(AFlag.SYNTHETIC);
+		mth.addAttr(new CoroutineLoopPreHeaderAttr(loopPreHeader));
+
+		BlockNode resumeResultJoin = BlockSplitter.startNewBlock(mth, resultJoin.getStartOffset());
+		resumeResultJoin.add(AFlag.SYNTHETIC);
+		BlockSplitter.copyBlockData(resultJoin, resumeResultJoin);
+		BlockNode resumeCondition = BlockSplitter.startNewBlock(mth, condition.getStartOffset());
+		resumeCondition.add(AFlag.SYNTHETIC);
+		BlockSplitter.copyBlockData(condition, resumeCondition);
+		BlockNode resumeContinue = BlockSplitter.startNewBlock(mth, continueBridge.getStartOffset());
+		resumeContinue.add(AFlag.SYNTHETIC);
+		BlockSplitter.copyBlockData(continueBridge, resumeContinue);
+
+		BlockSplitter.replaceConnection(completion.resumeEntry, resultJoin, resumeResultJoin);
+		BlockSplitter.connect(resumeResultJoin, resumeCondition);
+		for (BlockNode successor : condition.getSuccessors()) {
+			BlockSplitter.connect(
+					resumeCondition,
+					successor == continueBridge ? resumeContinue : successor);
+		}
+		BlockSplitter.connect(resumeContinue, loopPreHeader);
+		((IfNode) BlockUtils.getLastInsn(resumeCondition)).initBlocks(resumeCondition);
+		resumeResultJoin.updateCleanSuccessors();
+		resumeCondition.updateCleanSuccessors();
+		resumeContinue.updateCleanSuccessors();
+		loopPreHeader.updateCleanSuccessors();
+		mth.addDebugComment(
+				"Split coroutine resume post-suspend loop condition tail before body: " + loopBody);
+		return true;
 	}
 
 	/**
@@ -18763,6 +22212,130 @@ public class FixMultiEntryLoops {
 	}
 
 	/**
+	 * A sequence builder may resume directly at getCallerFrame(), while its initial state enters
+	 * the frame loop before getStackTraceElement(). The skip and completed-yield paths also enter
+	 * getCallerFrame(), making the loop irreducible. Copy only the resume path's caller advance;
+	 * the original loop retains both of its back edges and each path advances exactly once.
+	 */
+	private static boolean splitCoroutineYieldFrameResumeLoop(MethodNode mth, SpecialEdgeAttr backEdge) {
+		if (!isCoroutineMethod(mth) || !mth.isNoExceptionHandlers()) {
+			return false;
+		}
+		BlockNode callerAdvance = backEdge.getEnd();
+		InvokeNode callerInvoke = findResultInvoke(callerAdvance, "getCallerFrame");
+		if (callerInvoke == null
+				|| !callerInvoke.getCallMth().getDeclClass().getFullName()
+						.equals("kotlin.coroutines.jvm.internal.CoroutineStackFrame")
+				|| callerAdvance.getPredecessors().size() != 3
+				|| callerAdvance.getSuccessors().size() != 1) {
+			return false;
+		}
+		BlockNode resume = ListUtils.filterOnlyOne(
+				callerAdvance.getPredecessors(), FixMultiEntryLoops::isCoroutineResumeBlock);
+		if (resume == null || !ListUtils.isSingleElement(resume.getSuccessors(), callerAdvance)) {
+			return false;
+		}
+		BlockNode callerCheck = callerAdvance.getSuccessors().get(0);
+		if (!(BlockUtils.getLastInsn(callerCheck) instanceof IfNode)
+				|| callerCheck.getPredecessors().size() != 1
+				|| callerCheck.getSuccessors().size() != 2) {
+			return false;
+		}
+		BlockNode frameMove = ListUtils.filterOnlyOne(callerCheck.getSuccessors(), block ->
+				block.getInstructions().size() == 1
+						&& block.getInstructions().get(0).getType() == InsnType.MOVE
+						&& block.getSuccessors().size() == 1);
+		BlockNode terminal = ListUtils.filterOnlyOne(callerCheck.getSuccessors(), block -> block != frameMove);
+		if (frameMove == null || terminal == null || !reachesExitOnLinearPath(terminal, 2)) {
+			return false;
+		}
+		BlockNode frameCheck = frameMove.getSuccessors().get(0);
+		if (!(BlockUtils.getLastInsn(frameCheck) instanceof IfNode)
+				|| frameCheck.getPredecessors().size() != 2
+				|| frameCheck.getSuccessors().size() != 2) {
+			return false;
+		}
+		BlockNode initialEntry = ListUtils.filterOnlyOne(
+				frameCheck.getPredecessors(), pred -> pred != frameMove);
+		if (initialEntry == null
+				|| !ListUtils.isSingleElement(initialEntry.getSuccessors(), frameCheck)
+				|| initialEntry.getPredecessors().size() != 1
+				|| resume.getPredecessors().size() != 1
+				|| initialEntry.getPredecessors().get(0) != resume.getPredecessors().get(0)
+				|| !BlockUtils.checkLastInsnType(initialEntry.getPredecessors().get(0), InsnType.SWITCH)) {
+			return false;
+		}
+		BlockNode stackTraceCall = ListUtils.filterOnlyOne(frameCheck.getSuccessors(), block ->
+				findResultInvoke(block, "getStackTraceElement") != null
+						&& block.getSuccessors().size() == 1);
+		if (stackTraceCall == null || frameCheck.getSuccessors().stream()
+					.filter(block -> block != stackTraceCall)
+					.noneMatch(block -> reachesExitOnLinearPath(block, 2))) {
+			return false;
+		}
+		BlockNode skipCheck = stackTraceCall.getSuccessors().get(0);
+		if (!(BlockUtils.getLastInsn(skipCheck) instanceof IfNode)
+				|| skipCheck.getSuccessors().size() != 2
+				|| !skipCheck.getSuccessors().contains(callerAdvance)) {
+			return false;
+		}
+		BlockNode yieldCall = ListUtils.filterOnlyOne(skipCheck.getSuccessors(), block -> block != callerAdvance);
+		if (yieldCall == null || !containsInvokeDeep(yieldCall, "yield")
+				|| yieldCall.getSuccessors().size() != 1) {
+			return false;
+		}
+		BlockNode suspendCheck = yieldCall.getSuccessors().get(0);
+		if (!(BlockUtils.getLastInsn(suspendCheck) instanceof IfNode)
+				|| suspendCheck.getSuccessors().size() != 2
+				|| suspendCheck.getSuccessors().stream()
+						.noneMatch(block -> reachesExitOnLinearPath(block, 1))) {
+			return false;
+		}
+		BlockNode directBridge = ListUtils.filterOnlyOne(suspendCheck.getSuccessors(), block ->
+				ListUtils.isSingleElement(block.getSuccessors(), callerAdvance)
+						&& !block.getInstructions().isEmpty()
+						&& block.getInstructions().size() <= 2
+						&& block.getInstructions().stream().allMatch(insn -> insn.getType() == InsnType.MOVE));
+		if (directBridge == null
+				|| directBridge.getPredecessors().size() != 1
+				|| !callerAdvance.getPredecessors().containsAll(Arrays.asList(resume, skipCheck, directBridge))
+				|| Arrays.asList(callerAdvance, callerCheck, frameMove, frameCheck,
+						stackTraceCall, skipCheck, yieldCall, suspendCheck, directBridge).stream()
+						.anyMatch(block -> BlockUtils.isExceptionHandlerPath(block)
+								|| block.contains(AFlag.EXC_TOP_SPLITTER)
+								|| block.contains(AFlag.EXC_BOTTOM_SPLITTER))) {
+			return false;
+		}
+		List<BlockNode> originals = Arrays.asList(callerAdvance, callerCheck, frameMove);
+		Map<BlockNode, BlockNode> copies = new LinkedHashMap<>(originals.size());
+		for (BlockNode original : originals) {
+			BlockNode copy = BlockSplitter.startNewBlock(mth, original.getStartOffset());
+			copy.add(AFlag.SYNTHETIC);
+			BlockSplitter.copyBlockData(original, copy);
+			copies.put(original, copy);
+		}
+		for (BlockNode original : originals) {
+			BlockNode copy = copies.get(original);
+			for (BlockNode successor : original.getSuccessors()) {
+				BlockSplitter.connect(copy, copies.getOrDefault(successor, successor));
+			}
+			copy.updateCleanSuccessors();
+			InsnNode lastInsn = BlockUtils.getLastInsn(copy);
+			if (lastInsn instanceof IfNode) {
+				((IfNode) lastInsn).initBlocks(copy);
+			}
+		}
+		BlockSplitter.replaceConnection(resume, callerAdvance, copies.get(callerAdvance));
+		resume.updateCleanSuccessors();
+		// The two state-dispatch cases are exclusive. The structured loop can be emitted once
+		// under each case without executing either call twice on a runtime path.
+		stackTraceCall.addAttr(SafeDuplicationAttr.INSTANCE);
+		yieldCall.addAttr(SafeDuplicationAttr.INSTANCE);
+		mth.addDebugComment("Split coroutine frame-yield resume caller advance before loop header: " + frameCheck);
+		return true;
+	}
+
+	/**
 	 * A sequence builder can suspend after yielding a regex segment. Its label-2 resume state enters
 	 * at {@link java.util.regex.Matcher#end()}, while direct completion reaches the same block from
 	 * the source loop body. Clone the bounded matcher-advance loop for the resume state so both the
@@ -19080,7 +22653,7 @@ public class FixMultiEntryLoops {
 	private static boolean normalizeProtectedCoroutineMultiSuspendLoopBackEdge(
 			MethodNode mth, SpecialEdgeAttr backEdge) {
 		if (!isCoroutineMethod(mth)
-				|| !mth.getName().equals("invokeSuspend")
+				|| !(mth.getName().equals("invokeSuspend") || isCoroutineStateMachineBody(mth))
 				|| mth.getExceptionHandlersCount() == 0) {
 			return false;
 		}
@@ -19114,7 +22687,7 @@ public class FixMultiEntryLoops {
 			bypassingResumes.add(
 					new CoroutineStateResume(block, resultArg, stateBranch));
 		}
-		if (bypassingResumes.size() < 2 || bypassingResumes.size() > 3) {
+		if (bypassingResumes.size() < 2 || bypassingResumes.size() > 8) {
 			return false;
 		}
 		bypassingResumes.sort(
@@ -19138,6 +22711,80 @@ public class FixMultiEntryLoops {
 							+ completion.stateDispatch);
 		}
 		return false;
+	}
+
+	/**
+	 * A protected coroutine state can complete through a move-only register bridge immediately
+	 * before an exception top splitter. Its matching resume state enters the splitter after local
+	 * restoration, so the direct bridge is reported as a second entry into the protected source
+	 * loop. Re-enter through the existing state dispatcher and let the compiler-generated resume
+	 * branch perform the same restoration. The exact suspend-result edge, label mapping and
+	 * move-only bridge are all proved before the graph is changed.
+	 */
+	private static boolean normalizeProtectedCoroutineDirectCompletionBackEdge(
+			MethodNode mth, SpecialEdgeAttr backEdge) {
+		if (!isCoroutineMethod(mth)
+				|| mth.getExceptionHandlersCount() == 0
+				|| !backEdge.getEnd().contains(AFlag.EXC_TOP_SPLITTER)) {
+			return false;
+		}
+		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block)
+						|| findObfuscatedThrowOnFailureArg(block) != null)
+				.collect(Collectors.toList());
+		List<BlockNode> switchBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> BlockUtils.getLastInsn(block) instanceof SwitchInsn)
+				.collect(Collectors.toList());
+		Map<BlockNode, Map<FieldInfo, BlockNode>> sharedSwitchDispatchCache =
+				new LinkedHashMap<>();
+		CoroutineSuspendCompletion match = null;
+		for (BlockNode suspendCheck : mth.getBasicBlocks()) {
+			if (!isLabeledSuspendCheck(suspendCheck)) {
+				continue;
+			}
+			CoroutineSuspendCompletion completion = findSwitchCoroutineSuspendCompletion(
+					mth, suspendCheck, resumeBlocks);
+			if (completion == null) {
+				completion = findSharedSwitchCoroutineSuspendCompletion(
+						mth,
+						suspendCheck,
+						resumeBlocks,
+						switchBlocks,
+						sharedSwitchDispatchCache);
+			}
+			if (completion == null) {
+				// Older Kotlin backends lower the same protected state machine to a
+				// bounded if-chain. Reuse the exact label-field/state-key proof rather
+				// than treating switch lowering as part of the protocol.
+				completion = findSmallIfChainCoroutineSuspendCompletion(
+						mth, suspendCheck, resumeBlocks, true);
+			}
+			if (completion == null
+					|| !isDirectCompletionBackEdge(completion, backEdge)
+					|| completion.directSuccess.getInstructions().size() > 12
+					|| completion.stateKey <= 0
+					|| !canDispatchDirectCompletionByLabel(completion)
+					|| !isPathExists(completion.stateDispatch, completion.suspendCheck)
+					|| !isPathExists(completion.stateDispatch, completion.resumeEntry)
+					|| !isPathWithin(completion.resumeEntry, backEdge.getEnd(), 4)) {
+				continue;
+			}
+			if (match != null) {
+				return false;
+			}
+			match = completion;
+		}
+		if (match == null) {
+			return false;
+		}
+		return normalizeDirectCompletionsThroughStateDispatch(
+				mth,
+				List.of(match),
+				CoroutineResultTransport.REGISTER,
+				true,
+				true,
+				"Normalize protected coroutine direct completion through state dispatch: "
+						+ match.stateDispatch);
 	}
 
 	private static @Nullable CoroutineSuspendCompletion findProtectedLoopSuspendCompletion(
@@ -20003,8 +23650,8 @@ public class FixMultiEntryLoops {
 	}
 
 	/**
-	 * Kotlin can merge the initial and resumed delay states immediately before a source loop
-	 * header. A directly completed delay then reaches that header without passing through the
+	 * Kotlin can merge the initial and resumed suspend states immediately before a source loop
+	 * header. A directly completed delay or supplied suspend callback then reaches that header without passing through the
 	 * state dispatcher, so exception-protected bodies make the otherwise structured loop appear to
 	 * have a second entry.
 	 *
@@ -20023,9 +23670,6 @@ public class FixMultiEntryLoops {
 	 */
 	private static boolean normalizeCoroutineDelayResumeMergeBackEdge(
 			MethodNode mth, SpecialEdgeAttr backEdge) {
-		if (!mth.getName().equals("invokeSuspend")) {
-			return false;
-		}
 		if (!isCoroutineMethod(mth)) {
 			return false;
 		}
@@ -20067,6 +23711,7 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		BlockNode suspendSetup = suspendCheck.getPredecessors().get(0);
+		IndexInsnNode labelPut = findLabelPut(suspendSetup);
 		InvokeNode delayInvoke = findResultInvoke(suspendSetup, "delay");
 		if (delayInvoke == null) {
 			delayInvoke = findResultInvoke(suspendCheck, "delay");
@@ -20074,7 +23719,6 @@ public class FixMultiEntryLoops {
 		if (delayInvoke == null) {
 			delayInvoke = findSingleInvokeDeep(suspendCheck, "delay");
 		}
-		IndexInsnNode labelPut = findLabelPut(suspendSetup);
 		if (delayInvoke == null
 				|| delayInvoke.getResult() == null
 				|| findCoroutineSuspendedReturnSuccessor(
@@ -20161,6 +23805,24 @@ public class FixMultiEntryLoops {
 				delayInvoke.getResult(),
 				resumeResultArg,
 				stateBranch.stateKey);
+		if (!labelField.getName().equals("label")) {
+			Set<BlockNode> suspendChecks = mth.getBasicBlocks().stream()
+					.filter(block -> isLabeledSuspendCheck(block)
+							|| isObfuscatedLabeledSuspendCheck(mth, block))
+					.collect(Collectors.toCollection(LinkedHashSet::new));
+			/*
+			 * A delay arm can be only one member of a locally obfuscated multi-state dispatcher.
+			 * Rewriting that arm in isolation destroys the evidence needed to recover the complete
+			 * state map, so leave it for normalizeReportedCoroutineLoopCompletion below.
+			 */
+			if (hasCompetingCoroutineStateDispatch(mth, completion)
+					&& suspendChecks.size() > 1
+					&& mth.getBasicBlocks().stream()
+							.flatMap(block -> block.getInstructions().stream())
+							.anyMatch(insn -> insn.getType() == InsnType.SWITCH)) {
+				return false;
+			}
+		}
 		boolean normalized;
 		if (directPathMode == CoroutineDirectPathMode.REUSE_PRESERVE) {
 			BlockNode resultTransport = null;
@@ -20185,7 +23847,7 @@ public class FixMultiEntryLoops {
 			if (normalized) {
 				mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
 				mth.addDebugComment(
-						"Normalize coroutine delay result before preserved restore bridge: "
+						"Normalize coroutine suspend result before preserved restore bridge: "
 								+ directSuccess);
 			}
 		} else {
@@ -20195,7 +23857,7 @@ public class FixMultiEntryLoops {
 					resume,
 					CoroutineDirectPathMode.INSERT,
 					null,
-					"Normalize coroutine delay completion through existing resume restore: "
+					"Normalize coroutine suspend completion through existing resume restore: "
 							+ resume);
 		}
 		return normalized;
@@ -20271,6 +23933,47 @@ public class FixMultiEntryLoops {
 		for (InsnNode insn : block.getInstructions()) {
 			Boolean found = insn.visitInsns(inner -> inner instanceof InvokeNode
 					&& ((InvokeNode) inner).getCallMth().getName().contains(namePart) ? Boolean.TRUE : null);
+			if (found != null) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean containsInvokeDeep(
+			BlockNode block, java.util.function.Predicate<InvokeNode> predicate) {
+		for (InsnNode insn : block.getInstructions()) {
+			Boolean found = insn.visitInsns(inner -> inner instanceof InvokeNode
+					&& predicate.test((InvokeNode) inner) ? Boolean.TRUE : null);
+			if (found != null) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean containsInvokeDeep(
+			MethodNode mth, java.util.function.Predicate<InvokeNode> predicate) {
+		return mth.getBasicBlocks().stream()
+				.anyMatch(block -> containsInvokeDeep(block, predicate));
+	}
+
+	private static boolean containsBufferSizeReadDeep(BlockNode block) {
+		for (InsnNode insn : block.getInstructions()) {
+			Boolean found = insn.visitInsns(inner -> {
+				if (inner instanceof InvokeNode
+						&& KtorCioRecovery.isBufferSizeInvoke((InvokeNode) inner)) {
+					return Boolean.TRUE;
+				}
+				if (inner instanceof IndexInsnNode
+						&& inner.getType() == InsnType.IGET
+						&& ((IndexInsnNode) inner).getIndex() instanceof FieldInfo
+						&& KtorCioRecovery.isBufferSizeField(
+								(FieldInfo) ((IndexInsnNode) inner).getIndex())) {
+					return Boolean.TRUE;
+				}
+				return null;
+			});
 			if (found != null) {
 				return true;
 			}
@@ -20434,8 +24137,236 @@ public class FixMultiEntryLoops {
 				"Normalize coroutine delay completion through state dispatch: " + stateDispatch)) {
 			return false;
 		}
+		BlockNode loopDispatch = null;
+		List<InsnNode> dispatchInsns = stateDispatch.getInstructions();
+		if (stateDispatch.getPredecessors().size() == 2
+				&& dispatchInsns.size() >= 2
+				&& isCoroutineSuspendedMarkerGet(dispatchInsns.get(0))
+				&& dispatchInsns.get(1) instanceof IndexInsnNode
+				&& dispatchInsns.get(1).getType() == InsnType.IGET
+				&& labelField.equals(((IndexInsnNode) dispatchInsns.get(1)).getIndex())) {
+			BlockNode originalEntry = ListUtils.filterOnlyOne(
+					stateDispatch.getPredecessors(), pred -> !pred.contains(AFlag.SYNTHETIC));
+			if (originalEntry != null) {
+				loopDispatch = splitCoroutineDispatchPrologue(mth, stateDispatch, originalEntry, 1);
+			}
+		}
 		splitSharedCoroutineLatchSuccessors(mth, latch);
+		boolean splitResumeTails = splitSharedDelayResumeTails(mth, suspendSetup, suspendCheck);
+		if (splitResumeTails && loopDispatch != null) {
+			routeDirectDelayCompletionPastResumeCheck(mth, loopDispatch, latch);
+		}
 		return true;
+	}
+
+	/**
+	 * Keep the delay suspension check on both resumed entries. A shared call/check tail entered
+	 * from the action completion and the delay resume can otherwise be folded into the bottom
+	 * condition of the initial-state loop, leaving the resumed arms with an unchecked delay.
+	 */
+	private static boolean splitSharedDelayResumeTails(
+			MethodNode mth, BlockNode delayCall, BlockNode delayCheck) {
+		if (delayCall.getPredecessors().size() != 2
+				|| !ListUtils.isSingleElement(delayCall.getSuccessors(), delayCheck)
+				|| !(BlockUtils.getLastInsn(delayCheck) instanceof IfNode)
+				|| delayCheck.getSuccessors().size() != 2) {
+			return false;
+		}
+		BlockNode delayResume = ListUtils.filterOnlyOne(
+				delayCall.getPredecessors(), pred -> containsInvoke(pred, "throwOnFailure"));
+		if (delayResume == null || !ListUtils.isSingleElement(delayResume.getSuccessors(), delayCall)) {
+			return false;
+		}
+		BlockNode actionCheck = ListUtils.filterOnlyOne(
+				delayCall.getPredecessors(), pred -> pred != delayResume);
+		if (actionCheck == null
+				|| !(BlockUtils.getLastInsn(actionCheck) instanceof IfNode)
+				|| actionCheck.getPredecessors().size() != 1
+				|| actionCheck.getSuccessors().size() != 2) {
+			return false;
+		}
+		BlockNode actionCall = actionCheck.getPredecessors().get(0);
+		if (actionCall.getPredecessors().size() != 2
+				|| !ListUtils.isSingleElement(actionCall.getSuccessors(), actionCheck)
+				|| findLastResultInvoke(actionCall) == null) {
+			return false;
+		}
+		BlockNode actionResume = ListUtils.filterOnlyOne(
+				actionCall.getPredecessors(), pred -> containsInvoke(pred, "throwOnFailure"));
+		if (actionResume == null || !ListUtils.isSingleElement(actionResume.getSuccessors(), actionCall)) {
+			return false;
+		}
+		BlockNode actionSuspendExit = getOtherSuccessor(actionCheck, delayCall);
+		if (actionSuspendExit == null || !delayCheck.getSuccessors().contains(actionSuspendExit)) {
+			return false;
+		}
+
+		BlockNode resumedDelayCall = copyBlock(mth, delayCall);
+		BlockNode resumedDelayCheck = copyBlock(mth, delayCheck);
+		BlockSplitter.replaceConnection(delayResume, delayCall, resumedDelayCall);
+		BlockSplitter.connect(resumedDelayCall, resumedDelayCheck);
+		for (BlockNode successor : delayCheck.getSuccessors()) {
+			BlockSplitter.connect(resumedDelayCheck, successor);
+		}
+		((IfNode) BlockUtils.getLastInsn(resumedDelayCheck)).initBlocks(resumedDelayCheck);
+		resumedDelayCall.updateCleanSuccessors();
+		resumedDelayCheck.updateCleanSuccessors();
+
+		BlockNode resumedActionCall = copyBlock(mth, actionCall);
+		BlockNode resumedActionCheck = copyBlock(mth, actionCheck);
+		BlockNode actionDelayCall = copyBlock(mth, delayCall);
+		BlockNode actionDelayCheck = copyBlock(mth, delayCheck);
+		BlockSplitter.replaceConnection(actionResume, actionCall, resumedActionCall);
+		BlockSplitter.connect(resumedActionCall, resumedActionCheck);
+		BlockSplitter.connect(resumedActionCheck, actionSuspendExit);
+		BlockSplitter.connect(resumedActionCheck, actionDelayCall);
+		BlockSplitter.connect(actionDelayCall, actionDelayCheck);
+		for (BlockNode successor : delayCheck.getSuccessors()) {
+			BlockSplitter.connect(actionDelayCheck, successor);
+		}
+		((IfNode) BlockUtils.getLastInsn(resumedActionCheck)).initBlocks(resumedActionCheck);
+		((IfNode) BlockUtils.getLastInsn(actionDelayCheck)).initBlocks(actionDelayCheck);
+		for (BlockNode block : List.of(
+				resumedActionCall, resumedActionCheck, actionDelayCall, actionDelayCheck)) {
+			block.updateCleanSuccessors();
+		}
+		mth.updateBlockPositions();
+		return true;
+	}
+
+	/**
+	 * A directly completed delay enters the body without the resume-only throwOnFailure call.
+	 * Use a local dispatch sentinel for that edge, while retaining the original invalid-label
+	 * behavior for callers whose saved state already has the sentinel value.
+	 */
+	private static void routeDirectDelayCompletionPastResumeCheck(
+			MethodNode mth, BlockNode loopDispatch, BlockNode latch) {
+		// Cloning an invalid-label throw across a protected region can change which
+		// catch handler owns that throw. Leave such methods on the existing path.
+		if (mth.getExceptionHandlersCount() != 0
+				|| loopDispatch.getPredecessors().size() != 2
+				|| loopDispatch.getSuccessors().size() != 1
+				|| loopDispatch.getInstructions().isEmpty()
+				|| !(loopDispatch.getInstructions().get(0) instanceof IndexInsnNode)
+				|| loopDispatch.getInstructions().get(0).getType() != InsnType.IGET) {
+			return;
+		}
+		BlockNode directDispatch = ListUtils.filterOnlyOne(
+				loopDispatch.getPredecessors(), pred -> pred.contains(AFlag.SYNTHETIC));
+		if (directDispatch == null || !ListUtils.isSingleElement(directDispatch.getSuccessors(), loopDispatch)) {
+			return;
+		}
+		RegisterArg stateArg = loopDispatch.getInstructions().get(0).getResult();
+		BlockNode sharedFailureCheck = ListUtils.filterOnlyOne(
+				latch.getPredecessors(), pred -> pred.getInstructions().size() == 1
+						&& containsInvoke(pred, "throwOnFailure"));
+		if (stateArg == null
+				|| sharedFailureCheck == null
+				|| sharedFailureCheck.getPredecessors().size() != 2
+				|| !ListUtils.isSingleElement(sharedFailureCheck.getSuccessors(), latch)) {
+			return;
+		}
+		BlockNode originalStateCheck = loopDispatch.getSuccessors().get(0);
+		List<BlockNode> invalidStatePath = findInvalidCoroutineStatePath(
+				mth, loopDispatch, originalStateCheck, stateArg.getRegNum(), 4);
+		if (invalidStatePath == null) {
+			return;
+		}
+		BlockNode directCheck = BlockSplitter.insertBlockBetween(mth, loopDispatch, originalStateCheck);
+		directCheck.add(AFlag.SYNTHETIC);
+		BlockSplitter.connect(directCheck, latch);
+		IfNode stateIf = new IfNode(IfOp.EQ, latch.getStartOffset(),
+				InsnArg.reg(stateArg.getRegNum(), ArgType.INT), InsnArg.lit(4, ArgType.INT));
+		directCheck.getInstructions().add(stateIf);
+		stateIf.initBlocks(directCheck);
+		InsnNode directState = new InsnNode(InsnType.CONST, 1);
+		directState.setResult(stateArg.duplicate());
+		directState.addArg(InsnArg.lit(4, ArgType.INT));
+		directDispatch.getInstructions().add(directState);
+		BlockSplitter.replaceConnection(directDispatch, loopDispatch, directCheck);
+		BlockNode initialStateGuard = BlockSplitter.insertBlockBetween(
+				mth, loopDispatch, directCheck);
+		initialStateGuard.add(AFlag.SYNTHETIC);
+		List<BlockNode> invalidStateCopies = copyBlocks(mth, invalidStatePath);
+		BlockSplitter.connect(initialStateGuard, invalidStateCopies.get(0));
+		for (int i = 1; i < invalidStateCopies.size(); i++) {
+			BlockSplitter.connect(invalidStateCopies.get(i - 1), invalidStateCopies.get(i));
+		}
+		BlockSplitter.connect(invalidStateCopies.get(invalidStateCopies.size() - 1), mth.getExitBlock());
+		IfNode initialIf = new IfNode(IfOp.EQ, invalidStateCopies.get(0).getStartOffset(),
+				InsnArg.reg(stateArg.getRegNum(), ArgType.INT), InsnArg.lit(4, ArgType.INT));
+		initialStateGuard.getInstructions().add(initialIf);
+		initialIf.initBlocks(initialStateGuard);
+		BlockNode failureCopy = copyBlock(mth, sharedFailureCheck);
+		BlockSplitter.replaceConnection(
+				sharedFailureCheck.getPredecessors().get(0), sharedFailureCheck, failureCopy);
+		BlockSplitter.connect(failureCopy, latch);
+		failureCopy.updateCleanSuccessors();
+		sharedFailureCheck.updateCleanSuccessors();
+		initialStateGuard.updateCleanSuccessors();
+		for (BlockNode invalidStateCopy : invalidStateCopies) {
+			invalidStateCopy.updateCleanSuccessors();
+		}
+		directDispatch.updateCleanSuccessors();
+		directCheck.updateCleanSuccessors();
+		loopDispatch.updateCleanSuccessors();
+		latch.updateCleanSuccessors();
+		mth.updateBlockPositions();
+	}
+
+	/** Follow the original dispatch for one candidate value and copy only a proven throw path. */
+	private static @Nullable List<BlockNode> findInvalidCoroutineStatePath(
+			MethodNode mth, BlockNode dispatch, BlockNode firstCheck, int stateReg, int invalidState) {
+		BlockNode current = firstCheck;
+		int checks = 0;
+		while (checks < 8) {
+			InsnNode lastInsn = BlockUtils.getLastInsn(current);
+			if (!(lastInsn instanceof IfNode)) {
+				break;
+			}
+			if (current.getInstructions().size() != 1) {
+				return null;
+			}
+			IfNode ifInsn = (IfNode) lastInsn;
+			if (ifInsn.getOp() != IfOp.EQ && ifInsn.getOp() != IfOp.NE) {
+				return null;
+			}
+			InsnArg firstArg = ifInsn.getArg(0);
+			InsnArg secondArg = ifInsn.getArg(1);
+			InsnArg valueArg;
+			if (firstArg instanceof RegisterArg && ((RegisterArg) firstArg).getRegNum() == stateReg) {
+				valueArg = secondArg;
+			} else if (secondArg instanceof RegisterArg && ((RegisterArg) secondArg).getRegNum() == stateReg) {
+				valueArg = firstArg;
+			} else {
+				return null;
+			}
+			Long value = resolveConstValue(dispatch, valueArg, 0);
+			if (value == null || value == invalidState) {
+				return null;
+			}
+			current = ifInsn.getOp() == IfOp.EQ ? ifInsn.getElseBlock() : ifInsn.getThenBlock();
+			if (current == null) {
+				return null;
+			}
+			checks++;
+		}
+		if (checks == 0) {
+			return null;
+		}
+		List<BlockNode> path = new ArrayList<>();
+		for (int i = 0; i < 3; i++) {
+			if (current == null || path.contains(current)) {
+				return null;
+			}
+			path.add(current);
+			InsnNode lastInsn = BlockUtils.getLastInsn(current);
+			if (lastInsn != null && lastInsn.getType() == InsnType.THROW) {
+				return ListUtils.isSingleElement(current.getSuccessors(), mth.getExitBlock()) ? path : null;
+			}
+			current = current.getSuccessors().size() == 1 ? current.getSuccessors().get(0) : null;
+		}
+		return null;
 	}
 
 	private static @Nullable BlockNode findCoroutineDelayStateDispatch(
@@ -20556,20 +24487,24 @@ public class FixMultiEntryLoops {
 				body.getPredecessors(), pred -> pred != selectedDirectEntry);
 		BlockNode resume = resumeBridge;
 		RegisterArg resumeResultArg = resume == null ? null : findThrowOnFailureArg(resume);
+		if (resumeResultArg == null && resume != null) {
+			resumeResultArg = findCoroutineFailureCheckArg(mth, resume);
+		}
 		if (resumeResultArg == null
 				&& resumeBridge != null
 				&& resumeBridge.getPredecessors().size() == 1
 				&& isMoveOnlyResumeTail(resumeBridge)) {
 			resume = resumeBridge.getPredecessors().get(0);
-			resumeResultArg = findThrowOnFailureArg(resume);
+			resumeResultArg = findCoroutineFailureCheckArg(mth, resume);
 		}
-		if (resumeResultArg == null || !containsInvoke(resume, "throwOnFailure")) {
+		if (resumeResultArg == null || !isCoroutineFailureCheckBlock(mth, resume)) {
 			return false;
 		}
 		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
-		InvokeNode awaitInvoke = findResultInvoke(suspendCall, "awaitPointerEvent");
+		InvokeNode awaitInvoke = findLastResultInvoke(suspendCall);
 		IndexInsnNode labelPut = findLabelPut(suspendCall);
-		if (awaitInvoke == null || awaitInvoke.getResult() == null
+		if (awaitInvoke == null || !isAwaitPointerEventInvoke(awaitInvoke)
+				|| awaitInvoke.getResult() == null
 				|| labelPut == null || !(labelPut.getIndex() instanceof FieldInfo)
 				|| labelPut.getArgsCount() != 2
 				|| !isPathExists(body, suspendCheck)) {
@@ -20657,9 +24592,8 @@ public class FixMultiEntryLoops {
 					|| suspendCheck.getPredecessors().size() != 1
 					|| suspendCheck.getSuccessors().size() != 2
 					|| body.getPredecessors().size() != 2
-					|| findResultInvoke(
-							suspendCheck.getPredecessors().get(0),
-							"awaitPointerEvent") == null
+					|| !isAwaitPointerEventSuspendCall(
+							suspendCheck.getPredecessors().get(0))
 					|| !isPathExists(body, suspendCheck)) {
 				continue;
 			}
@@ -20671,6 +24605,11 @@ public class FixMultiEntryLoops {
 			result = candidate;
 		}
 		return result;
+	}
+
+	private static boolean isAwaitPointerEventSuspendCall(BlockNode block) {
+		InvokeNode invoke = findLastResultInvoke(block);
+		return invoke != null && isAwaitPointerEventInvoke(invoke);
 	}
 
 	private static final class AwaitPointerDirectMoveJoin {
@@ -20810,7 +24749,11 @@ public class FixMultiEntryLoops {
 		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
 		Set<BlockNode> visited = new HashSet<>();
 		queue.add(resume);
-		while (!queue.isEmpty() && visited.size() < 8) {
+		// Try-protected lowered suspend methods can place a full if-chain and synthetic
+		// exception splitters between the resume block and the label load. The field
+		// identity keeps this search exact; the larger bound only admits those longer
+		// compiler-generated chains.
+		while (!queue.isEmpty() && visited.size() < 16) {
 			BlockNode block = queue.removeFirst();
 			if (!visited.add(block)) {
 				continue;
@@ -20847,10 +24790,21 @@ public class FixMultiEntryLoops {
 
 	private static boolean isPurePointerEventStateDispatch(BlockNode block) {
 		for (InsnNode insn : block.getInstructions()) {
+			if (insn.contains(AFlag.DONT_GENERATE)) {
+				continue;
+			}
 			switch (insn.getType()) {
 				case IGET:
 				case CONST:
 				case MOVE:
+					break;
+				case SGET:
+					if (!(insn instanceof IndexInsnNode)
+							|| !(((IndexInsnNode) insn).getIndex() instanceof FieldInfo)
+							|| !isCoroutineSuspendedSingletonField(
+									(FieldInfo) ((IndexInsnNode) insn).getIndex())) {
+						return false;
+					}
 					break;
 				case CHECK_CAST:
 					if (!(insn instanceof IndexInsnNode)
@@ -21026,6 +24980,48 @@ public class FixMultiEntryLoops {
 					&& ((InvokeNode) insn).getCallMth().getName().contains(namePart)) {
 				return (InvokeNode) insn;
 			}
+		}
+		return null;
+	}
+
+	private static @Nullable ResumeStateBranch findCoroutineRetryResumeStateBranch(
+			MethodNode mth,
+			BlockNode resume,
+			@Nullable CoroutineStateEntry stateEntry) {
+		BlockNode block = resume;
+		Set<BlockNode> visited = new HashSet<>();
+		for (int depth = 0; depth <= 5 && block != null && visited.add(block); depth++) {
+			ResumeStateBranch stateBranch = findResumeStateBranch(block, stateEntry);
+			if (stateBranch != null) {
+				return stateBranch;
+			}
+			if (block.getPredecessors().size() != 1) {
+				return null;
+			}
+			BlockNode predecessor = block.getPredecessors().get(0);
+			if (BlockUtils.isExceptionHandlerPath(predecessor)) {
+				return null;
+			}
+			if (predecessor.getInstructions().isEmpty()) {
+				if (!predecessor.contains(AFlag.EXC_TOP_SPLITTER)) {
+					return null;
+				}
+			} else if (!isCoroutineFailureCheckBlock(mth, predecessor)
+					&& predecessor.getInstructions().stream().anyMatch(insn -> {
+						switch (insn.getType()) {
+							case IGET:
+							case SGET:
+							case CHECK_CAST:
+							case MOVE:
+							case CONST:
+								return false;
+							default:
+								return true;
+						}
+					})) {
+				return null;
+			}
+			block = predecessor;
 		}
 		return null;
 	}
@@ -21218,6 +25214,15 @@ public class FixMultiEntryLoops {
 				suspendInvoke.getResult(),
 				resumeResultArg,
 				stateBranch.stateKey);
+		if (canRetryThroughEntryStateDispatch(mth, completion, resultJoin, suspendInvoke)) {
+			boolean normalized = normalizeCompletionThroughCustomRestore(
+					mth, completion, stateDispatch, CoroutineDirectPathMode.REUSE,
+					null, "Normalize retry completion through entry state dispatch");
+			if (normalized) {
+				mth.addAttr(CoroutineRetryCatchDispatchAttr.INSTANCE);
+				return true;
+			}
+		}
 		TypedRestorePath restorePath =
 				findTryTypedRestorePath(mth, completion, resultJoin, true);
 		boolean extendedBridge = directBridge.getInstructions().size() > 4
@@ -21274,6 +25279,46 @@ public class FixMultiEntryLoops {
 				continuationMove,
 				"Normalize coroutine direct bridge through typed restore: "
 						+ restorePath.restoreEntry);
+	}
+
+	/** Re-enter a pure label dispatcher when a shared retry handler also reaches the next request. */
+	private static boolean canRetryThroughEntryStateDispatch(
+			MethodNode mth, CoroutineSuspendCompletion completion,
+			BlockNode requestPrep, InvokeNode suspendInvoke) {
+		BlockNode dispatch = completion.stateDispatch;
+		BlockNode directBridge = completion.directSuccess;
+		if (mth.getExceptionHandlersCount() != 1
+				|| suspendInvoke.get(AType.EXC_CATCH) != null
+				|| directBridge.getInstructions().size() != 1
+				|| directBridge.getInstructions().get(0).getType() != InsnType.MOVE
+				|| !canDispatchDirectCompletionByLabel(completion)
+				|| !ListUtils.isSingleElement(dispatch.getPredecessors(), mth.getEnterBlock())
+				|| requestPrep.getSuccessors().size() != 1) {
+			return false;
+		}
+		BlockNode protectedCall = requestPrep.getSuccessors().get(0);
+		InsnNode requestInvoke = BlockUtils.getFirstInsn(protectedCall);
+		ExceptionHandler handler = mth.getExceptionHandlers().iterator().next();
+		if (!(requestInvoke instanceof InvokeNode)
+				|| requestInvoke.get(AType.EXC_CATCH) == null
+				|| !isPathExists(handler.getHandlerBlock(), protectedCall)
+				|| !isPathExists(handler.getHandlerBlock(), completion.suspendCheck)) {
+			return false;
+		}
+		InsnNode labelGet = findLabelGet(dispatch, completion.labelField);
+		if (labelGet == null) {
+			return false;
+		}
+		boolean suspendedMarker = false;
+		for (InsnNode insn : dispatch.getInstructions()) {
+			if (isCoroutineSuspendedMarkerGet(insn)) {
+				suspendedMarker = true;
+			} else if (insn.getType() != InsnType.CONST
+					&& insn != labelGet) {
+				return false;
+			}
+		}
+		return suspendedMarker;
 	}
 
 	/**
@@ -21485,7 +25530,7 @@ public class FixMultiEntryLoops {
 		}
 		BlockNode resumeTail = ListUtils.filterOnlyOne(
 				resultJoin.getPredecessors(), predecessor -> predecessor != directBridge);
-		BlockNode resumeEntry = findThrowOnFailurePredecessor(resumeTail, 2);
+		BlockNode resumeEntry = findThrowOnFailurePredecessor(mth, resumeTail, 2);
 		if (resumeEntry == null) {
 			return false;
 		}
@@ -21582,10 +25627,11 @@ public class FixMultiEntryLoops {
 	}
 
 	private static @Nullable BlockNode findThrowOnFailurePredecessor(
-			@Nullable BlockNode tail, int maxDepth) {
+			MethodNode mth, @Nullable BlockNode tail, int maxDepth) {
 		BlockNode block = tail;
 		for (int depth = 0; depth <= maxDepth && block != null; depth++) {
-			if (containsInvoke(block, "throwOnFailure")) {
+			if (containsInvoke(block, "throwOnFailure")
+					|| findRepeatedObfuscatedFailureCheckArg(mth, block) != null) {
 				return block;
 			}
 			if (block.getPredecessors().size() != 1
@@ -21722,7 +25768,7 @@ public class FixMultiEntryLoops {
 		}
 		BlockNode resumeTail = ListUtils.filterOnlyOne(
 				completionJoin.getPredecessors(), predecessor -> predecessor != directBridge);
-		BlockNode resume = findThrowOnFailurePredecessor(resumeTail, 3);
+		BlockNode resume = findThrowOnFailurePredecessor(mth, resumeTail, 3);
 		if (resumeTail == null
 				|| resume == null
 				|| !isShortNormalLinearPath(resume, resumeTail, 3)
@@ -23148,6 +27194,82 @@ public class FixMultiEntryLoops {
 	}
 
 	/**
+	 * A channel consumer can have a single suspend state at the iterator predicate while its loop
+	 * body is synchronous. Direct predicate completion enters the body from inside the protected
+	 * loop, whereas label-state resume enters through the dispatcher. Route only that direct value
+	 * through state 1 after proving the iterator ABI, the complete protected loop and its channel
+	 * cleanup path.
+	 */
+	private static boolean normalizeTryProtectedSingleIteratorPredicateCompletion(
+			MethodNode mth, List<SpecialEdgeAttr> multiEntryLoops) {
+		if (!isCoroutineStateMachineBody(mth)
+				|| multiEntryLoops.size() != 1
+				|| mth.getExceptionHandlersCount() < 1
+				|| mth.getExceptionHandlersCount() > 2) {
+			return false;
+		}
+		BlockNode suspendCheck = ListUtils.filterOnlyOne(
+				mth.getBasicBlocks(), FixMultiEntryLoops::isLabeledSuspendCheck);
+		if (suspendCheck == null || suspendCheck.getPredecessors().size() != 1) {
+			return false;
+		}
+		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
+		InvokeNode suspendInvoke = findLastResultInvoke(suspendCall);
+		if (suspendInvoke == null
+				|| !isChannelIteratorSuspendPredicateInvoke(suspendInvoke)
+				|| suspendCall.get(AType.TRY_BLOCK) == null) {
+			return false;
+		}
+		List<BlockNode> resumeBlocks = mth.getBasicBlocks().stream()
+				.filter(block -> isCoroutineFailureCheckBlock(mth, block))
+				.collect(Collectors.toList());
+		CoroutineSuspendCompletion completion =
+				findSmallIfChainCoroutineSuspendCompletion(
+						mth, suspendCheck, resumeBlocks, true);
+		if (completion == null) {
+			completion = findSingleCoroutineSuspendCompletion(mth, suspendCheck);
+		}
+		if (completion == null
+				|| completion.stateKey != 1
+				|| completion.directSuccess.get(AType.TRY_BLOCK)
+						!= suspendCall.get(AType.TRY_BLOCK)
+				|| !completion.directSuccess.getPredecessors().contains(suspendCheck)
+				|| !isPathExists(completion.directSuccess, suspendCall)) {
+			return false;
+		}
+		long nextCount = mth.getBasicBlocks().stream()
+				.flatMap(block -> block.getInstructions().stream())
+				.filter(InvokeNode.class::isInstance)
+				.map(InvokeNode.class::cast)
+				.filter(invoke -> invoke.getCallMth().getDeclClass().getFullName()
+						.equals("kotlinx.coroutines.channels.ChannelIterator")
+						&& invoke.getCallMth().getName().equals("next"))
+				.count();
+		long cleanupCount = mth.getBasicBlocks().stream()
+				.flatMap(block -> block.getInstructions().stream())
+				.filter(InvokeNode.class::isInstance)
+				.map(InvokeNode.class::cast)
+				.filter(FixMultiEntryLoops::isChannelConsumeCleanupInvoke)
+				.count();
+		SpecialEdgeAttr edge = multiEntryLoops.get(0);
+		if (nextCount != 1
+				|| cleanupCount < 1
+				|| cleanupCount > 2
+				|| !isPathExists(completion.directSuccess, edge.getStart())
+				|| !isPathExists(edge.getEnd(), suspendCall)) {
+			return false;
+		}
+		return normalizeDirectCompletionsThroughStateDispatch(
+				mth,
+				List.of(completion),
+				CoroutineResultTransport.REGISTER,
+				false,
+				true,
+				"Normalize try-protected single iterator predicate completion"
+						+ " through state dispatch");
+	}
+
+	/**
 	 * A suspend function can iterate a collection and invoke one suspendable action for every
 	 * element. Immediate completion enters the post-action tail directly, while label-state resume
 	 * restores the spilled iterator and element before entering the same tail. DFS then reports the
@@ -23194,6 +27316,133 @@ public class FixMultiEntryLoops {
 		}
 		return splitSingleSuspendIteratorResumeTail(
 				mth, completion, reportedEdge);
+	}
+
+	/**
+	 * A named iterator coroutine can resume in the middle of one protected result decision. The
+	 * direct await path and resume path share the throwing result block and a single catch handler;
+	 * both then reach the same remove-or-continue decision. Split the resume-only decision and catch
+	 * before exception processing so the source iterator loop has no external label-state entry.
+	 */
+	private static boolean normalizeSingleCatchIteratorAwaitResumeBeforeExceptionHandlers(MethodNode mth) {
+		if (mth.getExceptionHandlersCount() != 1
+				|| !mth.referencesMethodNamed("await")
+				|| !mth.referencesMethodNamed("isCompleted")
+				|| !mth.referencesMethodNamed("isCancelled")) {
+			return false;
+		}
+		for (BlockNode suspendCheck : mth.getBasicBlocks()) {
+			if (!isLabeledSuspendCheck(suspendCheck)
+					|| suspendCheck.getPredecessors().size() != 1
+					|| !containsInvoke(suspendCheck.getPredecessors().get(0), "await")) {
+				continue;
+			}
+			BlockNode suspendedExit = ListUtils.filterOnlyOne(suspendCheck.getSuccessors(),
+					block -> reachesExitOnLinearPath(block, 2));
+			BlockNode resultStart = ListUtils.filterOnlyOne(suspendCheck.getSuccessors(),
+					block -> block != suspendedExit);
+			if (suspendedExit == null || resultStart == null || resultStart.getPredecessors().size() != 2
+					|| resultStart.getSuccessors().size() != 1) {
+				continue;
+			}
+			BlockNode resumeEntry = ListUtils.filterOnlyOne(resultStart.getPredecessors(),
+					block -> block != suspendCheck && containsInvoke(block, "throwOnFailure"));
+			ExceptionHandler handler = findOnlyCatchHandler(resultStart);
+			BlockNode handlerEntry = handler == null ? null : findHandlerEntry(mth, handler);
+			BlockNode resultGuard = resultStart.getSuccessors().get(0);
+			if (resumeEntry == null || handlerEntry == null || resultGuard.getPredecessors().size() != 1
+					|| !(BlockUtils.getLastInsn(resultGuard) instanceof IfNode)
+					|| resultGuard.getSuccessors().size() != 2
+					|| handlerEntry.getSuccessors().size() != 1) {
+				continue;
+			}
+			BlockNode falseResult = ListUtils.filterOnlyOne(resultGuard.getSuccessors(),
+					block -> block.getPredecessors().size() == 2
+							&& block.getInstructions().stream().anyMatch(
+									insn -> insn.getType() == InsnType.CONST && insn.getArg(0).isZeroLiteral())
+							&& block.getInstructions().stream().allMatch(
+									insn -> insn.getType() == InsnType.CONST || insn.getType() == InsnType.GOTO));
+			BlockNode trueResult = falseResult == null ? null : ListUtils.filterOnlyOne(
+					resultGuard.getSuccessors(), block -> block != falseResult);
+			BlockNode incompleteGuard = falseResult == null ? null : ListUtils.filterOnlyOne(
+					falseResult.getPredecessors(), block -> block != resultGuard);
+			BlockNode handlerValue = handlerEntry.getSuccessors().get(0);
+			if (falseResult == null || trueResult == null || incompleteGuard == null
+					|| falseResult.getSuccessors().size() != 1 || trueResult.getSuccessors().size() != 1
+					|| handlerValue.getSuccessors().size() != 1
+					|| falseResult.getSuccessors().get(0) != trueResult.getSuccessors().get(0)
+					|| falseResult.getSuccessors().get(0) != handlerValue.getSuccessors().get(0)) {
+				continue;
+			}
+			BlockNode removeDecision = falseResult.getSuccessors().get(0);
+			if (!(BlockUtils.getLastInsn(removeDecision) instanceof IfNode)
+					|| removeDecision.getPredecessors().size() != 3
+					|| removeDecision.getSuccessors().size() != 2) {
+				continue;
+			}
+			BlockNode removal = ListUtils.filterOnlyOne(removeDecision.getSuccessors(),
+					block -> containsInvoke(block, "remove") && block.getSuccessors().size() == 1);
+			BlockNode loopHeader = ListUtils.filterOnlyOne(removeDecision.getSuccessors(),
+					block -> block != removal && containsInvoke(block, "hasNext"));
+			BlockNode initialEntry = loopHeader == null ? null : ListUtils.filterOnlyOne(
+					loopHeader.getPredecessors(), block -> block != removeDecision && block != removal);
+			if (removal == null || loopHeader == null || initialEntry == null
+					|| !ListUtils.isSingleElement(removal.getSuccessors(), loopHeader)
+					|| !ListUtils.isSingleElement(initialEntry.getSuccessors(), loopHeader)
+					|| findOnlyCatchHandler(suspendCheck.getPredecessors().get(0)) != handler
+					|| findOnlyCatchHandler(resultStart) != handler) {
+				continue;
+			}
+			BlockNode loopPreHeader = BlockSplitter.insertBlockBetween(mth, initialEntry, loopHeader);
+			loopPreHeader.add(AFlag.SYNTHETIC);
+			Map<BlockNode, BlockNode> copies = copyPlainSubgraph(mth,
+					List.of(resultStart, resultGuard, falseResult, trueResult, removeDecision, removal, handlerValue));
+			int handlerOffset = -3000 - mth.getExceptionHandlersCount();
+			ExceptionHandler resumeHandler = ExceptionHandler.build(mth, handlerOffset,
+					handler.isCatchAll() ? null : handler.getCatchTypes().get(0));
+			if (!handler.isCatchAll()) {
+				resumeHandler.addCatchTypes(mth, handler.getCatchTypes());
+			}
+			mth.addExceptionHandler(resumeHandler);
+			BlockNode handlerCopy = copySyntheticBlock(mth, handlerEntry, handlerOffset);
+			prepareHandlerEntryCopy(handlerCopy, resumeHandler);
+			for (BlockNode copy : copies.values()) {
+				replaceCatchHandler(copy, handler, resumeHandler);
+			}
+			BlockNode resultCopy = copies.get(resultStart);
+			BlockSplitter.replaceConnection(resumeEntry, resultStart, resultCopy);
+			BlockSplitter.connect(resultCopy, copies.get(resultGuard));
+			BlockSplitter.connect(resultCopy, handlerCopy);
+			handlerCopy.addAttr(new TmpEdgeAttr(resultCopy));
+			for (BlockNode branch : resultGuard.getSuccessors()) {
+				BlockSplitter.connect(copies.get(resultGuard), copies.get(branch));
+			}
+			BlockSplitter.connect(copies.get(falseResult), copies.get(removeDecision));
+			BlockSplitter.connect(copies.get(trueResult), copies.get(removeDecision));
+			BlockSplitter.connect(handlerCopy, copies.get(handlerValue));
+			BlockSplitter.connect(copies.get(handlerValue), copies.get(removeDecision));
+			BlockSplitter.connect(copies.get(removeDecision), loopPreHeader);
+			BlockSplitter.connect(copies.get(removeDecision), copies.get(removal));
+			BlockSplitter.connect(copies.get(removal), loopPreHeader);
+			BlockSplitter.connect(loopPreHeader, loopHeader);
+			BlockNode directFalseCopy = copyBlock(mth, falseResult);
+			directFalseCopy.remove(AType.PHI_LIST);
+			BlockSplitter.replaceConnection(resultGuard, falseResult, directFalseCopy);
+			BlockSplitter.connect(directFalseCopy, removeDecision);
+			directFalseCopy.updateCleanSuccessors();
+			for (BlockNode copy : copies.values()) {
+				initIfBlocks(copy);
+				copy.updateCleanSuccessors();
+			}
+			handlerCopy.updateCleanSuccessors();
+			resumeEntry.updateCleanSuccessors();
+			loopPreHeader.updateCleanSuccessors();
+			mth.addAttr(new CoroutineLoopPreHeaderAttr(loopPreHeader));
+			mth.addAttr(NormalizedCoroutineLoopAttr.INSTANCE);
+			mth.addDebugComment("Split single-catch iterator await resume tail before loop: " + loopHeader);
+			return true;
+		}
+		return false;
 	}
 
 	/**
@@ -23380,9 +27629,6 @@ public class FixMultiEntryLoops {
 		}
 		suspendedExitCopies.get(suspendedExitCopies.size() - 1).updateCleanSuccessors();
 		exitEdgeSource.updateCleanSuccessors();
-		if (exitEdgeSource == suspendCheck) {
-			initIfBlocks(suspendCheck);
-		}
 	}
 
 	/**
@@ -23762,7 +28008,6 @@ public class FixMultiEntryLoops {
 			copies = copyBlocks(mth, resultTail);
 			BlockSplitter.replaceConnection(
 					resumeTail, resultJoin, copies.get(0));
-			initIfBlocks(resumeTail);
 			resumeTail.updateCleanSuccessors();
 			connectLinearCopies(copies, loopPreHeader);
 			loopPreHeader.updateCleanSuccessors();
@@ -25331,12 +29576,9 @@ public class FixMultiEntryLoops {
 	private static boolean normalizeChannelFrameLoopReentriesThroughStateDispatch(
 			MethodNode mth, SpecialEdgeAttr backEdge) {
 		if (!isCoroutineMethod(mth)
-				|| !mth.getName().equals("invokeSuspend")
+				|| !isCoroutineStateMachineBody(mth)
 				|| mth.getExceptionHandlersCount() != 0
-				|| mth.getBasicBlocks().size() > 40
-				|| !mth.referencesMethodNamed("receive")
-				|| !mth.referencesMethodNamed("withFrameMillis")
-				|| !mth.referencesMethodNamed("updateContent")) {
+				|| mth.getBasicBlocks().size() > 40) {
 			return false;
 		}
 		BlockNode loopReentry = backEdge.getStart();
@@ -25349,13 +29591,20 @@ public class FixMultiEntryLoops {
 			return false;
 		}
 		List<IndexInsnNode> labelPuts = new ArrayList<>(2);
+		boolean hasChannelReceive = false;
+		boolean hasFrameAwait = false;
 		for (BlockNode block : mth.getBasicBlocks()) {
 			IndexInsnNode labelPut = findLabelPut(block);
 			if (labelPut != null) {
 				labelPuts.add(labelPut);
+				InvokeNode suspendInvoke = findLastResultInvoke(block);
+				hasChannelReceive |= isChannelReceiveSuspendInvoke(suspendInvoke);
+				hasFrameAwait |= isComposeFrameSuspendInvoke(suspendInvoke);
 			}
 		}
 		if (labelPuts.size() != 2
+				|| !hasChannelReceive
+				|| !hasFrameAwait
 				|| !(labelPuts.get(0).getIndex() instanceof FieldInfo)
 				|| !labelPuts.get(0).getIndex().equals(labelPuts.get(1).getIndex())) {
 			return false;
@@ -25378,7 +29627,7 @@ public class FixMultiEntryLoops {
 		FieldInfo labelField = (FieldInfo) labelPuts.get(0).getIndex();
 		BlockNode stateZeroEntry = ListUtils.filterOnlyOne(
 				receiveHeader.getPredecessors(),
-				pred -> containsInvoke(pred, "throwOnFailure"));
+				pred -> isCoroutineFailureCheckBlock(mth, pred));
 		BlockNode stateDispatch = stateZeroEntry == null
 				? null
 				: findCoroutineStateDispatch(stateZeroEntry, labelField);
@@ -25398,9 +29647,10 @@ public class FixMultiEntryLoops {
 				|| !reentries.contains(loopReentry)
 				|| reentries.stream().anyMatch(pred -> !pred.getSuccessors().contains(receiveHeader)
 						|| BlockUtils.isExceptionHandlerPath(pred))
-				|| reentries.stream().noneMatch(pred -> containsInvoke(pred, "updateContent"))
+				|| reentries.stream().filter(
+						FixMultiEntryLoops::containsNoArgVoidInstanceInvoke).count() != 1
 				|| mth.getBasicBlocks().stream()
-						.filter(block -> containsInvoke(block, "throwOnFailure"))
+						.filter(block -> isCoroutineFailureCheckBlock(mth, block))
 						.count() != 3) {
 			return false;
 		}
@@ -25427,6 +29677,45 @@ public class FixMultiEntryLoops {
 				"Normalize channel/frame iteration reentries through state dispatch: "
 						+ stateDispatch);
 		return true;
+	}
+
+	private static boolean isChannelReceiveSuspendInvoke(@Nullable InvokeNode invoke) {
+		if (invoke == null
+				|| !invoke.getCallMth().getDeclClass().getFullName()
+						.equals("kotlinx.coroutines.channels.ReceiveChannel")
+				|| !ArgType.OBJECT.equals(invoke.getCallMth().getReturnType())) {
+			return false;
+		}
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		return argTypes.size() == 1
+				&& argTypes.get(0).isObject()
+				&& argTypes.get(0).getObject().equals("kotlin.coroutines.Continuation");
+	}
+
+	private static boolean isComposeFrameSuspendInvoke(@Nullable InvokeNode invoke) {
+		if (invoke == null
+				|| !ArgType.OBJECT.equals(invoke.getCallMth().getReturnType())) {
+			return false;
+		}
+		String owner = invoke.getCallMth().getDeclClass().getFullName();
+		if (!owner.equals("androidx.compose.runtime.MonotonicFrameClock")
+				&& !owner.equals("androidx.compose.runtime.MonotonicFrameClockKt")) {
+			return false;
+		}
+		List<ArgType> argTypes = invoke.getCallMth().getArgumentsTypes();
+		return argTypes.stream().anyMatch(type -> type.isObject()
+				&& type.getObject().equals("kotlin.coroutines.Continuation"))
+				&& argTypes.stream().anyMatch(type -> type.isObject()
+						&& type.getObject().equals("kotlin.jvm.functions.Function1"));
+	}
+
+	private static boolean containsNoArgVoidInstanceInvoke(BlockNode block) {
+		return block.getInstructions().stream()
+				.filter(InvokeNode.class::isInstance)
+				.map(InvokeNode.class::cast)
+				.anyMatch(invoke -> invoke.getArgsCount() == 1
+						&& invoke.getCallMth().getArgumentsTypes().isEmpty()
+						&& ArgType.VOID.equals(invoke.getCallMth().getReturnType()));
 	}
 
 	/**
@@ -26085,6 +30374,22 @@ public class FixMultiEntryLoops {
 		return false;
 	}
 
+	private static boolean containsChannelIteratorSuspendPredicateOnCleanLinearPath(
+			BlockNode start, int maxDepth) {
+		BlockNode block = start;
+		for (int depth = 0; depth <= maxDepth && block != null; depth++) {
+			if (containsInvoke(block, "hasNext")
+					|| containsChannelIteratorSuspendPredicateInvoke(block)) {
+				return true;
+			}
+			block.updateCleanSuccessors();
+			block = block.getCleanSuccessors().size() == 1
+					? block.getCleanSuccessors().get(0)
+					: null;
+		}
+		return false;
+	}
+
 	/**
 	 * A Boolean-returning suspend call can share both result unboxing and its loop condition
 	 * between direct and resumed completion. Clone that pure projection/branch pair on the direct
@@ -26462,26 +30767,41 @@ public class FixMultiEntryLoops {
 		if (!isCoroutineMethod(mth)) {
 			return false;
 		}
-		CoroutineSuspendCompletion completion =
-				findCoroutineRetryResultCompletion(backEdge);
-		if (completion == null) {
+		CoroutineRetryLoopPlan plan =
+				findCoroutineRetryResultCompletion(mth, backEdge);
+		if (plan == null) {
+			return false;
+		}
+		return applyCoroutineRetryLoopPlan(mth, plan);
+	}
+
+	private static boolean applyCoroutineRetryLoopPlan(
+			MethodNode mth, CoroutineRetryLoopPlan plan) {
+		CoroutineSuspendCompletion delay = plan.delayCompletion;
+		if (!delay.directSuccess.getSuccessors().contains(plan.loopEntry)
+				|| !delay.resumeEntry.getSuccessors().contains(plan.loopEntry)) {
 			return false;
 		}
 		InsnNode resumeResultMove = new InsnNode(InsnType.MOVE, 1);
-		resumeResultMove.setResult(completion.resumeResultArg.duplicate());
-		resumeResultMove.addArg(completion.directResultArg.duplicate());
-		return normalizeCompletionThroughCustomResultTransport(
+		resumeResultMove.setResult(delay.resumeResultArg.duplicate());
+		resumeResultMove.addArg(delay.directResultArg.duplicate());
+		boolean normalized = normalizeCompletionThroughCustomResultTransport(
 				mth,
-				completion,
-				completion.stateDispatch,
+				delay,
+				delay.stateDispatch,
 				CoroutineDirectPathMode.REUSE,
 				resumeResultMove,
-				"Normalize single coroutine retry result join at state dispatch: "
-						+ completion.stateDispatch);
+				"Normalize coroutine retry completion through state dispatch: "
+						+ delay.stateDispatch);
+		if (normalized) {
+			mth.addAttr(new CoroutineRetryResultJoinAttr(
+					plan.requestEntry, plan.requestResultJoin));
+		}
+		return normalized;
 	}
 
-	private static @Nullable CoroutineSuspendCompletion findCoroutineRetryResultCompletion(
-			SpecialEdgeAttr backEdge) {
+	private static @Nullable CoroutineRetryLoopPlan findCoroutineRetryResultCompletion(
+			MethodNode mth, SpecialEdgeAttr backEdge) {
 		BlockNode loopEntry = backEdge.getEnd();
 		BlockNode directResultBridge = backEdge.getStart();
 		if (!isSimpleRetryEntry(loopEntry)
@@ -26498,7 +30818,7 @@ public class FixMultiEntryLoops {
 			return null;
 		}
 		BlockNode retryResume = ListUtils.filterOnlyOne(loopEntry.getPredecessors(),
-				pred -> pred != directResultBridge && isCoroutineResumeBlock(pred));
+				pred -> pred != directResultBridge && isCoroutineResumeRestoreBlock(mth, pred));
 		if (retryResume == null) {
 			return null;
 		}
@@ -26520,22 +30840,22 @@ public class FixMultiEntryLoops {
 			return null;
 		}
 		for (BlockNode resultJoin : suspendCheck.getSuccessors()) {
-			InvokeNode delayInvoke = findInvokeOnPath(resultJoin, backEdge.getStart(), "delay");
 			if (resultJoin.getPredecessors().size() != 2
 					|| resultJoin.getSuccessors().size() != 1
-					|| !isPathExists(resultJoin, backEdge.getStart())
-					|| delayInvoke == null
-					|| delayInvoke.getResult() == null) {
+					|| !isPathExists(resultJoin, backEdge.getStart())) {
 				continue;
 			}
 			BlockNode suspendedReturn = ListUtils.filterOnlyOne(suspendCheck.getSuccessors(), block -> block != resultJoin);
 			BlockNode resume = ListUtils.filterOnlyOne(resultJoin.getPredecessors(), pred -> pred != suspendCheck);
-			if (suspendedReturn == null || !suspendedReturn.isReturnBlock()
-					|| resume == null || !isCoroutineResumeBlock(resume)) {
+			if (suspendedReturn == null || !reachesExitOnLinearPath(suspendedReturn, 2)
+					|| resume == null
+					|| !(isCoroutineResumeBlock(resume)
+							|| isCoroutineResumeMoveBridgeAfterTryTail(mth, resume))) {
 				continue;
 			}
 			CoroutineStateEntry stateEntry = findCoroutineStateEntry(resume);
-			ResumeStateBranch stateBranch = findResumeStateBranch(resume, stateEntry);
+			ResumeStateBranch stateBranch = findCoroutineRetryResumeStateBranch(
+					mth, resume, stateEntry);
 			if (stateBranch == null
 					|| labelPut.getArgsCount() != 2
 					|| !(labelPut.getArg(0) instanceof RegisterArg)) {
@@ -26544,8 +30864,47 @@ public class FixMultiEntryLoops {
 			FieldInfo labelField = (FieldInfo) labelPut.getIndex();
 			BlockNode stateDispatch = findCoroutineStateDispatch(stateBranch.dispatchBlock,
 					labelField);
-			if (stateDispatch != null) {
-				return new CoroutineSuspendCompletion(
+			InvokeNode delayInvoke = findInvokeOnPath(resultJoin, backEdge.getStart(), "delay");
+			if (delayInvoke == null
+					&& labelPut.getArg(1) instanceof RegisterArg) {
+				CoroutineStateEntry delayStateEntry = findCoroutineStateEntry(retryResume);
+				ResumeStateBranch delayStateBranch = findCoroutineRetryResumeStateBranch(
+						mth, retryResume, delayStateEntry);
+				if (delayStateBranch != null
+						&& delayStateBranch.stateKey != stateBranch.stateKey
+						&& findCoroutineStateDispatch(
+								delayStateBranch.dispatchBlock, labelField) == stateDispatch) {
+					delayInvoke = findIndirectCoroutineRetryDelayInvoke(
+							delaySuspendCheck,
+							labelField,
+							((RegisterArg) labelPut.getArg(1)).getRegNum(),
+							delayStateBranch.stateKey);
+				}
+			}
+			if (stateDispatch != null
+					&& delayInvoke != null
+					&& delayInvoke.getResult() != null) {
+				BlockNode requestEntry = findCoroutineRetryRequestEntry(
+						loopEntry, suspendCall, directResultBridge, retryResume);
+				BlockNode retryInput = requestEntry == null || requestEntry == loopEntry
+						? null
+						: findLinearPredecessorFrom(loopEntry, requestEntry);
+				List<BlockNode> excludedInputs = requestEntry == loopEntry
+						? List.of(directResultBridge, retryResume)
+						: retryInput == null ? List.of() : List.of(retryInput);
+				if (requestEntry == null
+						|| excludedInputs.isEmpty()
+						|| !resume.getSuccessors().contains(resultJoin)) {
+					continue;
+				}
+				List<BlockNode> initialPredecessors = requestEntry.getPredecessors().stream()
+						.filter(pred -> !excludedInputs.contains(pred))
+						.toList();
+				if (initialPredecessors.isEmpty()
+						|| initialPredecessors.stream().anyMatch(BlockUtils::isExceptionHandlerPath)) {
+					continue;
+				}
+				CoroutineSuspendCompletion delayCompletion = new CoroutineSuspendCompletion(
 						delaySuspendCheck,
 						directResultBridge,
 						retryResume,
@@ -26555,9 +30914,106 @@ public class FixMultiEntryLoops {
 						delayInvoke.getResult(),
 						resumeResultArg,
 						stateBranch.stateKey);
+				return new CoroutineRetryLoopPlan(
+						delayCompletion,
+						loopEntry,
+						requestEntry,
+						resultJoin,
+						resume,
+						initialPredecessors);
 			}
 		}
 		return null;
+	}
+
+	private static @Nullable BlockNode findCoroutineRetryRequestEntry(
+			BlockNode loopEntry,
+			BlockNode suspendCall,
+			BlockNode directResultBridge,
+			BlockNode retryResume) {
+		BlockNode block = loopEntry;
+		BlockNode predecessor = null;
+		Set<BlockNode> visited = new HashSet<>();
+		for (int depth = 0; depth <= 12 && block != null && visited.add(block); depth++) {
+			BlockNode current = block;
+			BlockNode expectedPredecessor = predecessor;
+			boolean hasInitialInput = current.getPredecessors().stream().anyMatch(pred -> {
+				if (current == loopEntry) {
+					return pred != directResultBridge && pred != retryResume;
+				}
+				return pred != expectedPredecessor;
+			});
+			if (hasInitialInput) {
+				return isPathExists(current, suspendCall) ? current : null;
+			}
+			if (current == suspendCall || current.getCleanSuccessors().size() != 1) {
+				return null;
+			}
+			predecessor = current;
+			block = current.getCleanSuccessors().get(0);
+		}
+		return null;
+	}
+
+	private static @Nullable BlockNode findLinearPredecessorFrom(
+			BlockNode start, BlockNode target) {
+		BlockNode block = start;
+		Set<BlockNode> visited = new HashSet<>();
+		while (block != target && visited.size() <= 12 && visited.add(block)) {
+			if (block.getCleanSuccessors().size() != 1) {
+				return null;
+			}
+			BlockNode next = block.getCleanSuccessors().get(0);
+			if (next == target) {
+				return block;
+			}
+			block = next;
+		}
+		return null;
+	}
+
+	/**
+	 * Retry plugins commonly inject their delay implementation as a
+	 * {@code Function2<Long, Continuation, Object>}. Type erasure then hides both the delay name and
+	 * the continuation parameter from the call signature. Recognize that form only when the call is
+	 * the producer immediately before the suspended-marker check and its continuation, label field,
+	 * and state key all agree with the resume branch. These constraints avoid treating an arbitrary
+	 * callback in the retry body as the suspending delay.
+	 */
+	private static @Nullable InvokeNode findIndirectCoroutineRetryDelayInvoke(
+			BlockNode suspendCheck,
+			FieldInfo labelField,
+			int continuationReg,
+			int resumeStateKey) {
+		if (resumeStateKey <= 0 || suspendCheck.getPredecessors().size() != 1) {
+			return null;
+		}
+		BlockNode suspendCall = suspendCheck.getPredecessors().get(0);
+		if (!ListUtils.isSingleElement(suspendCall.getSuccessors(), suspendCheck)) {
+			return null;
+		}
+		IndexInsnNode delayLabelPut = findLabelPut(suspendCall);
+		if (delayLabelPut == null
+				|| !labelField.equals(delayLabelPut.getIndex())
+				|| delayLabelPut.getArgsCount() != 2
+				|| !(delayLabelPut.getArg(1) instanceof RegisterArg)
+				|| ((RegisterArg) delayLabelPut.getArg(1)).getRegNum() != continuationReg) {
+			return null;
+		}
+		Integer delayStateKey = resolveStablePositiveStateKeyBeforeInsn(
+				suspendCall, delayLabelPut, delayLabelPut.getArg(0));
+		if (delayStateKey == null || delayStateKey != resumeStateKey) {
+			return null;
+		}
+		InvokeNode delayInvoke = findLastResultInvoke(suspendCall);
+		RegisterArg delayContinuation = findSuspendCallContinuationArg(delayInvoke);
+		if (delayInvoke == null
+				|| delayInvoke.getResult() == null
+				|| delayContinuation == null
+				|| delayContinuation.getRegNum() != continuationReg) {
+			return null;
+		}
+		return delayInvoke;
 	}
 
 	private static @Nullable BlockNode findCoroutineStateDispatch(BlockNode start, FieldInfo labelField) {
@@ -26575,7 +31031,8 @@ public class FixMultiEntryLoops {
 				continue;
 			}
 			if (containsLabelGet(block, labelField)
-					&& isPureCoroutineStateDispatch(block, allowStateRestoreCast)) {
+					&& (isPureCoroutineStateDispatch(block, allowStateRestoreCast)
+							|| isContinuationReentryStateDispatch(block, labelField))) {
 				return block;
 			}
 			queue.addAll(block.getPredecessors());
@@ -26661,6 +31118,14 @@ public class FixMultiEntryLoops {
 				case CONST:
 				case MOVE:
 					break;
+				case SGET:
+					if (!(insn instanceof IndexInsnNode)
+							|| !(((IndexInsnNode) insn).getIndex() instanceof FieldInfo)
+							|| !isCoroutineSuspendedSingletonField(
+									(FieldInfo) ((IndexInsnNode) insn).getIndex())) {
+						return false;
+					}
+					break;
 				case CHECK_CAST:
 					if (!(insn instanceof IndexInsnNode)) {
 						return false;
@@ -26683,6 +31148,86 @@ public class FixMultiEntryLoops {
 			}
 		}
 		return true;
+	}
+
+	/**
+	 * Match the entry block generated for a {@code ContinuationImpl} override. Besides dispatching
+	 * on the coroutine label it stores the resumed result and normalizes the high-bit marker before
+	 * calling the original suspend function. Keeping this separate from the regular pure-dispatch
+	 * predicate prevents arbitrary state-changing blocks from being accepted as dispatch nodes.
+	 */
+	static boolean isContinuationReentryStateDispatch(BlockNode block, FieldInfo labelField) {
+		int labelWrites = 0;
+		int resultWrites = 0;
+		int orOperations = 0;
+		int subOperations = 0;
+		boolean hasMinValue = false;
+		for (InsnNode insn : block.getInstructions()) {
+			switch (insn.getType()) {
+				case MOVE:
+					break;
+				case CONST:
+					if (insn.getArgsCount() == 1
+							&& insn.getArg(0) instanceof LiteralArg
+							&& ((LiteralArg) insn.getArg(0)).getLiteral() == Integer.MIN_VALUE) {
+						hasMinValue = true;
+					}
+					break;
+				case IGET:
+					if (!(insn instanceof IndexInsnNode)
+							|| !labelField.equals(((IndexInsnNode) insn).getIndex())) {
+						return false;
+					}
+					break;
+				case IPUT:
+					if (!(insn instanceof IndexInsnNode)
+							|| !(((IndexInsnNode) insn).getIndex() instanceof FieldInfo)) {
+						return false;
+					}
+					FieldInfo field = (FieldInfo) ((IndexInsnNode) insn).getIndex();
+					if (labelField.equals(field)) {
+						labelWrites++;
+					} else if (field.getName().equals("result")
+							&& field.getType().isObject()
+							&& field.getDeclClass().equals(labelField.getDeclClass())) {
+						resultWrites++;
+					} else {
+						return false;
+					}
+					break;
+				case SGET:
+					if (!(insn instanceof IndexInsnNode)
+							|| !(((IndexInsnNode) insn).getIndex() instanceof FieldInfo)) {
+						return false;
+					}
+					FieldInfo staticField = (FieldInfo) ((IndexInsnNode) insn).getIndex();
+					if (!staticField.getType().isPrimitive()
+							&& !isCoroutineSuspendedSingletonField(staticField)) {
+						return false;
+					}
+					break;
+				case ARITH:
+					if (!(insn instanceof ArithNode)) {
+						return false;
+					}
+					ArithOp operation = ((ArithNode) insn).getOp();
+					if (operation == ArithOp.OR) {
+						orOperations++;
+					} else if (operation == ArithOp.SUB) {
+						subOperations++;
+					} else {
+						return false;
+					}
+					break;
+				default:
+					return false;
+			}
+		}
+		return labelWrites == 2
+				&& resultWrites == 1
+				&& orOperations == 1
+				&& subOperations == 1
+				&& hasMinValue;
 	}
 
 	private static boolean isCoroutineStateRestoreCast(BlockNode block, InsnNode castInsn) {
@@ -26708,22 +31253,42 @@ public class FixMultiEntryLoops {
 	private static boolean isSimpleRetryEntry(BlockNode block) {
 		return block.getSuccessors().size() == 1
 				&& !block.getInstructions().isEmpty()
-				&& block.getInstructions().size() <= 2
+				&& block.getInstructions().size() <= 16
 				&& block.getInstructions().stream()
 						.allMatch(insn -> insn.getType() == InsnType.MOVE || insn.getType() == InsnType.CONST);
 	}
 
 	private static @Nullable BlockNode findSuspendCallAfter(BlockNode start) {
-		BlockNode block = start;
+		ArrayDeque<BlockNode> queue = new ArrayDeque<>();
+		ArrayDeque<Integer> depths = new ArrayDeque<>();
 		Set<BlockNode> visited = new HashSet<>();
-		for (int depth = 0; depth < 4 && block != null && visited.add(block); depth++) {
+		queue.add(start);
+		depths.add(0);
+		int matchDepth = Integer.MAX_VALUE;
+		BlockNode match = null;
+		while (!queue.isEmpty()) {
+			BlockNode block = queue.removeFirst();
+			int depth = depths.removeFirst();
+			if (depth > 12 || depth > matchDepth || !visited.add(block)) {
+				continue;
+			}
 			if (findLabelPut(block) != null
 					&& block.getInstructions().stream().anyMatch(insn -> insn instanceof InvokeNode)) {
-				return block;
+				if (match != null && match != block) {
+					return null;
+				}
+				match = block;
+				matchDepth = depth;
+				continue;
 			}
-			block = block.getSuccessors().size() == 1 ? block.getSuccessors().get(0) : null;
+			for (BlockNode successor : block.getSuccessors()) {
+				if (!BlockUtils.isExceptionHandlerPath(successor)) {
+					queue.addLast(successor);
+					depths.addLast(depth + 1);
+				}
+			}
 		}
-		return null;
+		return match;
 	}
 
 	private static @Nullable IndexInsnNode findLabelPut(BlockNode block) {
@@ -26899,7 +31464,7 @@ public class FixMultiEntryLoops {
 	private static @Nullable RegisterArg findThrowOnFailureArg(BlockNode block) {
 		for (InsnNode insn : block.getInstructions()) {
 			if (insn instanceof InvokeNode
-					&& ((InvokeNode) insn).getCallMth().getName().contains("throwOnFailure")
+					&& isKotlinResultFailureCheck((InvokeNode) insn)
 					&& insn.getArgsCount() == 1
 					&& insn.getArg(0) instanceof RegisterArg) {
 				return (RegisterArg) insn.getArg(0);
@@ -26908,10 +31473,22 @@ public class FixMultiEntryLoops {
 		return null;
 	}
 
+	private static boolean isKotlinResultFailureCheck(InvokeNode invoke) {
+		if (invoke.getCallMth().getName().contains("throwOnFailure")) {
+			return true;
+		}
+		return invoke.getInvokeType() == InvokeType.STATIC
+				&& invoke.getCallMth().getDeclClass().getFullName().equals("kotlin.ResultKt")
+				&& ArgType.VOID.equals(invoke.getCallMth().getReturnType())
+				&& ListUtils.isSingleElement(invoke.getCallMth().getArgumentsTypes(), ArgType.OBJECT);
+	}
+
 	/**
 	 * Find an obfuscated Kotlin {@code throwOnFailure} call only after a label-state branch has
 	 * already identified this block as a resume entry. The call is the sole static
-	 * {@code void(Object)} operation in an otherwise restore-only block.
+	 * {@code void(Object)} operation in an otherwise side-effect-free restore block. Constants are
+	 * allowed because register allocation can materialize state keys and null values alongside the
+	 * restored fields.
 	 */
 	private static @Nullable RegisterArg findObfuscatedThrowOnFailureArg(
 			BlockNode block) {
@@ -26921,6 +31498,7 @@ public class FixMultiEntryLoops {
 				case IGET:
 				case MOVE:
 				case CHECK_CAST:
+				case CONST:
 					break;
 				case INVOKE:
 					if (!(insn instanceof InvokeNode)) {
@@ -27521,6 +32099,19 @@ public class FixMultiEntryLoops {
 				&& (containsInsnType(block, InsnType.IGET) || containsInsnType(block, InsnType.SGET));
 	}
 
+	private static boolean isCoroutineResumeRestoreBlock(MethodNode mth, BlockNode block) {
+		return isCoroutineResumeBlock(block)
+				|| isCoroutineFailureCheckBlock(mth, block)
+						&& (containsInsnType(block, InsnType.IGET)
+								|| containsInsnType(block, InsnType.SGET));
+	}
+
+	private static boolean isKtorCoroutineResumeBlock(MethodNode mth, BlockNode block) {
+		return isCoroutineResumeBlock(block)
+				|| isCoroutineResumeTail(block)
+				|| findRepeatedObfuscatedFailureCheckArg(mth, block) != null;
+	}
+
 	private static boolean isCoroutineResumeTail(BlockNode block) {
 		if (!containsInvoke(block, "throwOnFailure")) {
 			return false;
@@ -27574,9 +32165,31 @@ public class FixMultiEntryLoops {
 	}
 
 	private static boolean isCoroutineMethod(MethodNode mth) {
+		return CoroutineMethodUtils.isCoroutineMethod(mth)
+				|| CoroutineMethodUtils.hasKnownContinuationParameter(mth)
+				|| CoroutineMethodUtils.isStateMachine(mth)
+				|| CoroutineMethodUtils.isStateMachineBody(mth);
+	}
+
+	private static boolean isCoroutineStateMachineBody(MethodNode mth) {
 		return CoroutineMethodUtils.isStateMachine(mth)
-				|| CoroutineMethodUtils.isSuspendLambdaBody(mth)
-				|| CoroutineMethodUtils.hasContinuationParameter(mth);
+				|| CoroutineMethodUtils.isStateMachineBody(mth);
+	}
+
+	private static boolean isCoroutineFailureCheckBlock(
+			MethodNode mth, BlockNode block) {
+		return findThrowOnFailureArg(block) != null
+				|| isCoroutineStateMachineBody(mth)
+						&& findObfuscatedThrowOnFailureArg(block) != null;
+	}
+
+	private static @Nullable RegisterArg findCoroutineFailureCheckArg(
+			MethodNode mth, BlockNode block) {
+		RegisterArg arg = findThrowOnFailureArg(block);
+		if (arg != null || !isCoroutineStateMachineBody(mth)) {
+			return arg;
+		}
+		return findObfuscatedThrowOnFailureArg(block);
 	}
 
 	private static boolean containsInvoke(BlockNode block, String namePart) {

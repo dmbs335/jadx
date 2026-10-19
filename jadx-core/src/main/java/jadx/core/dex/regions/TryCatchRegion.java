@@ -44,12 +44,41 @@ public final class TryCatchRegion extends AbstractRegion implements IBranchRegio
 		}
 	}
 
+	/** Add an enclosing catch that protects the same bytecode as this nested try. */
+	public void addCatchHandler(ExceptionHandler handler) {
+		IContainer handlerRegion = handler.getHandlerRegion();
+		if (handlerRegion != null && !handler.isFinally()) {
+			catchRegions.putIfAbsent(handler, handlerRegion);
+		}
+	}
+
 	public IContainer getTryRegion() {
 		return tryRegion;
 	}
 
 	public Map<ExceptionHandler, IContainer> getCatchRegions() {
 		return catchRegions;
+	}
+
+	public boolean hasMultipleCatchAllHandlers() {
+		boolean found = false;
+		for (ExceptionHandler handler : catchRegions.keySet()) {
+			if (handler.isCatchAll()) {
+				if (found) {
+					return true;
+				}
+				found = true;
+			}
+		}
+		return false;
+	}
+
+	/** Replace the emitted body for one catch without changing the shared exception handler. */
+	public void setCatchRegion(ExceptionHandler handler, IContainer region) {
+		if (!catchRegions.containsKey(handler)) {
+			throw new IllegalArgumentException("Catch handler is not part of this try region");
+		}
+		catchRegions.put(handler, region);
 	}
 
 	public TryCatchBlockAttr getTryCatchBlock() {

@@ -5,8 +5,6 @@ import java.util.List;
 import java.util.Map;
 
 import org.jetbrains.annotations.Nullable;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import jadx.api.CommentsLevel;
 import jadx.api.ICodeWriter;
@@ -54,8 +52,6 @@ import jadx.core.utils.exceptions.CodegenException;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public class RegionGen extends InsnGen {
-	private static final Logger LOG = LoggerFactory.getLogger(RegionGen.class);
-
 	public RegionGen(MethodGen mgen) {
 		super(mgen, false);
 	}
@@ -71,7 +67,9 @@ public class RegionGen extends InsnGen {
 			for (CodeVar v : declVars.getVars()) {
 				code.startLine();
 				declareVar(code, v);
-				if (v.isInitAtDeclaration()) {
+				if (v.isInitFromThis()) {
+					code.add(" = this");
+				} else if (v.isInitAtDeclaration()) {
 					code.add(" = ").add(TypeGen.literalToString(0, v.getType(), mth, fallback));
 				}
 				code.add(';');
@@ -233,7 +231,8 @@ public class RegionGen extends InsnGen {
 	public void makeSynchronizedRegion(SynchronizedRegion cont, ICodeWriter code) throws CodegenException {
 		code.startLine("synchronized (");
 		InsnNode monitorEnterInsn = cont.getEnterInsn();
-		addArg(code, monitorEnterInsn.getArg(0));
+		checkMonitorOperand(monitorEnterInsn.getArg(0));
+		addArgWithExpectedType(code, monitorEnterInsn.getArg(0), ArgType.OBJECT);
 		code.add(") {");
 
 		InsnCodeOffset.attach(code, monitorEnterInsn);
@@ -312,6 +311,9 @@ public class RegionGen extends InsnGen {
 	}
 
 	public void makeTryCatch(TryCatchRegion region, ICodeWriter code) throws CodegenException {
+		if (region.hasMultipleCatchAllHandlers()) {
+			throw new CodegenException("Multiple catch-all handlers in one try/catch region");
+		}
 		code.startLine("try {");
 
 		InsnNode insn = BlockUtils.getFirstInsn(Utils.first(region.getTryCatchBlock().getBlocks()));
@@ -320,20 +322,17 @@ public class RegionGen extends InsnGen {
 
 		makeRegionIndent(code, region.getTryRegion());
 		// TODO: move search of 'allHandler' to 'TryCatchRegion'
-		ExceptionHandler allHandler = null;
+		Map.Entry<ExceptionHandler, IContainer> allHandler = null;
 		for (Map.Entry<ExceptionHandler, IContainer> entry : region.getCatchRegions().entrySet()) {
 			ExceptionHandler handler = entry.getKey();
 			if (handler.isCatchAll()) {
-				if (allHandler != null) {
-					LOG.warn("Several 'all' handlers in try/catch block in {}", mth);
-				}
-				allHandler = handler;
+				allHandler = entry;
 			} else {
-				makeCatchBlock(code, handler);
+				makeCatchBlock(code, handler, entry.getValue());
 			}
 		}
 		if (allHandler != null) {
-			makeCatchBlock(code, allHandler);
+			makeCatchBlock(code, allHandler.getKey(), allHandler.getValue());
 		}
 		IContainer finallyRegion = region.getFinallyRegion();
 		if (finallyRegion != null) {
@@ -343,8 +342,7 @@ public class RegionGen extends InsnGen {
 		code.startLine('}');
 	}
 
-	private void makeCatchBlock(ICodeWriter code, ExceptionHandler handler) throws CodegenException {
-		IContainer region = handler.getHandlerRegion();
+	private void makeCatchBlock(ICodeWriter code, ExceptionHandler handler, IContainer region) throws CodegenException {
 		if (region == null) {
 			return;
 		}

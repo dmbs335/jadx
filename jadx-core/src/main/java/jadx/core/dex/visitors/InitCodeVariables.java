@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Set;
 
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.PhiInsn;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.CodeVar;
@@ -85,6 +86,28 @@ public class InitCodeVariables extends AbstractVisitor {
 			Set<SSAVar> vars = new LinkedHashSet<>();
 			vars.add(ssaVar);
 			collectConnectedVars(phiList, vars);
+			if (codeVar.isThis() && vars.size() > 1
+					&& hasExternalMoveIntoReceiverPhi(vars, ssaVar)
+					&& vars.stream().filter(var -> var != ssaVar)
+							.noneMatch(var -> var.getAssign().contains(AFlag.METHOD_ARGUMENT)
+									|| var.getAssign().contains(AFlag.CUSTOM_DECLARE))) {
+				// A receiver can participate in a PHI after its DEX register is reused.
+				// Keep the Java receiver immutable and materialize the joined value as a local.
+				Set<SSAVar> locals = new LinkedHashSet<>(vars);
+				locals.remove(ssaVar);
+				codeVar.setType(ssaVar.getAssign().getInitType());
+				ssaVar.setCodeVar(codeVar);
+				CodeVar localCodeVar = new CodeVar();
+				localCodeVar.setInitFromThis(true);
+				setCodeVarType(localCodeVar, locals);
+				for (SSAVar var : locals) {
+					if (var.isCodeVarSet()) {
+						localCodeVar.mergeFlagsFrom(var.getCodeVar());
+					}
+					var.setCodeVar(localCodeVar);
+				}
+				return;
+			}
 			setCodeVarType(codeVar, vars);
 			for (SSAVar var : vars) {
 				if (var.isCodeVarSet()) {
@@ -95,6 +118,23 @@ public class InitCodeVariables extends AbstractVisitor {
 		} else {
 			ssaVar.setCodeVar(codeVar);
 		}
+	}
+
+	private static boolean hasExternalMoveIntoReceiverPhi(Set<SSAVar> vars, SSAVar receiver) {
+		for (SSAVar var : vars) {
+			if (var == receiver) {
+				continue;
+			}
+			var assignInsn = var.getAssignInsn();
+			if (assignInsn != null && assignInsn.getType() == InsnType.MOVE
+					&& assignInsn.getArgsCount() == 1 && assignInsn.getArg(0).isRegister()) {
+				SSAVar source = ((RegisterArg) assignInsn.getArg(0)).getSVar();
+				if (source != null && !vars.contains(source)) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	private static void setCodeVarType(CodeVar codeVar, Set<SSAVar> vars) {

@@ -232,6 +232,14 @@ public class SimplifyVisitor extends AbstractVisitor {
 			if (wrapInsn.getType() == InsnType.INVOKE) {
 				argType = ((InvokeNode) wrapInsn).getCallMth().getReturnType();
 			}
+		} else if (castArg instanceof RegisterArg) {
+			SSAVar sourceVar = ((RegisterArg) castArg).getSVar();
+			if (sourceVar != null && sourceVar.getAssign() != null) {
+				InsnNode assignInsn = sourceVar.getAssign().getParentInsn();
+				if (assignInsn instanceof InvokeNode) {
+					argType = ((InvokeNode) assignInsn).getCallMth().getReturnType();
+				}
+			}
 		}
 
 		ArgType castToType = (ArgType) castInsn.getIndex();
@@ -650,6 +658,14 @@ public class SimplifyVisitor extends AbstractVisitor {
 		FieldInfo innerField = (FieldInfo) ((IndexInsnNode) get).getIndex();
 		if (!field.equals(innerField)) {
 			return null;
+		}
+		if (wrapType == InsnType.ARITH) {
+			if (!field.getType().isPrimitive()) {
+				// Field compound arithmetic applies to primitive fields only. In particular,
+				// don't turn a numeric dex opcode on a reference field into String +=.
+				// Keep the operation intact so codegen can report the invalid operand.
+				return null;
+			}
 		}
 		try {
 			if (getType == InsnType.IGET && insn.getType() == InsnType.IPUT) {

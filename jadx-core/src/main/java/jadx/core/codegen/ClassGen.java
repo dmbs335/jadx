@@ -463,6 +463,7 @@ public class ClassGen {
 		if (initInsnAttr != null) {
 			InsnGen insnGen = makeInsnGen(initInsnAttr.getInsnMth());
 			code.add(" = ");
+			insnGen.addLambdaObjectCast(code, initInsnAttr.getInsn(), f.getType());
 			addInsnBody(insnGen, code, initInsnAttr.getInsn());
 		} else {
 			EncodedValue constVal = f.get(JadxAttrType.CONSTANT_VALUE);

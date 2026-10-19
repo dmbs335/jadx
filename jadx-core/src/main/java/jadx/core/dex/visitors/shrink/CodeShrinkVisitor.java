@@ -8,6 +8,11 @@ import java.util.Objects;
 import java.util.Set;
 
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.nodes.CodeFeaturesAttr;
+import jadx.core.dex.info.ClassInfo;
+import jadx.core.dex.instructions.ArithNode;
+import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeCustomNode;
 import jadx.core.dex.instructions.InvokeNode;
@@ -17,8 +22,13 @@ import jadx.core.dex.instructions.args.Named;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.nodes.BlockNode;
+import jadx.core.dex.nodes.IContainer;
+import jadx.core.dex.nodes.IRegion;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
+import jadx.core.dex.regions.TryCatchRegion;
+import jadx.core.dex.trycatch.CatchAttr;
+import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.dex.visitors.AbstractVisitor;
 import jadx.core.dex.visitors.JadxVisitor;
 import jadx.core.dex.visitors.ModVisitor;
@@ -147,6 +157,12 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 		if (!checkLambdaInline(arg, assignInsn)) {
 			return null;
 		}
+		// Eager '&' and '|' containing calls have side effects. Do not inline them
+		// past a later observable operation already wrapped in the use expression:
+		// Java would evaluate that operation first and reverse the original order.
+		if (isEagerBitwiseExpression(assignInsn) && hasLaterObservableOperation(argsInfo.getInsn(), assignInsn)) {
+			return null;
+		}
 
 		int assignPos = InsnList.getIndex(insnList, assignInsn);
 		if (assignPos != -1) {
@@ -164,6 +180,55 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 			}
 		}
 		return null;
+	}
+
+	private static boolean isEagerBitwiseExpression(InsnNode insn) {
+		if (!(insn instanceof ArithNode)) {
+			return false;
+		}
+		ArithOp op = ((ArithNode) insn).getOp();
+		if (op != ArithOp.AND && op != ArithOp.OR) {
+			return false;
+		}
+		boolean[] foundCall = { false };
+		insn.visitInsns((java.util.function.Consumer<InsnNode>) inner -> {
+			if (inner.getType() == InsnType.INVOKE || inner.getType() == InsnType.CONSTRUCTOR) {
+				foundCall[0] = true;
+			}
+		});
+		return foundCall[0];
+	}
+
+	private static boolean hasLaterObservableOperation(InsnNode useInsn, InsnNode assignInsn) {
+		int assignOffset = assignInsn.getOffset();
+		if (assignOffset < 0) {
+			return false;
+		}
+		// The Consumer traversal also visits TernaryInsn conditions. The early-exit
+		// Function traversal only visits regular arguments, missing a cast or call
+		// hidden inside a condition and allowing the producer to move past it.
+		boolean[] found = { false };
+		useInsn.visitInsns((java.util.function.Consumer<InsnNode>) inner -> {
+			if (!found[0] && inner.getOffset() > assignOffset
+					&& (inner.getType() == InsnType.IGET
+							|| inner.getType() == InsnType.SGET
+							|| inner.getType() == InsnType.AGET
+							|| inner.getType() == InsnType.ARRAY_LENGTH
+							|| inner.getType() == InsnType.CHECK_CAST
+							|| inner.getType() == InsnType.INVOKE
+							|| isDivisionOrRemainder(inner))) {
+				found[0] = true;
+			}
+		});
+		return found[0];
+	}
+
+	private static boolean isDivisionOrRemainder(InsnNode insn) {
+		if (!(insn instanceof ArithNode)) {
+			return false;
+		}
+		ArithOp op = ((ArithNode) insn).getOp();
+		return op == ArithOp.DIV || op == ArithOp.REM;
 	}
 
 	/**
@@ -250,6 +315,31 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 
 	private static boolean canMoveBetweenBlocks(MethodNode mth, InsnNode assignInsn, BlockNode assignBlock,
 			BlockNode useBlock, InsnNode useInsn) {
+		// Moving a protected producer into a mixed-protection expression can widen
+		// its catch to unrelated calls. Repeated region blocks also need the
+		// original catch metadata for every generated copy of the protected site.
+		if (assignInsn.canThrowException()
+				&& !Objects.equals(assignInsn.get(AType.EXC_CATCH), useInsn.get(AType.EXC_CATCH))
+				&& (assignInsn.contains(AFlag.TRY_LEAVE)
+						|| crossesTryBoundary(mth.getRegion(), assignBlock, useBlock))
+				&& (hasDifferentProtectedThrowingInsn(useInsn, assignInsn.get(AType.EXC_CATCH))
+						|| countRegionBlockOccurrences(mth.getRegion(), assignBlock, 2) > 1
+						|| (assignInsn.getType() == InsnType.INVOKE
+								&& hasSpecificCatchHandler(assignInsn.get(AType.EXC_CATCH)))
+						|| CodeFeaturesAttr.contains(mth, CodeFeaturesAttr.CodeFeature.SWITCH))) {
+			return false;
+		}
+		// A synthetic cast can wrap a protected invoke, while the outer cast itself
+		// has no catch attribute. Moving that wrapper into an unprotected return
+		// empties the protected block, so region reconstruction widens the catch.
+		if (assignInsn.getType() == InsnType.CHECK_CAST && useInsn.getType() == InsnType.RETURN
+				&& assignInsn.get(AType.EXC_CATCH) == null && useInsn.get(AType.EXC_CATCH) == null
+				&& assignInsn.visitInsns(inner -> inner != assignInsn
+						&& inner.getType() == InsnType.INVOKE
+						&& inner.contains(AFlag.TRY_LEAVE)
+						&& hasNoCatchAllHandler(inner.get(AType.EXC_CATCH)) ? Boolean.TRUE : null) != null) {
+			return false;
+		}
 		if (!BlockUtils.isPathExists(assignBlock, useBlock)) {
 			return false;
 		}
@@ -305,6 +395,79 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 			}
 		}
 		throw new JadxRuntimeException("Can't process instruction move : " + assignBlock);
+	}
+
+	private static boolean hasNoCatchAllHandler(CatchAttr catchAttr) {
+		if (catchAttr == null) {
+			return false;
+		}
+		for (ExceptionHandler handler : catchAttr.getHandlers()) {
+			if (handler.isCatchAll()) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean hasDifferentProtectedThrowingInsn(InsnNode useInsn, CatchAttr sourceCatch) {
+		return useInsn.visitInsns(inner -> inner != useInsn
+				&& inner.canThrowException()
+				&& !Objects.equals(sourceCatch, inner.get(AType.EXC_CATCH)) ? Boolean.TRUE : null) != null;
+	}
+
+	private static boolean hasSpecificCatchHandler(CatchAttr catchAttr) {
+		if (catchAttr == null) {
+			return false;
+		}
+		for (ExceptionHandler handler : catchAttr.getHandlers()) {
+			if (!handler.isCatchAll()) {
+				for (ClassInfo type : handler.getCatchTypes()) {
+					if (!type.getFullName().equals("java.lang.Exception")) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	private static int countRegionBlockOccurrences(IContainer container, BlockNode target, int limit) {
+		if (container == null) {
+			return 0;
+		}
+		if (container == target) {
+			return 1;
+		}
+		if (!(container instanceof IRegion)) {
+			return 0;
+		}
+		int count = 0;
+		for (IContainer child : ((IRegion) container).getSubBlocks()) {
+			count += countRegionBlockOccurrences(child, target, limit - count);
+			if (count >= limit) {
+				return count;
+			}
+		}
+		return count;
+	}
+
+	private static boolean crossesTryBoundary(IContainer container, BlockNode assignBlock, BlockNode useBlock) {
+		if (!(container instanceof IRegion)) {
+			return false;
+		}
+		if (container instanceof TryCatchRegion) {
+			IContainer tryBody = ((TryCatchRegion) container).getTryRegion();
+			if (RegionUtils.isRegionContainsBlock(tryBody, assignBlock)
+					!= RegionUtils.isRegionContainsBlock(tryBody, useBlock)) {
+				return true;
+			}
+		}
+		for (IContainer child : ((IRegion) container).getSubBlocks()) {
+			if (crossesTryBoundary(child, assignBlock, useBlock)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static void simplifyMoveInsns(MethodNode mth, BlockNode block) {

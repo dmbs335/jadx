@@ -225,6 +225,8 @@ public class BlockSplitter extends AbstractVisitor {
 			for (BlockNode successor : block.getSuccessors()) {
 				BlockNode newSuccessor = getNewBlock(successor, map);
 				BlockSplitter.connect(newBlock, newSuccessor);
+				// Copied branch/switch instructions still point at the original block objects.
+				replaceTarget(newBlock, successor, newSuccessor);
 			}
 		}
 		return copyBlocks;

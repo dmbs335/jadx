@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Set;
 
 import jadx.core.dex.attributes.AFlag;
+import jadx.core.dex.attributes.nodes.AutoBoxedLiteralAttr;
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.InsnType;
@@ -90,8 +91,19 @@ public class DeboxingVisitor extends AbstractVisitor {
 		MethodInfo callMth = insnNode.getCallMth();
 		if (valueOfMths.contains(callMth)) {
 			RegisterArg resArg = insnNode.getResult();
+			for (RegisterArg useArg : resArg.getSVar().getUseList()) {
+				InsnNode useInsn = useArg.getParentInsn();
+				if (useInsn != null && (useInsn.getType() == InsnType.INSTANCE_OF
+						|| useInsn.getType() == InsnType.MONITOR_ENTER
+						|| useInsn.getType() == InsnType.MONITOR_EXIT
+						|| useInsn.getType() == InsnType.IGET && useInsn.getArg(0) == useArg
+						|| useInsn.getType() == InsnType.IPUT && useInsn.getArg(1) == useArg)) {
+					return null;
+				}
+			}
 			InsnArg arg = insnNode.getArg(0);
 			if (arg.isLiteral()) {
+				arg.addAttr(AutoBoxedLiteralAttr.INSTANCE);
 				ArgType primitiveType = callMth.getArgumentsTypes().get(0);
 				ArgType boxType = callMth.getReturnType();
 				if (isNeedExplicitCast(resArg, primitiveType, boxType)) {

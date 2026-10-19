@@ -1,5 +1,6 @@
 package jadx.core.dex.visitors;
 
+import jadx.core.dex.attributes.AType;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.MethodNode;
 import jadx.core.dex.visitors.ssa.SSATransform;
@@ -24,6 +25,12 @@ public class SameSourcePhiMoveVisitor extends AbstractVisitor {
 				SSATransform.inlineSameSourceMovePhis(mth);
 			}
 			return;
+		}
+		if (mth.isNoExceptionHandlers()
+				&& mth.getLoopsCount() == 0
+				&& !mth.getArgRegs().isEmpty()
+				&& mth.getBasicBlocks().stream().anyMatch(block -> block.get(AType.PHI_LIST) != null)) {
+			SSATransform.inlineSameSourceMovePhis(mth);
 		}
 		if (!mth.getAccessFlags().isStatic()
 				|| !mth.getReturnType().equals(ArgType.VOID)

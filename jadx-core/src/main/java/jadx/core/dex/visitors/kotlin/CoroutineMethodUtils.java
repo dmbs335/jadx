@@ -28,12 +28,18 @@ public final class CoroutineMethodUtils {
 	 * Structural recognition used before the semantic marker pass has executed.
 	 */
 	public static boolean isStateMachineBody(MethodNode mth) {
+		if (!isKnownCoroutineBase(mth.getParentClass().getSuperClass())) {
+			return false;
+		}
 		return isStateMachineSignature(
 				mth.getName(),
 				mth.getAccessFlags().isStatic(),
 				mth.getArgTypes(),
 				mth.getReturnType())
-				&& isKnownCoroutineBase(mth.getParentClass().getSuperClass());
+				|| isObfuscatedStateMachineSignature(
+						mth.getAccessFlags().isStatic(),
+						mth.getArgTypes(),
+						mth.getReturnType());
 	}
 
 	/**
@@ -52,12 +58,18 @@ public final class CoroutineMethodUtils {
 	 * continuation implementation.
 	 */
 	public static boolean isSuspendLambdaBody(MethodNode mth) {
+		if (!isSuspendLambdaBase(mth.getParentClass().getSuperClass())) {
+			return false;
+		}
 		return isStateMachineSignature(
 				mth.getName(),
 				mth.getAccessFlags().isStatic(),
 				mth.getArgTypes(),
 				mth.getReturnType())
-				&& isSuspendLambdaBase(mth.getParentClass().getSuperClass());
+				|| isObfuscatedStateMachineSignature(
+						mth.getAccessFlags().isStatic(),
+						mth.getArgTypes(),
+						mth.getReturnType());
 	}
 
 	/**
@@ -100,6 +112,20 @@ public final class CoroutineMethodUtils {
 			String name, boolean isStatic, List<ArgType> argTypes, ArgType returnType) {
 		return !isStatic
 				&& "invokeSuspend".equals(name)
+				&& argTypes.size() == 1
+				&& ArgType.OBJECT.equals(argTypes.get(0))
+				&& ArgType.OBJECT.equals(returnType);
+	}
+
+	/**
+	 * R8 can rename both the generated state-machine method and its bundled Kotlin runtime base.
+	 * Once the declaring class is already proven to extend a known continuation implementation,
+	 * the non-static {@code Object -> Object} shape uniquely identifies the state-machine body among
+	 * the generated lambda bridge/create methods, without relying on the {@code invokeSuspend} name.
+	 */
+	static boolean isObfuscatedStateMachineSignature(
+			boolean isStatic, List<ArgType> argTypes, ArgType returnType) {
+		return !isStatic
 				&& argTypes.size() == 1
 				&& ArgType.OBJECT.equals(argTypes.get(0))
 				&& ArgType.OBJECT.equals(returnType);
