@@ -14,7 +14,7 @@
 
     fill-array-data v1, :array_0
 
-    return v1
+    return-object v1
 
     :array_0
     .array-data 8

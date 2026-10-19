@@ -259,11 +259,11 @@ public class JavaInsnsRegister {
 		register(arr, 0xaa, "tableswitch", -1, 1, Opcode.PACKED_SWITCH, new TableSwitchDecoder());
 		register(arr, 0xab, "lookupswitch", -1, 1, Opcode.SPARSE_SWITCH, new LookupSwitchDecoder());
 
-		register(arr, 0xac, "ireturn", 0, 1, Opcode.RETURN, s -> s.pop(0));
-		register(arr, 0xad, "lreturn", 0, 1, Opcode.RETURN, s -> s.pop(0));
-		register(arr, 0xae, "freturn", 0, 1, Opcode.RETURN, s -> s.pop(0));
-		register(arr, 0xaf, "dreturn", 0, 1, Opcode.RETURN, s -> s.pop(0));
-		register(arr, 0xb0, "areturn", 0, 1, Opcode.RETURN, s -> s.pop(0));
+		register(arr, 0xac, "ireturn", 0, 1, Opcode.RETURN_INT, s -> s.pop(0));
+		register(arr, 0xad, "lreturn", 0, 1, Opcode.RETURN_LONG, s -> s.pop(0));
+		register(arr, 0xae, "freturn", 0, 1, Opcode.RETURN_FLOAT, s -> s.pop(0));
+		register(arr, 0xaf, "dreturn", 0, 1, Opcode.RETURN_DOUBLE, s -> s.pop(0));
+		register(arr, 0xb0, "areturn", 0, 1, Opcode.RETURN_OBJECT, s -> s.pop(0));
 		register(arr, 0xb1, "return", 0, 0, Opcode.RETURN_VOID, null);
 
 		register(arr, 0xb2, "getstatic", 2, 1, Opcode.SGET, InsnIndexType.FIELD_REF, s -> s.idx(s.u2()).push(0, s.fieldType()));

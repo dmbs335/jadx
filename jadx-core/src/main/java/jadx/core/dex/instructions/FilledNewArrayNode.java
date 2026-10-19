@@ -12,6 +12,7 @@ public class FilledNewArrayNode extends InsnNode {
 	private int invalidArgIndex = -1;
 	private @Nullable ArgType invalidSourceType;
 	private @Nullable ArgType invalidElementType;
+	private @Nullable ArgType invalidArrayType;
 
 	public FilledNewArrayNode(@NotNull ArgType elemType, int size) {
 		super(InsnType.FILLED_NEW_ARRAY, size);
@@ -47,6 +48,14 @@ public class FilledNewArrayNode extends InsnNode {
 		this.invalidElementType = invalidElementType;
 	}
 
+	public @Nullable ArgType getInvalidArrayType() {
+		return invalidArrayType;
+	}
+
+	public void setInvalidArrayType(ArgType invalidArrayType) {
+		this.invalidArrayType = invalidArrayType;
+	}
+
 	@Override
 	public boolean isSame(InsnNode obj) {
 		if (this == obj) {
@@ -65,6 +74,7 @@ public class FilledNewArrayNode extends InsnNode {
 		copy.invalidArgIndex = invalidArgIndex;
 		copy.invalidSourceType = invalidSourceType;
 		copy.invalidElementType = invalidElementType;
+		copy.invalidArrayType = invalidArrayType;
 		return copyCommonParams(copy);
 	}
 

@@ -16,5 +16,5 @@
 
     not-long v0, p1
 
-    return v0
+    return-wide v0
 .end method

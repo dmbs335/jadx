@@ -30,16 +30,16 @@ public class DexInsnInfo {
 		register(arr, DexOpcodes.MOVE_OBJECT_FROM16, Opcode.MOVE_OBJECT, DexInsnFormat.FORMAT_22X);
 		register(arr, DexOpcodes.MOVE_OBJECT_16, Opcode.MOVE_OBJECT, DexInsnFormat.FORMAT_32X);
 
-		register(arr, DexOpcodes.MOVE_RESULT, Opcode.MOVE_RESULT, DexInsnFormat.FORMAT_11X);
-		register(arr, DexOpcodes.MOVE_RESULT_WIDE, Opcode.MOVE_RESULT, DexInsnFormat.FORMAT_11X);
-		register(arr, DexOpcodes.MOVE_RESULT_OBJECT, Opcode.MOVE_RESULT, DexInsnFormat.FORMAT_11X);
+		register(arr, DexOpcodes.MOVE_RESULT, Opcode.MOVE_RESULT_NARROW, DexInsnFormat.FORMAT_11X);
+		register(arr, DexOpcodes.MOVE_RESULT_WIDE, Opcode.MOVE_RESULT_WIDE, DexInsnFormat.FORMAT_11X);
+		register(arr, DexOpcodes.MOVE_RESULT_OBJECT, Opcode.MOVE_RESULT_OBJECT, DexInsnFormat.FORMAT_11X);
 
 		register(arr, DexOpcodes.MOVE_EXCEPTION, Opcode.MOVE_EXCEPTION, DexInsnFormat.FORMAT_11X);
 
 		register(arr, DexOpcodes.RETURN_VOID, Opcode.RETURN_VOID, DexInsnFormat.FORMAT_10X);
-		register(arr, DexOpcodes.RETURN, Opcode.RETURN, DexInsnFormat.FORMAT_11X);
-		register(arr, DexOpcodes.RETURN_WIDE, Opcode.RETURN, DexInsnFormat.FORMAT_11X);
-		register(arr, DexOpcodes.RETURN_OBJECT, Opcode.RETURN, DexInsnFormat.FORMAT_11X);
+		register(arr, DexOpcodes.RETURN, Opcode.RETURN_NARROW, DexInsnFormat.FORMAT_11X);
+		register(arr, DexOpcodes.RETURN_WIDE, Opcode.RETURN_WIDE, DexInsnFormat.FORMAT_11X);
+		register(arr, DexOpcodes.RETURN_OBJECT, Opcode.RETURN_OBJECT, DexInsnFormat.FORMAT_11X);
 
 		register(arr, DexOpcodes.CONST_4, Opcode.CONST, DexInsnFormat.FORMAT_11N);
 		register(arr, DexOpcodes.CONST_16, Opcode.CONST, DexInsnFormat.FORMAT_21S);

@@ -72,7 +72,12 @@ public class InsnDecoder {
 
 			// move-result will be process in invoke and filled-new-array instructions
 			case MOVE_RESULT:
-				return insn(InsnType.MOVE_RESULT, InsnArg.reg(insn, 0, ArgType.UNKNOWN));
+			case MOVE_RESULT_NARROW:
+			case MOVE_RESULT_WIDE:
+			case MOVE_RESULT_OBJECT:
+				MoveResultNode moveResultInsn = new MoveResultNode(insn.getOpcode());
+				moveResultInsn.setResult(InsnArg.reg(insn, 0, ArgType.UNKNOWN));
+				return moveResultInsn;
 
 			case CONST:
 				LiteralArg narrowLitArg = InsnArg.lit(insn, ArgType.NARROW);
@@ -355,7 +360,14 @@ public class InsnDecoder {
 				return new InsnNode(InsnType.RETURN, 0);
 
 			case RETURN:
-				InsnNode returnInsn = new ReturnNode();
+			case RETURN_INT:
+			case RETURN_NARROW:
+			case RETURN_WIDE:
+			case RETURN_OBJECT:
+			case RETURN_LONG:
+			case RETURN_FLOAT:
+			case RETURN_DOUBLE:
+				InsnNode returnInsn = new ReturnNode(insn.getOpcode());
 				returnInsn.addArg(InsnArg.reg(insn, 0, method.getReturnType()));
 				return returnInsn;
 
@@ -552,6 +564,12 @@ public class InsnDecoder {
 
 	private InsnNode filledNewArray(InsnData insn, boolean isRange) {
 		ArgType arrType = ArgType.parse(insn.getIndexAsType());
+		if (!arrType.isArray()) {
+			// Keep the result for move-result-object without pretending the descriptor is an array.
+			FilledNewArrayNode invalidNode = new FilledNewArrayNode(arrType, 0);
+			invalidNode.setInvalidArrayType(arrType);
+			return invalidNode;
+		}
 		ArgType elType = arrType.getArrayElement();
 		if (ArgType.LONG.equals(elType) || ArgType.DOUBLE.equals(elType)) {
 			// Keep the result for move-result-object, but don't interpret wide register words as elements.

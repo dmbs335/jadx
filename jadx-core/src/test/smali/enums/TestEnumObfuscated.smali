@@ -75,7 +75,7 @@
 .method public static values()[Lenums/TestEnumObfuscated;
     .registers 1
     sget-object v0, Lenums/TestEnumObfuscated;->$VLS:[Lenums/TestEnumObfuscated;
-    return v0
+    return-object v0
 .end method
 
 .method public static valuesCount()I

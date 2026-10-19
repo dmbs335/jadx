@@ -3,6 +3,7 @@ package jadx.core.dex.visitors;
 import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.attributes.nodes.InvalidMoveResultAttr;
 import jadx.core.dex.attributes.nodes.JumpInfo;
 import jadx.core.dex.instructions.BaseInvokeNode;
 import jadx.core.dex.instructions.FillArrayData;
@@ -11,6 +12,7 @@ import jadx.core.dex.instructions.FilledNewArrayNode;
 import jadx.core.dex.instructions.GotoNode;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.MoveResultNode;
 import jadx.core.dex.instructions.SwitchData;
 import jadx.core.dex.instructions.SwitchInsn;
 import jadx.core.dex.instructions.args.ArgType;
@@ -195,6 +197,12 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 		RegisterArg moveRes = nextInsn.getResult();
 		insn.setResult(moveRes.duplicate(resType));
 		insn.copyAttributesFrom(nextInsn);
+		if (nextInsn instanceof MoveResultNode) {
+			MoveResultNode moveResultNode = (MoveResultNode) nextInsn;
+			if (!moveResultNode.isOpcodeCompatible(resType)) {
+				insn.addAttr(new InvalidMoveResultAttr(moveResultNode.getMoveResultOpcode(), resType));
+			}
+		}
 		removeInsn(insnByOffset, nextInsn);
 	}
 

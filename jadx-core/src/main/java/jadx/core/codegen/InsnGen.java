@@ -29,6 +29,7 @@ import jadx.core.dex.attributes.FieldInitInsnAttr;
 import jadx.core.dex.attributes.nodes.ClassTypeVarsAttr;
 import jadx.core.dex.attributes.nodes.FieldReplaceAttr;
 import jadx.core.dex.attributes.nodes.GenericInfoAttr;
+import jadx.core.dex.attributes.nodes.InvalidMoveResultAttr;
 import jadx.core.dex.attributes.nodes.LoopLabelAttr;
 import jadx.core.dex.attributes.nodes.MethodReplaceAttr;
 import jadx.core.dex.attributes.nodes.SkipMethodArgsAttr;
@@ -408,6 +409,7 @@ public class InsnGen {
 	}
 
 	private void makeInsnBody(ICodeWriter code, InsnNode insn, Set<Flags> state) throws CodegenException {
+		checkInvalidMoveResult(insn);
 		switch (insn.getType()) {
 			case CONST_STR:
 				String str = ((ConstStringNode) insn).getString();
@@ -509,7 +511,12 @@ public class InsnGen {
 			case RETURN:
 				if (insn.getArgsCount() != 0) {
 					if (!isFallback() && insn instanceof ReturnNode) {
-						ArgType invalidSourceType = ((ReturnNode) insn).getInvalidSourceType();
+						ReturnNode returnNode = (ReturnNode) insn;
+						if (!returnNode.isOpcodeCompatible(mth.getReturnType())) {
+							throw new CodegenException("Return opcode " + returnNode.getReturnOpcode()
+									+ " does not match method return type " + mth.getReturnType());
+						}
+						ArgType invalidSourceType = returnNode.getInvalidSourceType();
 						if (invalidSourceType != null) {
 							throw new CodegenException("Return operand type " + invalidSourceType
 									+ " does not match method return type " + mth.getReturnType());
@@ -630,6 +637,9 @@ public class InsnGen {
 
 			case NEW_ARRAY: {
 				ArgType arrayType = ((NewArrayNode) insn).getArrayType();
+				if (!fallback && !arrayType.isArray()) {
+					throw new CodegenException("new-array type is not an array: " + arrayType);
+				}
 				code.add("new ");
 				useType(code, arrayType.getArrayRootElement());
 				int k = 0;
@@ -827,6 +837,13 @@ public class InsnGen {
 				break;
 
 			case NEW_INSTANCE:
+				ArgType newInstanceType = (ArgType) ((IndexInsnNode) insn).getIndex();
+				if (!newInstanceType.isObject()) {
+					throw new CodegenException("new-instance type must be an object class: " + newInstanceType);
+				}
+				if (!fallback) {
+					throw new CodegenException("new-instance has no matching constructor invocation: " + newInstanceType);
+				}
 				// only fallback - make new instance in constructor invoke
 				fallbackOnlyInsn(insn);
 				code.add("new ").add(insn.getResult().getInitType().toString());
@@ -1039,6 +1056,9 @@ public class InsnGen {
 	}
 
 	private void filledNewArray(FilledNewArrayNode insn, ICodeWriter code) throws CodegenException {
+		if (!isFallback() && insn.getInvalidArrayType() != null) {
+			throw new CodegenException("filled-new-array type is not an array: " + insn.getInvalidArrayType());
+		}
 		if (!isFallback() && insn.getInvalidElementType() != null) {
 			throw new CodegenException("filled-new-array does not support wide element type: " + insn.getInvalidElementType());
 		}
@@ -1714,6 +1734,9 @@ public class InsnGen {
 		if (isFallback()) {
 			return;
 		}
+		if (arg.isInsnWrap()) {
+			checkInvalidMoveResult(((InsnWrapArg) arg).getWrapInsn());
+		}
 		if (arg.isZeroLiteral() && expected != null && (expected.isObject() || expected.isArray())) {
 			return; // DEX zero is null in a reference-typed assignment.
 		}
@@ -1754,6 +1777,17 @@ public class InsnGen {
 			return;
 		}
 		throw new CodegenException("Incompatible " + operation + " type: " + actual + " for " + expected);
+	}
+
+	private void checkInvalidMoveResult(InsnNode insn) throws CodegenException {
+		if (isFallback()) {
+			return;
+		}
+		InvalidMoveResultAttr invalidMoveResult = insn.get(AType.INVALID_MOVE_RESULT);
+		if (invalidMoveResult != null) {
+			throw new CodegenException("Move-result opcode " + invalidMoveResult.getOpcode()
+					+ " does not match result type " + invalidMoveResult.getResultType());
+		}
 	}
 
 	private boolean hasCompleteSuperclassChain(ArgType type, Set<String> visited) {

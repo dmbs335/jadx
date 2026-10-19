@@ -573,8 +573,14 @@ public class ModVisitor extends AbstractVisitor {
 				switch (insn.getType()) {
 					case NOP:
 					case GOTO:
-					case NEW_INSTANCE:
 						remover.addAndUnbind(insn);
+						break;
+
+					case NEW_INSTANCE:
+						if (((ArgType) ((IndexInsnNode) insn).getIndex()).isObject()
+								&& insn.contains(AFlag.REMOVE)) {
+							remover.addAndUnbind(insn);
+						}
 						break;
 
 					default:

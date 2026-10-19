@@ -29,6 +29,7 @@ import jadx.core.dex.attributes.nodes.GenericInfoAttr;
 import jadx.core.dex.attributes.nodes.IncompleteFieldTypeConflictAttr;
 import jadx.core.dex.attributes.nodes.InitAtDeclareVarsAttr;
 import jadx.core.dex.attributes.nodes.InlinedAttr;
+import jadx.core.dex.attributes.nodes.InvalidMoveResultAttr;
 import jadx.core.dex.attributes.nodes.JadxCommentsAttr;
 import jadx.core.dex.attributes.nodes.JadxError;
 import jadx.core.dex.attributes.nodes.JumpInfo;
@@ -151,6 +152,7 @@ public final class AType<T extends IJadxAttribute> implements IJadxAttrType<T> {
 	public static final AType<IMethodDetails> METHOD_DETAILS = new AType<>();
 	public static final AType<GenericInfoAttr> GENERIC_INFO = new AType<>();
 	public static final AType<IncompleteFieldTypeConflictAttr> INCOMPLETE_FIELD_TYPE_CONFLICT = new AType<>();
+	public static final AType<InvalidMoveResultAttr> INVALID_MOVE_RESULT = new AType<>();
 	public static final AType<RegionRefAttr> REGION_REF = new AType<>();
 
 	// register
