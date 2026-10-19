@@ -11,6 +11,7 @@ import jadx.core.dex.nodes.InsnNode;
 public final class FillArrayInsn extends InsnNode {
 	private final int target;
 	private FillArrayData arrayData;
+	private int invalidArraySize = -1;
 
 	public FillArrayInsn(InsnArg arg, int target) {
 		super(InsnType.FILL_ARRAY, 1);
@@ -24,6 +25,14 @@ public final class FillArrayInsn extends InsnNode {
 
 	public void setArrayData(FillArrayData arrayData) {
 		this.arrayData = arrayData;
+	}
+
+	public int getInvalidArraySize() {
+		return invalidArraySize;
+	}
+
+	public void setInvalidArraySize(int invalidArraySize) {
+		this.invalidArraySize = invalidArraySize;
 	}
 
 	@Override
@@ -41,6 +50,8 @@ public final class FillArrayInsn extends InsnNode {
 	@Override
 	public InsnNode copy() {
 		FillArrayInsn copy = new FillArrayInsn(getArg(0), target);
+		copy.arrayData = arrayData;
+		copy.invalidArraySize = invalidArraySize;
 		return copyCommonParams(copy);
 	}
 
@@ -55,6 +66,21 @@ public final class FillArrayInsn extends InsnNode {
 
 	public ArgType getElementType() {
 		return arrayData.getElementType();
+	}
+
+	public int getElementSize() {
+		return arrayData.getElementSize();
+	}
+
+	public boolean hasCompatibleArrayType(ArgType arrayType) {
+		if (!arrayType.isArray()) {
+			return true;
+		}
+		ArgType elementType = arrayType.getArrayElement();
+		if (!elementType.isTypeKnown()) {
+			return true;
+		}
+		return elementType.isPrimitive() && getElementType().contains(elementType.getPrimitiveType());
 	}
 
 	public List<LiteralArg> getLiteralArgs(ArgType elType) {

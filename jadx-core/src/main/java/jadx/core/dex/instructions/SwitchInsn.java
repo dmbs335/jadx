@@ -5,6 +5,7 @@ import java.util.List;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.InsnNode;
@@ -24,12 +25,21 @@ public class SwitchInsn extends TargetInsnNode {
 	private Object[] modifiedKeys;
 	private BlockNode[] targetBlocks;
 	private BlockNode defTargetBlock;
+	private @Nullable ArgType invalidSourceType;
 
 	public SwitchInsn(InsnArg arg, int dataTarget, boolean packed) {
 		super(InsnType.SWITCH, 1);
 		addArg(arg);
 		this.dataTarget = dataTarget;
 		this.packed = packed;
+	}
+
+	public @Nullable ArgType getInvalidSourceType() {
+		return invalidSourceType;
+	}
+
+	public void setInvalidSourceType(ArgType invalidSourceType) {
+		this.invalidSourceType = invalidSourceType;
 	}
 
 	public boolean needData() {
@@ -96,6 +106,7 @@ public class SwitchInsn extends TargetInsnNode {
 		copy.def = def;
 		copy.targetBlocks = targetBlocks;
 		copy.defTargetBlock = defTargetBlock;
+		copy.invalidSourceType = invalidSourceType;
 		return copyCommonParams(copy);
 	}
 

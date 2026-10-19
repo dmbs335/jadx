@@ -60,6 +60,10 @@ public final class FillArrayData extends InsnNode {
 		return size;
 	}
 
+	public int getElementSize() {
+		return elemSize;
+	}
+
 	public ArgType getElementType() {
 		return elemType;
 	}

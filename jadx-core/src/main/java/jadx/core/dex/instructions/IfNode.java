@@ -2,6 +2,8 @@ package jadx.core.dex.instructions;
 
 import java.util.List;
 
+import org.jetbrains.annotations.Nullable;
+
 import jadx.api.plugins.input.insns.InsnData;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
@@ -20,6 +22,8 @@ public class IfNode extends GotoNode {
 
 	private BlockNode thenBlock;
 	private BlockNode elseBlock;
+	private int invalidArgIndex = -1;
+	private @Nullable ArgType invalidSourceType;
 
 	public IfNode(InsnData insn, IfOp op) {
 		super(InsnType.IF, insn.getTarget(), 2);
@@ -62,6 +66,19 @@ public class IfNode extends GotoNode {
 
 	public IfOp getOp() {
 		return op;
+	}
+
+	public int getInvalidArgIndex() {
+		return invalidArgIndex;
+	}
+
+	public @Nullable ArgType getInvalidSourceType() {
+		return invalidSourceType;
+	}
+
+	public void setInvalidArgType(int argIndex, ArgType sourceType) {
+		this.invalidArgIndex = argIndex;
+		this.invalidSourceType = sourceType;
 	}
 
 	public void invertCondition() {
@@ -141,6 +158,8 @@ public class IfNode extends GotoNode {
 		IfNode copy = new IfNode(op, target);
 		copy.thenBlock = thenBlock;
 		copy.elseBlock = elseBlock;
+		copy.invalidArgIndex = invalidArgIndex;
+		copy.invalidSourceType = invalidSourceType;
 		return copyCommonParams(copy);
 	}
 

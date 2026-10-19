@@ -1,6 +1,7 @@
 package jadx.core.dex.instructions;
 
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.InsnNode;
@@ -8,6 +9,9 @@ import jadx.core.dex.nodes.InsnNode;
 public class FilledNewArrayNode extends InsnNode {
 
 	private final ArgType elemType;
+	private int invalidArgIndex = -1;
+	private @Nullable ArgType invalidSourceType;
+	private @Nullable ArgType invalidElementType;
 
 	public FilledNewArrayNode(@NotNull ArgType elemType, int size) {
 		super(InsnType.FILLED_NEW_ARRAY, size);
@@ -20,6 +24,27 @@ public class FilledNewArrayNode extends InsnNode {
 
 	public ArgType getArrayType() {
 		return ArgType.array(elemType);
+	}
+
+	public int getInvalidArgIndex() {
+		return invalidArgIndex;
+	}
+
+	public @Nullable ArgType getInvalidSourceType() {
+		return invalidSourceType;
+	}
+
+	public void setInvalidArgType(int invalidArgIndex, ArgType invalidSourceType) {
+		this.invalidArgIndex = invalidArgIndex;
+		this.invalidSourceType = invalidSourceType;
+	}
+
+	public @Nullable ArgType getInvalidElementType() {
+		return invalidElementType;
+	}
+
+	public void setInvalidElementType(ArgType invalidElementType) {
+		this.invalidElementType = invalidElementType;
 	}
 
 	@Override
@@ -36,7 +61,11 @@ public class FilledNewArrayNode extends InsnNode {
 
 	@Override
 	public InsnNode copy() {
-		return copyCommonParams(new FilledNewArrayNode(elemType, getArgsCount()));
+		FilledNewArrayNode copy = new FilledNewArrayNode(elemType, getArgsCount());
+		copy.invalidArgIndex = invalidArgIndex;
+		copy.invalidSourceType = invalidSourceType;
+		copy.invalidElementType = invalidElementType;
+		return copyCommonParams(copy);
 	}
 
 	@Override

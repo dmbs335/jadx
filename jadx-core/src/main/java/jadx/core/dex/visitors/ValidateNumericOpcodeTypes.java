@@ -8,8 +8,12 @@ import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArrayPutNode;
 import jadx.core.dex.instructions.CmpInsnNode;
 import jadx.core.dex.instructions.FieldPutNode;
+import jadx.core.dex.instructions.FilledNewArrayNode;
+import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.NumericCastNode;
+import jadx.core.dex.instructions.ReturnNode;
+import jadx.core.dex.instructions.SwitchInsn;
 import jadx.core.dex.instructions.UnaryNumericNode;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.BlockNode;
@@ -47,6 +51,14 @@ public class ValidateNumericOpcodeTypes extends AbstractVisitor {
 					validateFieldPut((FieldPutNode) insn);
 				} else if (insn instanceof InvokeNode) {
 					validateInvoke((InvokeNode) insn);
+				} else if (insn instanceof ReturnNode) {
+					validateReturn(mth, (ReturnNode) insn);
+				} else if (insn instanceof FilledNewArrayNode) {
+					validateFilledNewArray((FilledNewArrayNode) insn);
+				} else if (insn instanceof SwitchInsn) {
+					validateSwitch((SwitchInsn) insn);
+				} else if (insn instanceof IfNode) {
+					validateIf((IfNode) insn);
 				}
 			}
 		}
@@ -142,6 +154,52 @@ public class ValidateNumericOpcodeTypes extends AbstractVisitor {
 					type -> InsnUtils.isIncompatibleArithPrimitive(type, expectedType));
 			if (invalidType != null) {
 				insn.setInvalidArgType(i, invalidType, expectedType);
+				return;
+			}
+		}
+	}
+
+	private static void validateReturn(MethodNode mth, ReturnNode insn) {
+		ArgType expectedType = mth.getReturnType();
+		if (!ArgType.FLOAT.equals(expectedType) && !ArgType.DOUBLE.equals(expectedType)) {
+			return;
+		}
+		ArgType invalidType = InsnUtils.findDeclaredSourceType(insn.getArg(0),
+				type -> InsnUtils.isIncompatibleArithPrimitive(type, expectedType));
+		if (invalidType != null) {
+			insn.setInvalidSourceType(invalidType);
+		}
+	}
+
+	private static void validateFilledNewArray(FilledNewArrayNode insn) {
+		ArgType expectedType = insn.getElemType();
+		if (!ArgType.FLOAT.equals(expectedType) && !ArgType.DOUBLE.equals(expectedType)) {
+			return;
+		}
+		for (int i = 0; i < insn.getArgsCount(); i++) {
+			ArgType invalidType = InsnUtils.findDeclaredSourceType(insn.getArg(i),
+					type -> InsnUtils.isIncompatibleArithPrimitive(type, expectedType));
+			if (invalidType != null) {
+				insn.setInvalidArgType(i, invalidType);
+				return;
+			}
+		}
+	}
+
+	private static void validateSwitch(SwitchInsn insn) {
+		ArgType invalidType = InsnUtils.findDeclaredSourceType(insn.getArg(0),
+				type -> InsnUtils.isIncompatibleArithPrimitive(type, ArgType.INT));
+		if (invalidType != null) {
+			insn.setInvalidSourceType(invalidType);
+		}
+	}
+
+	private static void validateIf(IfNode insn) {
+		for (int i = 0; i < insn.getArgsCount(); i++) {
+			ArgType invalidType = InsnUtils.findDeclaredSourceType(insn.getArg(i),
+					type -> InsnUtils.isIncompatibleArithPrimitive(type, ArgType.INT));
+			if (invalidType != null) {
+				insn.setInvalidArgType(i, invalidType);
 				return;
 			}
 		}

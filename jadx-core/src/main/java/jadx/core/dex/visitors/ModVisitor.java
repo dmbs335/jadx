@@ -407,11 +407,18 @@ public class ModVisitor extends AbstractVisitor {
 	}
 
 	private static boolean checkArrSizes(MethodNode mth, NewArrayNode newArrInsn, FillArrayInsn fillArrInsn) {
+		if (!fillArrInsn.hasCompatibleArrayType(newArrInsn.getArrayType())) {
+			return false;
+		}
 		int dataSize = fillArrInsn.getSize();
 		InsnArg arrSizeArg = newArrInsn.getArg(0);
 		Object value = InsnUtils.getConstValueByArg(mth.root(), arrSizeArg);
 		if (value instanceof LiteralArg) {
 			long literal = ((LiteralArg) value).getLiteral();
+			if (literal >= 0 && dataSize > literal) {
+				fillArrInsn.setInvalidArraySize((int) literal);
+				return false;
+			}
 			return dataSize == (int) literal;
 		}
 		return false;

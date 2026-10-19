@@ -55,6 +55,7 @@ import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.InvokeType;
 import jadx.core.dex.instructions.NewArrayNode;
 import jadx.core.dex.instructions.NumericCastNode;
+import jadx.core.dex.instructions.ReturnNode;
 import jadx.core.dex.instructions.SwitchInsn;
 import jadx.core.dex.instructions.UnaryNumericNode;
 import jadx.core.dex.instructions.args.ArgType;
@@ -507,6 +508,13 @@ public class InsnGen {
 
 			case RETURN:
 				if (insn.getArgsCount() != 0) {
+					if (!isFallback() && insn instanceof ReturnNode) {
+						ArgType invalidSourceType = ((ReturnNode) insn).getInvalidSourceType();
+						if (invalidSourceType != null) {
+							throw new CodegenException("Return operand type " + invalidSourceType
+									+ " does not match method return type " + mth.getReturnType());
+						}
+					}
 					checkReturnOperand(insn.getArg(0));
 					code.add("return ");
 					addArgWithExpectedType(code, insn.getArg(0), mth.getReturnType());
@@ -922,11 +930,23 @@ public class InsnGen {
 	 * Use one by one array fill (can be replaced with System.arrayCopy)
 	 */
 	private void fillArray(ICodeWriter code, FillArrayInsn arrayNode) throws CodegenException {
+		if (!isFallback() && arrayNode.getInvalidArraySize() >= 0) {
+			throw new CodegenException("Fill-array payload size " + arrayNode.getSize()
+					+ " exceeds array length " + arrayNode.getInvalidArraySize());
+		}
+		InsnArg arrArg = arrayNode.getArg(0);
+		ArgType declaredArrayType = InsnUtils.getDeclaredArrayType(arrArg);
+		if (!declaredArrayType.isArray()) {
+			declaredArrayType = arrArg.getType();
+		}
+		if (!isFallback() && !arrayNode.hasCompatibleArrayType(declaredArrayType)) {
+			throw new CodegenException("Fill-array payload element width " + arrayNode.getElementSize()
+					+ " does not match array element type " + declaredArrayType.getArrayElement());
+		}
 		if (mth.checkCommentsLevel(CommentsLevel.INFO)) {
 			code.add("// fill-array-data instruction");
 		}
 		code.startLine();
-		InsnArg arrArg = arrayNode.getArg(0);
 		ArgType arrayType = arrArg.getType();
 		ArgType elemType;
 		if (arrayType.isTypeKnown() && arrayType.isArray()) {
@@ -1019,6 +1039,13 @@ public class InsnGen {
 	}
 
 	private void filledNewArray(FilledNewArrayNode insn, ICodeWriter code) throws CodegenException {
+		if (!isFallback() && insn.getInvalidElementType() != null) {
+			throw new CodegenException("filled-new-array does not support wide element type: " + insn.getInvalidElementType());
+		}
+		if (!isFallback() && insn.getInvalidArgIndex() >= 0) {
+			throw new CodegenException("Array initializer operand " + insn.getInvalidArgIndex() + " type "
+					+ insn.getInvalidSourceType() + " does not match element type " + insn.getElemType());
+		}
 		if (!insn.contains(AFlag.DECLARE_VAR)) {
 			code.add("new ");
 			useType(code, insn.getArrayType());

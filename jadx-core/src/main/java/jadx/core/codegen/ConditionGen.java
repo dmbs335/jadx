@@ -103,6 +103,10 @@ public class ConditionGen extends InsnGen {
 	}
 
 	private void addCompare(ICodeWriter code, CondStack stack, Compare compare, IfOp op) throws CodegenException {
+		if (!fallback && compare.getInsn().getInvalidArgIndex() >= 0) {
+			throw new CodegenException("If operand " + compare.getInsn().getInvalidArgIndex() + " type "
+					+ compare.getInsn().getInvalidSourceType() + " is not valid for a DEX branch comparison");
+		}
 		InsnArg firstArg = compare.getA();
 		InsnArg secondArg = compare.getB();
 		if (addFloatingCmp(code, firstArg, secondArg, op)) {

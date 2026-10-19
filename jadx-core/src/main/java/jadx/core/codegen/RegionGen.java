@@ -244,6 +244,10 @@ public class RegionGen extends InsnGen {
 
 	public void makeSwitch(SwitchRegion sw, ICodeWriter code) throws CodegenException {
 		SwitchInsn insn = sw.getInsn();
+		ArgType invalidSourceType = insn.getInvalidSourceType();
+		if (invalidSourceType != null) {
+			throw new CodegenException("Switch operand type " + invalidSourceType + " is not an integral type");
+		}
 		InsnArg arg = insn.getArg(0);
 		code.startLine("switch (");
 		addArg(code, arg, false);

@@ -355,9 +355,9 @@ public class InsnDecoder {
 				return new InsnNode(InsnType.RETURN, 0);
 
 			case RETURN:
-				return insn(InsnType.RETURN,
-						null,
-						InsnArg.reg(insn, 0, method.getReturnType()));
+				InsnNode returnInsn = new ReturnNode();
+				returnInsn.addArg(InsnArg.reg(insn, 0, method.getReturnType()));
+				return returnInsn;
 
 			case INSTANCE_OF:
 				InsnNode instInsn = new IndexInsnNode(InsnType.INSTANCE_OF, ArgType.parse(insn.getIndexAsType()), 1);
@@ -553,6 +553,12 @@ public class InsnDecoder {
 	private InsnNode filledNewArray(InsnData insn, boolean isRange) {
 		ArgType arrType = ArgType.parse(insn.getIndexAsType());
 		ArgType elType = arrType.getArrayElement();
+		if (ArgType.LONG.equals(elType) || ArgType.DOUBLE.equals(elType)) {
+			// Keep the result for move-result-object, but don't interpret wide register words as elements.
+			FilledNewArrayNode invalidNode = new FilledNewArrayNode(elType, 0);
+			invalidNode.setInvalidElementType(elType);
+			return invalidNode;
+		}
 		boolean typeImmutable = elType.isPrimitive();
 		int regsCount = insn.getRegsCount();
 		InsnArg[] regs = new InsnArg[regsCount];
