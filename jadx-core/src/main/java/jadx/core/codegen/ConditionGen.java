@@ -148,6 +148,7 @@ public class ConditionGen extends InsnGen {
 		if (firstBoolean != secondBoolean) {
 			throw new CodegenException("Unsupported mixed boolean condition " + op.getSymbol());
 		}
+		checkReferenceComparison(firstArg, secondArg);
 
 		if (!addLambdaObjectOperandIfNeeded(code, firstArg)) {
 			addArg(code, firstArg, isArgWrapNeeded(firstArg));
@@ -155,6 +156,20 @@ public class ConditionGen extends InsnGen {
 		code.add(' ').add(op.getSymbol()).add(' ');
 		if (!addLambdaObjectOperandIfNeeded(code, secondArg)) {
 			addArg(code, secondArg, isArgWrapNeeded(secondArg));
+		}
+	}
+
+	private void checkReferenceComparison(InsnArg firstArg, InsnArg secondArg) throws CodegenException {
+		if (fallback || firstArg.isZeroLiteral() || secondArg.isZeroLiteral()) {
+			return;
+		}
+		ArgType firstType = getExpressionArgType(firstArg);
+		ArgType secondType = getExpressionArgType(secondArg);
+		if (firstType != null && secondType != null && firstType.isObject() && secondType.isObject()
+				&& !firstType.isGenericType() && !secondType.isGenericType()
+				&& isKnownFinalClassType(firstType) && isKnownFinalClassType(secondType)
+				&& root.getTypeCompare().compareTypes(firstType, secondType).isConflict()) {
+			throw new CodegenException("Incompatible reference comparison: " + firstType + " and " + secondType);
 		}
 	}
 

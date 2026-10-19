@@ -2230,7 +2230,7 @@ public class InsnGen {
 		throw new CodegenException("Invalid " + op + " operand type: " + type);
 	}
 
-	private static ArgType getExpressionArgType(InsnArg arg) {
+	static ArgType getExpressionArgType(InsnArg arg) {
 		if (arg.isInsnWrap()) {
 			InsnNode wrapped = ((InsnWrapArg) arg).getWrapInsn();
 			ArgType declared = InsnUtils.getDeclaredResultType(wrapped);
@@ -2250,7 +2250,7 @@ public class InsnGen {
 		return clspCls != null && !clspCls.isInterface();
 	}
 
-	private boolean isKnownFinalClassType(ArgType type) {
+	boolean isKnownFinalClassType(ArgType type) {
 		ClassNode cls = root.resolveClass(type);
 		if (cls != null) {
 			return !cls.getAccessFlags().isInterface() && cls.getAccessFlags().isFinal();
