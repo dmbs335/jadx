@@ -90,7 +90,9 @@ public class InvokeNode extends BaseInvokeNode {
 
 	@Override
 	public InsnNode copy() {
-		return copyCommonParams(new InvokeNode(mth, type, getArgsCount()));
+		InvokeNode copy = new InvokeNode(mth, type, getArgsCount());
+		copyInvalidArgTypeTo(copy);
+		return copyCommonParams(copy);
 	}
 
 	@Override

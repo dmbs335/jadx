@@ -218,11 +218,28 @@ public class InsnUtils {
 		return !expectedType.equals(sourceType);
 	}
 
+	public static boolean isIncompatibleUnaryPrimitive(ArgType sourceType, ArgType expectedType) {
+		if (sourceType == null || !sourceType.isTypeKnown() || !sourceType.isPrimitive()) {
+			return false;
+		}
+		if (ArgType.INT.equals(expectedType)) {
+			return !ArgType.INT.equals(sourceType) && !ArgType.BYTE.equals(sourceType)
+					&& !ArgType.SHORT.equals(sourceType) && !ArgType.CHAR.equals(sourceType);
+		}
+		return !expectedType.equals(sourceType);
+	}
+
 	public static ArgType getDeclaredArrayType(InsnArg arrayArg) {
 		InsnNode producer = null;
 		if (arrayArg instanceof RegisterArg) {
 			SSAVar arrayVar = ((RegisterArg) arrayArg).getSVar();
 			producer = arrayVar == null ? null : arrayVar.getAssignInsn();
+			if (producer == null && arrayVar != null && arrayVar.getAssign() != null) {
+				ArgType initialType = arrayVar.getAssign().getInitType();
+				if (initialType.isArray()) {
+					return initialType;
+				}
+			}
 		} else if (arrayArg instanceof InsnWrapArg) {
 			producer = ((InsnWrapArg) arrayArg).getWrapInsn();
 		}

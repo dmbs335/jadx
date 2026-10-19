@@ -22,7 +22,7 @@ public class TestInvalidUnaryOperand extends SmaliTest {
 				.code()
 				.contains("Invalid unary operand type for '-': java.lang.Object")
 				.contains("Invalid unary operand type for '~': java.lang.Object")
-				.contains("Invalid unary operand type for '~': float")
+				.contains("Unary operand type float does not match opcode type int")
 				.contains("Method not decompiled: types.TestInvalidUnaryOperand.negInvoke():int")
 				.contains("Method not decompiled: types.TestInvalidUnaryOperand.notInvoke():int")
 				.contains("return -i;")

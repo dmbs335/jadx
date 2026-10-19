@@ -205,6 +205,9 @@ public class ConstructorVisitor extends AbstractVisitor {
 	 */
 	@Nullable
 	private static ConstructorInsn processConstructor(MethodNode mth, ConstructorInsn co) {
+		if (co.getInvalidArgIndex() >= 0) {
+			return null;
+		}
 		MethodNode callMth = mth.root().resolveMethod(co.getCallMth());
 		if (callMth == null
 				|| !callMth.getAccessFlags().isSynthetic()

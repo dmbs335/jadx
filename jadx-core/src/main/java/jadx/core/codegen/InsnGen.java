@@ -37,10 +37,12 @@ import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArithOp;
+import jadx.core.dex.instructions.ArrayPutNode;
 import jadx.core.dex.instructions.BaseInvokeNode;
 import jadx.core.dex.instructions.CmpInsnNode;
 import jadx.core.dex.instructions.ConstClassNode;
 import jadx.core.dex.instructions.ConstStringNode;
+import jadx.core.dex.instructions.FieldPutNode;
 import jadx.core.dex.instructions.FillArrayInsn;
 import jadx.core.dex.instructions.FilledNewArrayNode;
 import jadx.core.dex.instructions.GotoNode;
@@ -52,7 +54,9 @@ import jadx.core.dex.instructions.InvokeCustomRawNode;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.InvokeType;
 import jadx.core.dex.instructions.NewArrayNode;
+import jadx.core.dex.instructions.NumericCastNode;
 import jadx.core.dex.instructions.SwitchInsn;
+import jadx.core.dex.instructions.UnaryNumericNode;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.InsnArg;
@@ -450,6 +454,14 @@ public class InsnGen {
 
 			case CHECK_CAST:
 			case CAST: {
+				if (!isFallback() && insn instanceof NumericCastNode) {
+					NumericCastNode numericCast = (NumericCastNode) insn;
+					ArgType invalidSourceType = numericCast.getInvalidSourceType();
+					if (invalidSourceType != null) {
+						throw new CodegenException("Numeric cast operand type " + invalidSourceType
+								+ " does not match opcode source type " + numericCast.getSourceType());
+					}
+				}
 				if (isRedundantLambdaInterfaceCast(insn)) {
 					addArg(code, insn.getArg(0), true);
 					break;
@@ -658,6 +670,14 @@ public class InsnGen {
 				break;
 
 			case APUT: {
+				if (!isFallback() && insn instanceof ArrayPutNode) {
+					ArrayPutNode arrayPut = (ArrayPutNode) insn;
+					ArgType invalidSourceType = arrayPut.getInvalidSourceType();
+					if (invalidSourceType != null) {
+						throw new CodegenException("Array write operand type " + invalidSourceType
+								+ " does not match element type " + arrayPut.getInvalidElementType());
+					}
+				}
 				checkArrayOperand(insn.getArg(0));
 				checkArrayIndex(insn.getArg(1), "index");
 				ArgType arrayType = insn.getArg(0).getType();
@@ -683,6 +703,7 @@ public class InsnGen {
 				break;
 			}
 			case IPUT: {
+				checkFieldPutOpcodeOperand(insn);
 				FieldInfo fieldInfo = (FieldInfo) ((IndexInsnNode) insn).getIndex();
 				checkAssignmentOperand(insn.getArg(0), fieldInfo.getType(), "field assignment");
 				instanceField(code, fieldInfo, insn.getArg(1), insn.contains(AFlag.EXPLICIT_CAST));
@@ -695,6 +716,7 @@ public class InsnGen {
 				staticField(code, (FieldInfo) ((IndexInsnNode) insn).getIndex());
 				break;
 			case SPUT:
+				checkFieldPutOpcodeOperand(insn);
 				FieldInfo field = (FieldInfo) ((IndexInsnNode) insn).getIndex();
 				checkAssignmentOperand(insn.getArg(0), field.getType(), "field assignment");
 				staticField(code, field);
@@ -926,6 +948,14 @@ public class InsnGen {
 	}
 
 	private void oneArgInsn(ICodeWriter code, InsnNode insn, Set<Flags> state, char op) throws CodegenException {
+		if (!isFallback() && insn instanceof UnaryNumericNode) {
+			UnaryNumericNode unaryInsn = (UnaryNumericNode) insn;
+			ArgType invalidSourceType = unaryInsn.getInvalidSourceType();
+			if (invalidSourceType != null) {
+				throw new CodegenException("Unary operand type " + invalidSourceType
+						+ " does not match opcode type " + unaryInsn.getOperandType());
+			}
+		}
 		checkUnaryOperand(insn.getArg(0), op);
 		boolean wrap = state.contains(Flags.BODY_ONLY);
 		if (wrap) {
@@ -1013,6 +1043,7 @@ public class InsnGen {
 	}
 
 	private void makeConstructor(ConstructorInsn insn, ICodeWriter code) throws CodegenException {
+		checkInvokeOpcodeOperand(insn);
 		ClassNode cls = mth.root().resolveClass(insn.getClassType());
 		if (cls != null && cls.isAnonymous() && !fallback) {
 			inlineAnonymousConstructor(code, cls, insn);
@@ -1146,7 +1177,15 @@ public class InsnGen {
 		mth.getParentClass().addInlinedClass(cls);
 	}
 
+	private void checkInvokeOpcodeOperand(BaseInvokeNode insn) throws CodegenException {
+		if (!isFallback() && insn.getInvalidArgIndex() >= 0) {
+			throw new CodegenException("Method argument " + insn.getInvalidArgIndex() + " type "
+					+ insn.getInvalidSourceType() + " does not match parameter type " + insn.getInvalidExpectedType());
+		}
+	}
+
 	private void makeInvoke(InvokeNode insn, ICodeWriter code) throws CodegenException {
+		checkInvokeOpcodeOperand(insn);
 		InvokeType type = insn.getInvokeType();
 		if (type == InvokeType.CUSTOM) {
 			makeInvokeLambda(code, (InvokeCustomNode) insn);
@@ -1629,6 +1668,19 @@ public class InsnGen {
 
 	private void checkReturnOperand(InsnArg arg) throws CodegenException {
 		checkAssignmentOperand(arg, mth.getReturnType(), "return");
+	}
+
+	private void checkFieldPutOpcodeOperand(InsnNode insn) throws CodegenException {
+		if (isFallback() || !(insn instanceof FieldPutNode)) {
+			return;
+		}
+		FieldPutNode fieldPut = (FieldPutNode) insn;
+		ArgType invalidSourceType = fieldPut.getInvalidSourceType();
+		if (invalidSourceType != null) {
+			ArgType fieldType = ((FieldInfo) fieldPut.getIndex()).getType();
+			throw new CodegenException("Field write operand type " + invalidSourceType
+					+ " does not match field type " + fieldType);
+		}
 	}
 
 	private void checkAssignmentOperand(InsnArg arg, @Nullable ArgType expected, String operation) throws CodegenException {

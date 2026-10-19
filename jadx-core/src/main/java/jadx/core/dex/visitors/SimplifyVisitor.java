@@ -25,6 +25,7 @@ import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.InvokeType;
+import jadx.core.dex.instructions.NumericCastNode;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
@@ -221,6 +222,9 @@ public class SimplifyVisitor extends AbstractVisitor {
 	}
 
 	private static InsnNode processCast(MethodNode mth, IndexInsnNode castInsn, @Nullable InsnNode parentInsn) {
+		if (castInsn instanceof NumericCastNode && ((NumericCastNode) castInsn).getInvalidSourceType() != null) {
+			return null;
+		}
 		if (castInsn.contains(AFlag.EXPLICIT_CAST)) {
 			return null;
 		}

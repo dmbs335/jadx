@@ -381,7 +381,7 @@ public class InsnDecoder {
 
 			case IPUT:
 				FieldInfo iputFld = FieldInfo.fromRef(root, insn.getIndexAsField());
-				InsnNode iputInsn = new IndexInsnNode(InsnType.IPUT, iputFld, 2);
+				InsnNode iputInsn = new FieldPutNode(InsnType.IPUT, iputFld, 2);
 				iputInsn.addArg(InsnArg.reg(insn, 0, tryResolveFieldType(iputFld)));
 				iputInsn.addArg(InsnArg.reg(insn, 1, iputFld.getDeclClass().getType()));
 				return iputInsn;
@@ -394,7 +394,7 @@ public class InsnDecoder {
 
 			case SPUT:
 				FieldInfo sputFld = FieldInfo.fromRef(root, insn.getIndexAsField());
-				InsnNode sputInsn = new IndexInsnNode(InsnType.SPUT, sputFld, 1);
+				InsnNode sputInsn = new FieldPutNode(InsnType.SPUT, sputFld, 1);
 				sputInsn.addArg(InsnArg.reg(insn, 0, tryResolveFieldType(sputFld)));
 				return sputInsn;
 
@@ -585,7 +585,7 @@ public class InsnDecoder {
 	}
 
 	private InsnNode cast(InsnData insn, ArgType from, ArgType to) {
-		InsnNode inode = new IndexInsnNode(InsnType.CAST, to, 1);
+		InsnNode inode = new NumericCastNode(from, to);
 		inode.setResult(InsnArg.reg(insn, 0, to));
 		inode.addArg(InsnArg.reg(insn, 1, from));
 		return inode;
@@ -653,7 +653,7 @@ public class InsnDecoder {
 	}
 
 	private InsnNode arrayPut(InsnData insn, ArgType arrElemType, ArgType argType) {
-		InsnNode inode = new InsnNode(InsnType.APUT, 3);
+		InsnNode inode = new ArrayPutNode();
 		inode.addArg(InsnArg.typeImmutableIfKnownReg(insn, 1, ArgType.array(arrElemType)));
 		inode.addArg(InsnArg.reg(insn, 2, ArgType.NARROW_INTEGRAL));
 		inode.addArg(InsnArg.typeImmutableIfKnownReg(insn, 0, argType));
@@ -669,14 +669,14 @@ public class InsnDecoder {
 	}
 
 	private InsnNode neg(InsnData insn, ArgType type) {
-		InsnNode inode = new InsnNode(InsnType.NEG, 1);
+		InsnNode inode = new UnaryNumericNode(InsnType.NEG, type);
 		inode.setResult(InsnArg.reg(insn, 0, type));
 		inode.addArg(InsnArg.reg(insn, 1, type));
 		return inode;
 	}
 
 	private InsnNode not(InsnData insn, ArgType type) {
-		InsnNode inode = new InsnNode(InsnType.NOT, 1);
+		InsnNode inode = new UnaryNumericNode(InsnType.NOT, type);
 		inode.setResult(InsnArg.reg(insn, 0, type));
 		inode.addArg(InsnArg.reg(insn, 1, type));
 		return inode;

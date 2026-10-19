@@ -30,6 +30,7 @@ public final class ConstructorInsn extends BaseInvokeNode {
 
 	public ConstructorInsn(MethodNode mth, InvokeNode invoke, MethodInfo callMth) {
 		super(InsnType.CONSTRUCTOR, invoke.getArgsCount() - 1);
+		invoke.copyInvalidArgTypeTo(this);
 		this.callMth = callMth;
 		this.callType = getCallType(mth, callMth.getDeclClass(), invoke.getArg(0));
 		int argsCount = invoke.getArgsCount();
@@ -118,7 +119,9 @@ public final class ConstructorInsn extends BaseInvokeNode {
 
 	@Override
 	public InsnNode copy() {
-		return copyCommonParams(new ConstructorInsn(callMth, callType));
+		ConstructorInsn copy = new ConstructorInsn(callMth, callType);
+		copyInvalidArgTypeTo(copy);
+		return copyCommonParams(copy);
 	}
 
 	@Override

@@ -1,9 +1,16 @@
 package jadx.core.dex.visitors;
 
+import java.util.List;
 import java.util.function.Predicate;
 
+import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.instructions.ArithNode;
+import jadx.core.dex.instructions.ArrayPutNode;
 import jadx.core.dex.instructions.CmpInsnNode;
+import jadx.core.dex.instructions.FieldPutNode;
+import jadx.core.dex.instructions.InvokeNode;
+import jadx.core.dex.instructions.NumericCastNode;
+import jadx.core.dex.instructions.UnaryNumericNode;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.InsnNode;
@@ -30,6 +37,16 @@ public class ValidateNumericOpcodeTypes extends AbstractVisitor {
 					validateCmp((CmpInsnNode) insn);
 				} else if (insn instanceof ArithNode) {
 					validateArith((ArithNode) insn);
+				} else if (insn instanceof UnaryNumericNode) {
+					validateUnary((UnaryNumericNode) insn);
+				} else if (insn instanceof NumericCastNode) {
+					validateCast((NumericCastNode) insn);
+				} else if (insn instanceof ArrayPutNode) {
+					validateArrayPut((ArrayPutNode) insn);
+				} else if (insn instanceof FieldPutNode) {
+					validateFieldPut((FieldPutNode) insn);
+				} else if (insn instanceof InvokeNode) {
+					validateInvoke((InvokeNode) insn);
 				}
 			}
 		}
@@ -62,6 +79,69 @@ public class ValidateNumericOpcodeTypes extends AbstractVisitor {
 					type -> InsnUtils.isIncompatibleArithPrimitive(type, expectedType));
 			if (invalidType != null) {
 				insn.setInvalidSourceType(invalidType, expectedType);
+				return;
+			}
+		}
+	}
+
+	private static void validateUnary(UnaryNumericNode insn) {
+		ArgType expectedType = insn.getOperandType();
+		ArgType invalidType = InsnUtils.findDeclaredSourceType(insn.getArg(0),
+				type -> InsnUtils.isIncompatibleUnaryPrimitive(type, expectedType));
+		if (invalidType != null) {
+			insn.setInvalidSourceType(invalidType);
+		}
+	}
+
+	private static void validateCast(NumericCastNode insn) {
+		ArgType expectedType = insn.getSourceType();
+		ArgType invalidType = InsnUtils.findDeclaredSourceType(insn.getArg(0),
+				type -> InsnUtils.isIncompatibleArithPrimitive(type, expectedType));
+		if (invalidType != null) {
+			insn.setInvalidSourceType(invalidType);
+		}
+	}
+
+	private static void validateArrayPut(ArrayPutNode insn) {
+		ArgType arrayType = InsnUtils.getDeclaredArrayType(insn.getArg(0));
+		if (!arrayType.isArray()) {
+			return;
+		}
+		ArgType elementType = arrayType.getArrayElement();
+		if (!ArgType.FLOAT.equals(elementType) && !ArgType.DOUBLE.equals(elementType)) {
+			return;
+		}
+		ArgType invalidType = InsnUtils.findDeclaredSourceType(insn.getArg(2),
+				type -> InsnUtils.isIncompatibleArithPrimitive(type, elementType));
+		if (invalidType != null) {
+			insn.setInvalidSourceType(invalidType, elementType);
+		}
+	}
+
+	private static void validateFieldPut(FieldPutNode insn) {
+		ArgType fieldType = ((FieldInfo) insn.getIndex()).getType();
+		if (!ArgType.FLOAT.equals(fieldType) && !ArgType.DOUBLE.equals(fieldType)) {
+			return;
+		}
+		ArgType invalidType = InsnUtils.findDeclaredSourceType(insn.getArg(0),
+				type -> InsnUtils.isIncompatibleArithPrimitive(type, fieldType));
+		if (invalidType != null) {
+			insn.setInvalidSourceType(invalidType);
+		}
+	}
+
+	private static void validateInvoke(InvokeNode insn) {
+		int offset = insn.getFirstArgOffset();
+		List<ArgType> parameterTypes = insn.getCallMth().getArgumentsTypes();
+		for (int i = 0; i < parameterTypes.size() && i + offset < insn.getArgsCount(); i++) {
+			ArgType expectedType = parameterTypes.get(i);
+			if (!ArgType.FLOAT.equals(expectedType) && !ArgType.DOUBLE.equals(expectedType)) {
+				continue;
+			}
+			ArgType invalidType = InsnUtils.findDeclaredSourceType(insn.getArg(i + offset),
+					type -> InsnUtils.isIncompatibleArithPrimitive(type, expectedType));
+			if (invalidType != null) {
+				insn.setInvalidArgType(i, invalidType, expectedType);
 				return;
 			}
 		}
