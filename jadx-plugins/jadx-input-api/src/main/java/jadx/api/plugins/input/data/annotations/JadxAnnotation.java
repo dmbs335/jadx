@@ -89,7 +89,7 @@ public class JadxAnnotation implements IAnnotation {
 
 		private Object[] entries;
 		private int size;
-		private LinkedHashMap<K, V> delegate;
+		private Map<K, V> delegate;
 
 		private static <K, V> Map<K, V> pack(Map<K, V> source) {
 			if (source == null || source.isEmpty()) {
@@ -109,7 +109,7 @@ public class JadxAnnotation implements IAnnotation {
 			return map;
 		}
 
-		private LinkedHashMap<K, V> ensureDelegate() {
+		private Map<K, V> ensureDelegate() {
 			if (delegate == null) {
 				delegate = new LinkedHashMap<>(Math.max(size + 1, 4));
 				for (int i = 0; i < size; i++) {
