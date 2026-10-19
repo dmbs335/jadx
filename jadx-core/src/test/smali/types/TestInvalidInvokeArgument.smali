@@ -23,6 +23,11 @@
     return-void
 .end method
 
+.method public static consumeNumber(Ljava/lang/Number;)V
+    .locals 0
+    return-void
+.end method
+
 .method public static consumeObject(Ljava/lang/Object;)V
     .locals 0
     return-void
@@ -41,6 +46,18 @@
     invoke-static {}, Ltypes/TestInvalidInvokeArgument;->getInt()I
     move-result v0
     invoke-static {v0}, Ltypes/TestInvalidInvokeArgument;->consumeString(Ljava/lang/String;)V
+    return-void
+.end method
+
+.method public static parameterStringToInt(Ljava/lang/String;)V
+    .locals 0
+    invoke-static {p0}, Ltypes/TestInvalidInvokeArgument;->consumeInt(I)V
+    return-void
+.end method
+
+.method public static parameterStringToNumber(Ljava/lang/String;)V
+    .locals 0
+    invoke-static {p0}, Ltypes/TestInvalidInvokeArgument;->consumeNumber(Ljava/lang/Number;)V
     return-void
 .end method
 

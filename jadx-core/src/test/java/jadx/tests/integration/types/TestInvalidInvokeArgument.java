@@ -12,7 +12,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestInvalidInvokeArgument extends SmaliTest {
 	@Override
 	protected void runChecks(List<ClassNode> classes) {
-		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(2);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(4);
 	}
 
 	@Test
@@ -21,8 +21,11 @@ public class TestInvalidInvokeArgument extends SmaliTest {
 		assertThat(getClassNodeFromSmali()).code()
 				.contains("Incompatible method argument type: java.lang.String for int")
 				.contains("Incompatible method argument type: int for java.lang.String")
+				.contains("Incompatible method argument type: java.lang.String for java.lang.Number")
 				.contains("Method not decompiled: types.TestInvalidInvokeArgument.stringToInt():void")
 				.contains("Method not decompiled: types.TestInvalidInvokeArgument.intToString():void")
+				.contains("Method not decompiled: types.TestInvalidInvokeArgument.parameterStringToInt(java.lang.String):void")
+				.contains("Method not decompiled: types.TestInvalidInvokeArgument.parameterStringToNumber(java.lang.String):void")
 				.contains("consumeObject(getString());")
 				.contains("consumeObject(getInt());");
 	}

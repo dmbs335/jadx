@@ -25,6 +25,13 @@
     return v0
 .end method
 
+.method public static stringToNumber(Ljava/lang/String;)I
+    .locals 1
+    invoke-virtual {p0}, Ljava/lang/Number;->intValue()I
+    move-result v0
+    return v0
+.end method
+
 .method public static object(Ljava/lang/Object;)I
     .locals 1
 

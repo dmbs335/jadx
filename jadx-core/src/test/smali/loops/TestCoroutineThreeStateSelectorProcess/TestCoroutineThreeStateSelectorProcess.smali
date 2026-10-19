@@ -12,6 +12,7 @@
 
 .method public final process(Lio/ktor/network/selector/LockFreeMPSCQueue;Ljava/nio/channels/Selector;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     .registers 16
+    # p0 aliases v12; keep the coroutine result in the free v11 register.
 
     instance-of v0, p3, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;
     if-eqz v0, :new_state
@@ -30,7 +31,7 @@
     invoke-direct {v0, p0, p3}, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;-><init>(Lloops/TestCoroutineThreeStateSelectorProcess;Lkotlin/coroutines/Continuation;)V
 
     :state_ready
-    iget-object v12, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->result:Ljava/lang/Object;
+    iget-object v11, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->result:Ljava/lang/Object;
     invoke-static {}, Lkotlin/coroutines/intrinsics/IntrinsicsKt;->getCOROUTINE_SUSPENDED()Ljava/lang/Object;
     move-result-object v1
     iget v2, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->label:I
@@ -47,7 +48,7 @@
     check-cast p2, Ljava/nio/channels/Selector;
     iget-object p1, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->L$0:Ljava/lang/Object;
     check-cast p1, Lio/ktor/network/selector/LockFreeMPSCQueue;
-    invoke-static {v12}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {v11}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
     goto :after_select
 
     :check_state_two
@@ -56,7 +57,7 @@
     check-cast p2, Ljava/nio/channels/Selector;
     iget-object p1, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->L$0:Ljava/lang/Object;
     check-cast p1, Lio/ktor/network/selector/LockFreeMPSCQueue;
-    invoke-static {v12}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {v11}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
     goto :loop
 
     :check_state_three
@@ -66,7 +67,7 @@
     check-cast p2, Ljava/nio/channels/Selector;
     iget-object p1, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->L$0:Ljava/lang/Object;
     check-cast p1, Lio/ktor/network/selector/LockFreeMPSCQueue;
-    invoke-static {v12}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {v11}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
     goto :after_receive
 
     :bad_state
@@ -75,7 +76,7 @@
     throw v2
 
     :initial
-    invoke-static {v12}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {v11}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
 
     :loop
     iget-boolean v7, p0, Lloops/TestCoroutineThreeStateSelectorProcess;->closed:Z
@@ -87,12 +88,12 @@
     iput-object p2, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->L$1:Ljava/lang/Object;
     iput v3, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->label:I
     invoke-virtual {p0, p2, v0}, Lloops/TestCoroutineThreeStateSelectorProcess;->select(Ljava/nio/channels/Selector;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
-    move-result-object v12
-    if-eq v12, v1, :suspended
+    move-result-object v11
+    if-eq v11, v1, :suspended
 
     :after_select
-    check-cast v12, Ljava/lang/Number;
-    invoke-virtual {v12}, Ljava/lang/Number;->intValue()I
+    check-cast v11, Ljava/lang/Number;
+    invoke-virtual {v11}, Ljava/lang/Number;->intValue()I
     move-result v7
     if-lez v7, :queue_fallback
     invoke-virtual {p2}, Ljava/nio/channels/Selector;->selectedKeys()Ljava/util/Set;
@@ -110,8 +111,8 @@
     iput-object p2, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->L$1:Ljava/lang/Object;
     iput v5, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->label:I
     invoke-static {v0}, Lkotlinx/coroutines/YieldKt;->yield(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
-    move-result-object v12
-    if-eq v12, v1, :suspended
+    move-result-object v11
+    if-eq v11, v1, :suspended
     goto :loop
 
     :receive_call
@@ -122,11 +123,11 @@
     const/4 v7, 0x3
     iput v7, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->label:I
     invoke-virtual {p0, p1, v0}, Lloops/TestCoroutineThreeStateSelectorProcess;->receive(Lio/ktor/network/selector/LockFreeMPSCQueue;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
-    move-result-object v12
-    if-eq v12, v1, :suspended
+    move-result-object v11
+    if-eq v11, v1, :suspended
 
     :after_receive
-    move-object v10, v12
+    move-object v10, v11
     if-eqz v10, :done
 
     :handle
@@ -137,8 +138,8 @@
     return-object v1
 
     :done
-    sget-object v12, Lkotlin/Unit;->INSTANCE:Lkotlin/Unit;
-    return-object v12
+    sget-object v11, Lkotlin/Unit;->INSTANCE:Lkotlin/Unit;
+    return-object v11
 .end method
 
 .method private final select(Ljava/nio/channels/Selector;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;

@@ -12,7 +12,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestInvalidFieldReceiver extends SmaliTest {
 	@Override
 	protected void runChecks(List<ClassNode> classes) {
-		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(7);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(8);
 	}
 
 	@Test
@@ -22,6 +22,8 @@ public class TestInvalidFieldReceiver extends SmaliTest {
 				.code()
 				.contains("JADX ERROR")
 				.contains("Primitive value used as field receiver")
+				.contains("Incompatible field receiver: java.lang.String for types.TestInvalidFieldReceiver")
+				.contains("Method not decompiled: types.TestInvalidFieldReceiver.getString(java.lang.String):int")
 				.contains("Method not decompiled: types.TestInvalidFieldReceiver.getInvokeReceiver():int")
 				.contains("Incompatible field receiver")
 				.contains("Method not decompiled:")

@@ -27,6 +27,12 @@
     return v0
 .end method
 
+.method public static getString(Ljava/lang/String;)I
+    .locals 1
+    iget v0, p0, Ltypes/TestInvalidFieldReceiver;->value:I
+    return v0
+.end method
+
 .method public static putPrimitive(I)V
     .locals 1
 

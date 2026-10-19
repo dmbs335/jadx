@@ -431,15 +431,15 @@ public class InsnGen {
 					code.add(" != 0");
 					break;
 				}
-				if (insn.getResult() != null && insn.getResult().getSVar() != null) {
+				boolean moveCastNeeded = isMoveCastNeeded(insn, moveArg);
+				if (!moveCastNeeded && insn.getResult() != null && insn.getResult().getSVar() != null) {
 					ArgType resultType = insn.getResult().getSVar().getCodeVar().getType();
 					ArgType sourceType = getAssignmentExpressionType(moveArg, resultType);
-					if (resultType != null && sourceType != null && resultType.isTypeKnown() && sourceType.isTypeKnown()
-							&& resultType.isPrimitive() != sourceType.isPrimitive()) {
+					if (resultType != null && sourceType != null && resultType.isTypeKnown() && sourceType.isTypeKnown()) {
 						checkAssignmentOperand(moveArg, resultType, "local assignment");
 					}
 				}
-				if (isMoveCastNeeded(insn, moveArg)) {
+				if (moveCastNeeded) {
 					code.add('(');
 					useType(code, insn.getResult().getSVar().getCodeVar().getType());
 					code.add(") ");
@@ -984,6 +984,7 @@ public class InsnGen {
 		int wrap = 0;
 		ArgType elementType = insn.getArrayType().getArrayElement();
 		for (int i = 0; i < c; i++) {
+			checkAssignmentOperand(insn.getArg(i), elementType, "array initializer");
 			addArgWithExpectedType(code, insn.getArg(i), elementType);
 			if (i + 1 < c) {
 				code.add(", ");
@@ -1473,9 +1474,7 @@ public class InsnGen {
 				int paramIndex = i - insn.getFirstArgOffset();
 				List<ArgType> paramTypes = insn.getCallMth().getArgumentsTypes();
 				ArgType expectedType = paramIndex >= 0 && paramIndex < paramTypes.size() ? paramTypes.get(paramIndex) : null;
-				if (arg.isInsnWrap()) {
-					checkAssignmentOperand(arg, expectedType, "method argument");
-				}
+				checkAssignmentOperand(arg, expectedType, "method argument");
 				addArgWithExpectedType(code, arg, expectedType);
 			}
 		}
@@ -1598,6 +1597,9 @@ public class InsnGen {
 		if (isFallback()) {
 			return;
 		}
+		if (arg.isZeroLiteral() && expected != null && (expected.isObject() || expected.isArray())) {
+			return; // DEX zero is null in a reference-typed assignment.
+		}
 		ArgType actual = getAssignmentExpressionType(arg, expected);
 		if (actual == null || !actual.isTypeKnown() || expected == null || !expected.isTypeKnown()
 				|| actual.isGenericType() || expected.isGenericType()) {
@@ -1625,7 +1627,78 @@ public class InsnGen {
 		} else {
 			return;
 		}
+		if (actual.isObject() && expected.isObject()
+				&& root.getTypeCompare().compareTypes(actual, expected).isConflict()
+				&& !(isKnownClassType(expected)
+						? hasCompleteSuperclassChain(actual, new HashSet<>())
+						: hasCompleteObjectHierarchy(actual, new HashSet<>()))) {
+			// An unresolved superclass or interface can still make this assignment valid.
+			return;
+		}
 		throw new CodegenException("Incompatible " + operation + " type: " + actual + " for " + expected);
+	}
+
+	private boolean hasCompleteSuperclassChain(ArgType type, Set<String> visited) {
+		if (!type.isObject()) {
+			return false;
+		}
+		String name = type.getObject();
+		if (!visited.add(name)) {
+			return false;
+		}
+		if (name.equals("java.lang.Object")) {
+			return true;
+		}
+		ClassNode cls = root.resolveClass(ArgType.object(name));
+		if (cls != null) {
+			ArgType superClass = cls.getSuperClass();
+			return superClass != null && hasCompleteSuperclassChain(superClass, visited);
+		}
+		ClspClass clspCls = root.getClsp().getClsDetails(type);
+		if (clspCls == null || clspCls.getParents() == null || clspCls.getParents().length == 0) {
+			return false;
+		}
+		return hasCompleteSuperclassChain(clspCls.getParents()[0], visited);
+	}
+
+	private boolean hasCompleteObjectHierarchy(ArgType type, Set<String> visited) {
+		if (!type.isObject()) {
+			return false;
+		}
+		String name = type.getObject();
+		if (!visited.add(name)) {
+			return false;
+		}
+		try {
+			if (name.equals("java.lang.Object")) {
+				return true;
+			}
+			ClassNode cls = root.resolveClass(ArgType.object(name));
+			if (cls != null) {
+				ArgType superClass = cls.getSuperClass();
+				if (superClass == null || !hasCompleteObjectHierarchy(superClass, visited)) {
+					return false;
+				}
+				for (ArgType iface : cls.getInterfaces()) {
+					if (!hasCompleteObjectHierarchy(iface, visited)) {
+						return false;
+					}
+				}
+				return true;
+			}
+			ClspClass clspCls = root.getClsp().getClsDetails(type);
+			if (clspCls == null || clspCls.getParents() == null) {
+				return false;
+			}
+			for (ArgType parent : clspCls.getParents()) {
+				if (!hasCompleteObjectHierarchy(parent, visited)) {
+					return false;
+				}
+			}
+			return true;
+		} finally {
+			visited.remove(name);
+		}
 	}
 
 	private ArgType getAssignmentExpressionType(InsnArg arg, @Nullable ArgType expected) {
@@ -1763,6 +1836,13 @@ public class InsnGen {
 		if (renderedType.isPrimitive()) {
 			throw new CodegenException("Primitive value used as " + operation + " receiver: " + renderedType);
 		}
+		if (!castReceiver && renderedType.isObject() && ownerType.isObject()
+				&& root.getTypeCompare().compareTypes(renderedType, ownerType).isConflict()
+				&& (isKnownClassType(ownerType)
+						? hasCompleteSuperclassChain(renderedType, new HashSet<>())
+						: hasCompleteObjectHierarchy(renderedType, new HashSet<>()))) {
+			throw new CodegenException("Incompatible " + operation + " receiver: " + renderedType + " for " + ownerType);
+		}
 		if (!castReceiver && needsObjectReceiverCast(arg, ownerType) && isMethodParameter(arg)) {
 			throw new CodegenException("Incompatible " + operation + " receiver: " + renderedType + " for " + ownerType);
 		}
@@ -1892,6 +1972,7 @@ public class InsnGen {
 				}
 				addArg(code, elemArg, false);
 			} else {
+				checkAssignmentOperand(elemArg, elementType, "vararg element");
 				if (count == 1 && (elemArg.getType().isArray()
 						|| elemArg.isZeroLiteral() && elemArg.getType().isObject())) {
 					// Without this cast a single null/array value can bind to the whole
