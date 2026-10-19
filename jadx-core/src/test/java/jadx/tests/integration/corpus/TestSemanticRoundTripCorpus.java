@@ -1605,8 +1605,8 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 		private String run(int mode) {
 			events = new StringBuilder();
 			outer: for (int i = 0; i < 3; i++) {
-				try (Probe first = new Probe("a" + i, false, mode == 5 && i == 1);
-						Probe second = new Probe("b" + i, mode == 6 && i == 1,
+				try (Probe first = new Probe("a" + i, false, (mode == 5 || mode == 7) && i == 1);
+						Probe second = new Probe("b" + i, (mode == 6 || mode == 7) && i == 1,
 								(mode == 4 || mode == 5) && i == 1)) {
 					events.append('B').append(i);
 					if (i == 1) {
@@ -1667,6 +1667,9 @@ public class TestSemanticRoundTripCorpus extends IntegrationTest {
 			assertRun(6,
 					first + "Oa1Ob1Ca1XIllegalArgumentException:init-b1:0F1T1" + third,
 					first + "Oa1Ob1Ca1XIllegalArgumentException:init-b1:0F1T1" + third);
+			assertRun(7,
+					first + "Oa1Ob1Ca1XIllegalArgumentException:init-b1:1F1T1" + third,
+					first + "Oa1Ob1Ca1XIllegalArgumentException:init-b1:1F1T1" + third);
 		}
 	}
 

@@ -51,6 +51,7 @@ import jadx.core.dex.visitors.SameSourcePhiMoveVisitor;
 import jadx.core.dex.visitors.ShadowFieldVisitor;
 import jadx.core.dex.visitors.SignatureProcessor;
 import jadx.core.dex.visitors.SimplifyVisitor;
+import jadx.core.dex.visitors.ValidateCmpTypes;
 import jadx.core.dex.visitors.blocks.BlockFinisher;
 import jadx.core.dex.visitors.blocks.BlockProcessor;
 import jadx.core.dex.visitors.blocks.BlockSplitter;
@@ -149,6 +150,7 @@ public class Jadx {
 
 		passes.add(new MarkCoroutineStateMachine());
 		passes.add(new SSATransform());
+		passes.add(new ValidateCmpTypes());
 		passes.add(new MoveInlineVisitor());
 		passes.add(new ConstructorVisitor());
 		passes.add(new InitCodeVariables());
@@ -244,6 +246,7 @@ public class Jadx {
 		passes.add(new BlockProcessor());
 		passes.add(new MarkCoroutineStateMachine());
 		passes.add(new SSATransform());
+		passes.add(new ValidateCmpTypes());
 		passes.add(new MoveInlineVisitor());
 		passes.add(new ConstructorVisitor());
 		passes.add(new InitCodeVariables());

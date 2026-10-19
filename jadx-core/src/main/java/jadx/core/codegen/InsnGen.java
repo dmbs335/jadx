@@ -38,6 +38,7 @@ import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.BaseInvokeNode;
+import jadx.core.dex.instructions.CmpInsnNode;
 import jadx.core.dex.instructions.ConstClassNode;
 import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.FillArrayInsn;
@@ -528,8 +529,8 @@ public class InsnGen {
 				break;
 
 			case CMP_L:
-				checkNumericCmpOperand(insn.getArg(0));
-				checkNumericCmpOperand(insn.getArg(1));
+				checkNumericCmpOperand(insn, insn.getArg(0));
+				checkNumericCmpOperand(insn, insn.getArg(1));
 				if (ArgType.LONG.equals(getExpressionArgType(insn.getArg(0)))
 						&& ArgType.LONG.equals(getExpressionArgType(insn.getArg(1)))) {
 					code.add("Long.compare(");
@@ -553,8 +554,8 @@ public class InsnGen {
 				break;
 
 			case CMP_G:
-				checkNumericCmpOperand(insn.getArg(0));
-				checkNumericCmpOperand(insn.getArg(1));
+				checkNumericCmpOperand(insn, insn.getArg(0));
+				checkNumericCmpOperand(insn, insn.getArg(1));
 				checkRepeatedCmpOperand(insn.getArg(0));
 				checkRepeatedCmpOperand(insn.getArg(1));
 				code.add('(');
@@ -1556,58 +1557,45 @@ public class InsnGen {
 		throw new CodegenException("Invalid array " + operation + " type: " + type);
 	}
 
-	private void checkNumericCmpOperand(InsnArg arg) throws CodegenException {
+	private void checkNumericCmpOperand(InsnNode insn, InsnArg arg) throws CodegenException {
 		if (isFallback()) {
 			return;
 		}
-		checkNumericCmpType(getExpressionArgType(arg));
-		Set<SSAVar> visited = new HashSet<>();
-		List<InsnArg> pending = new ArrayList<>();
-		pending.add(arg);
-		for (int i = 0; i < pending.size(); i++) {
-			InsnArg current = pending.get(i);
-			InsnNode sourceInsn;
-			if (current instanceof RegisterArg) {
-				SSAVar sVar = ((RegisterArg) current).getSVar();
-				if (sVar == null || !visited.add(sVar)) {
-					continue;
-				}
-				sourceInsn = sVar.getAssignInsn();
-			} else if (current.isInsnWrap()) {
-				sourceInsn = current.unwrap();
-			} else {
-				continue;
-			}
-			ArgType declaredType = InsnUtils.getDeclaredResultType(sourceInsn);
-			if (declaredType != null) {
-				checkNumericCmpType(declaredType);
-			} else if (sourceInsn != null && (sourceInsn.getType() == InsnType.MOVE
-					|| sourceInsn.getType() == InsnType.PHI || sourceInsn.getType() == InsnType.TERNARY)) {
-				for (InsnArg sourceArg : sourceInsn.getArguments()) {
-					pending.add(sourceArg);
-				}
+		ArgType expectedType = insn instanceof CmpInsnNode ? ((CmpInsnNode) insn).getOperandType() : null;
+		ArgType expressionType = getExpressionArgType(arg);
+		checkNumericCmpType(expressionType);
+		ArgType invalidType = insn instanceof CmpInsnNode ? ((CmpInsnNode) insn).getInvalidSourceType() : null;
+		if (invalidType == null) {
+			invalidType = InsnUtils.findDeclaredSourceType(arg, this::isNonNumericCmpType);
+		}
+		if (invalidType != null) {
+			checkNumericCmpType(invalidType);
+			if (expectedType != null) {
+				throw new CodegenException("CMP operand type " + invalidType + " does not match opcode type " + expectedType);
 			}
 		}
 	}
 
 	private void checkNumericCmpType(ArgType type) throws CodegenException {
+		if (isNonNumericCmpType(type)) {
+			throw new CodegenException("Non-numeric CMP operand: " + type);
+		}
+	}
+
+	private boolean isNonNumericCmpType(ArgType type) {
 		if (type == null || !type.isTypeKnown() || type.isGenericType()) {
-			return;
+			return false;
 		}
 		if (type.isPrimitive()) {
-			if (ArgType.BOOLEAN.equals(type)) {
-				throw new CodegenException("Non-numeric CMP operand: " + type);
-			}
+			return ArgType.BOOLEAN.equals(type);
 		} else if (type.isObject()) {
 			String cls = type.getObject();
-			if (!cls.equals("java.lang.Integer") && !cls.equals("java.lang.Long")
+			return !cls.equals("java.lang.Integer") && !cls.equals("java.lang.Long")
 					&& !cls.equals("java.lang.Float") && !cls.equals("java.lang.Double")
 					&& !cls.equals("java.lang.Byte") && !cls.equals("java.lang.Short")
-					&& !cls.equals("java.lang.Character")) {
-				throw new CodegenException("Non-numeric CMP operand: " + type);
-			}
+					&& !cls.equals("java.lang.Character");
 		} else {
-			throw new CodegenException("Non-numeric CMP operand: " + type);
+			return true;
 		}
 	}
 

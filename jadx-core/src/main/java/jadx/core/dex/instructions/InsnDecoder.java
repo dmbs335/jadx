@@ -577,7 +577,7 @@ public class InsnDecoder {
 	}
 
 	private InsnNode cmp(InsnData insn, InsnType itype, ArgType argType) {
-		InsnNode inode = new InsnNode(itype, 2);
+		InsnNode inode = new CmpInsnNode(itype, argType);
 		inode.setResult(InsnArg.reg(insn, 0, ArgType.INT));
 		inode.addArg(InsnArg.reg(insn, 1, argType));
 		inode.addArg(InsnArg.reg(insn, 2, argType));

@@ -59,6 +59,46 @@ public class TestSemanticRoundTripCorpus8 extends IntegrationTest {
 		}
 	}
 
+	public static class StaticFieldWriteQualifierFlow {
+		private static final class Target {
+			private static int value;
+		}
+
+		private int trace;
+
+		private Target receiver() {
+			trace = trace * 10 + 1;
+			return null;
+		}
+
+		private int rhs() {
+			trace = trace * 10 + 2;
+			return 3;
+		}
+
+		@SuppressWarnings("static-access")
+		private int postfix() {
+			trace = 0;
+			Target.value = 4;
+			int old = receiver().value++;
+			return trace * 100 + old * 10 + Target.value;
+		}
+
+		@SuppressWarnings("static-access")
+		private int compound() {
+			trace = 0;
+			Target.value = 4;
+			receiver().value += rhs();
+			return trace * 100 + Target.value * 10 + Target.value;
+		}
+
+		public void check() {
+			if (postfix() != 145 || compound() != 1277) {
+				throw new AssertionError("static field write qualifier evaluation");
+			}
+		}
+	}
+
 	public static class SynchronizedMonitorFlow {
 		private int trace;
 
@@ -331,6 +371,11 @@ public class TestSemanticRoundTripCorpus8 extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testStaticFieldQualifierFlow() {
 		getClassNode(StaticFieldQualifierFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testStaticFieldWriteQualifierFlow() {
+		getClassNode(StaticFieldWriteQualifierFlow.class);
 	}
 
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })

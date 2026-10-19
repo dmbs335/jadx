@@ -1,6 +1,9 @@
 package jadx.core.utils;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
 
@@ -14,6 +17,7 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArithOp;
+import jadx.core.dex.instructions.CmpInsnNode;
 import jadx.core.dex.instructions.ConstClassNode;
 import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.IndexInsnNode;
@@ -92,6 +96,14 @@ public class InsnUtils {
 		if (insn instanceof InvokeNode) {
 			return ((InvokeNode) insn).getCallMth().getReturnType();
 		}
+		if (insn != null && insn.getType() == InsnType.CONST && insn.getResult() != null) {
+			return insn.getResult().getInitType();
+		}
+		if (insn != null && (insn.getType() == InsnType.ARITH || insn.getType() == InsnType.NEG)
+				&& insn.getResult() != null) {
+			ArgType resultType = insn.getResult().getInitType();
+			return resultType.isTypeKnown() ? resultType : null;
+		}
 		if (insn instanceof IndexInsnNode
 				&& (insn.getType() == InsnType.IGET || insn.getType() == InsnType.SGET)
 				&& ((IndexInsnNode) insn).getIndex() instanceof FieldInfo) {
@@ -107,6 +119,47 @@ public class InsnUtils {
 			return arrayType.isArray() ? arrayType.getArrayElement() : null;
 		}
 		return null;
+	}
+
+	/** Find a bytecode-declared source type through aliases and value joins. */
+	public static @Nullable ArgType findDeclaredSourceType(InsnArg arg, Predicate<ArgType> matches) {
+		Set<SSAVar> visited = new HashSet<>();
+		List<InsnArg> pending = new ArrayList<>();
+		pending.add(arg);
+		for (int i = 0; i < pending.size(); i++) {
+			InsnArg current = pending.get(i);
+			InsnNode sourceInsn;
+			if (current instanceof RegisterArg) {
+				SSAVar sVar = ((RegisterArg) current).getSVar();
+				if (sVar == null || !visited.add(sVar)) {
+					continue;
+				}
+				sourceInsn = sVar.getAssignInsn();
+				if (sourceInsn == null && matches.test(sVar.getAssign().getInitType())) {
+					return sVar.getAssign().getInitType();
+				}
+			} else if (current.isInsnWrap()) {
+				sourceInsn = current.unwrap();
+			} else {
+				continue;
+			}
+			ArgType declaredType = getDeclaredResultType(sourceInsn);
+			if (declaredType != null && matches.test(declaredType)) {
+				return declaredType;
+			}
+			if (declaredType == null && sourceInsn != null && (sourceInsn.getType() == InsnType.MOVE
+					|| sourceInsn.getType() == InsnType.PHI || sourceInsn.getType() == InsnType.TERNARY)) {
+				for (InsnArg sourceArg : sourceInsn.getArguments()) {
+					pending.add(sourceArg);
+				}
+			}
+		}
+		return null;
+	}
+
+	/** Keep a malformed comparison intact so code generation can report its opcode/type mismatch. */
+	public static boolean hasIncompatibleCmpSources(InsnNode insn) {
+		return insn instanceof CmpInsnNode && ((CmpInsnNode) insn).getInvalidSourceType() != null;
 	}
 
 	public static ArgType getDeclaredArrayType(InsnArg arrayArg) {

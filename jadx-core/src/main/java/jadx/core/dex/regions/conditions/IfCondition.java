@@ -24,6 +24,7 @@ import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.utils.BlockUtils;
+import jadx.core.utils.InsnUtils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
 public final class IfCondition extends AttrNode {
@@ -234,6 +235,9 @@ public final class IfCondition extends AttrNode {
 			case CMP_G:
 				if (lit == 0) {
 					if (c.isSharedView()) {
+						return null;
+					}
+					if (InsnUtils.hasIncompatibleCmpSources(wrapInsn)) {
 						return null;
 					}
 					IfOp cmpOp = c.getOp();

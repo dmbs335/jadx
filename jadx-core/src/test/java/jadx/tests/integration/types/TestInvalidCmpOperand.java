@@ -12,7 +12,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestInvalidCmpOperand extends SmaliTest {
 	@Override
 	protected void runChecks(List<ClassNode> classes) {
-		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(7);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(14);
 	}
 
 	@Test
@@ -26,6 +26,13 @@ public class TestInvalidCmpOperand extends SmaliTest {
 				.contains("Method not decompiled: types.TestInvalidCmpOperand.badField(long):int")
 				.contains("Method not decompiled: types.TestInvalidCmpOperand.badMoveAlias(long):int")
 				.contains("Method not decompiled: types.TestInvalidCmpOperand.badPhiAlias(long, boolean):int")
+				.contains("Method not decompiled: types.TestInvalidCmpOperand.badWidth(long):int")
+				.contains("Method not decompiled: types.TestInvalidCmpOperand.badWidthBranch(long):int")
+				.contains("Method not decompiled: types.TestInvalidCmpOperand.badParamWidthBranch(int, long):int")
+				.contains("Method not decompiled: types.TestInvalidCmpOperand.badDoubleWidth(double):int")
+				.contains("Method not decompiled: types.TestInvalidCmpOperand.badArithWidth(long):int")
+				.contains("Method not decompiled: types.TestInvalidCmpOperand.badNegWidth(long):int")
+				.contains("Method not decompiled: types.TestInvalidCmpOperand.badConstWidth(long):int")
 				.contains("return Long.compare(j, j2);");
 	}
 }

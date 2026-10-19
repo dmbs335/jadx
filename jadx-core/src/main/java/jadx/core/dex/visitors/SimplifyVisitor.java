@@ -44,6 +44,7 @@ import jadx.core.dex.visitors.typeinference.TypeCompareEnum;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnList;
 import jadx.core.utils.InsnRemover;
+import jadx.core.utils.InsnUtils;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
@@ -315,6 +316,9 @@ public class SimplifyVisitor extends AbstractVisitor {
 			InsnNode wi = ((InsnWrapArg) f).getWrapInsn();
 			if (wi.getType() == InsnType.CMP_L || wi.getType() == InsnType.CMP_G) {
 				if (insn.getArg(1).isZeroLiteral()) {
+					if (InsnUtils.hasIncompatibleCmpSources(wi)) {
+						return;
+					}
 					IfOp op = insn.getOp();
 					ArgType cmpArgType = wi.getArg(0).getType();
 					boolean floatingCmp = cmpArgType.contains(PrimitiveType.FLOAT)

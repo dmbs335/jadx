@@ -6,7 +6,8 @@
     .registers 14
 
     const/4 v1, 0x0
-    const/16 v6, 0x0
+    const-wide/16 v6, 0x0
+    const/16 v8, 0x0
 
     :loop_0
     if-ge v1, v1, :cond_0
@@ -14,7 +15,7 @@
 
     :cond_0
 
-    if-lt v1, v6, :cond_1
+    if-lt v1, v8, :cond_1
     goto/16 :goto_0
     :cond_1
 

@@ -80,3 +80,89 @@
     cmp-long v1, v0, p0
     return v1
 .end method
+
+.method public static getInt()I
+    .locals 1
+
+    const/4 v0, 0x1
+    return v0
+.end method
+
+.method public static badWidth(J)I
+    .locals 2
+
+    invoke-static {}, Ltypes/TestInvalidCmpOperand;->getInt()I
+    move-result v0
+    cmp-long v1, v0, p0
+    return v1
+.end method
+
+.method public static badWidthBranch(J)I
+    .locals 2
+
+    invoke-static {}, Ltypes/TestInvalidCmpOperand;->getInt()I
+    move-result v0
+    cmp-long v1, v0, p0
+    if-ltz v1, :less
+    const/4 v0, 0x0
+    return v0
+
+    :less
+    const/4 v0, 0x1
+    return v0
+.end method
+
+.method public static badParamWidthBranch(IJ)I
+    .locals 2
+
+    cmp-long v0, p0, p1
+    if-ltz v0, :less
+    const/4 v1, 0x0
+    return v1
+
+    :less
+    const/4 v1, 0x1
+    return v1
+.end method
+
+.method public static getFloat()F
+    .locals 1
+
+    const/high16 v0, 0x3f800000
+    return v0
+.end method
+
+.method public static badDoubleWidth(D)I
+    .locals 2
+
+    invoke-static {}, Ltypes/TestInvalidCmpOperand;->getFloat()F
+    move-result v0
+    cmpg-double v1, v0, p0
+    return v1
+.end method
+
+.method public static badArithWidth(J)I
+    .locals 3
+
+    const/4 v0, 0x1
+    add-int/lit8 v1, v0, 0x1
+    cmp-long v2, v1, p0
+    return v2
+.end method
+
+.method public static badNegWidth(J)I
+    .locals 2
+
+    const/4 v0, 0x1
+    neg-int v0, v0
+    cmp-long v1, v0, p0
+    return v1
+.end method
+
+.method public static badConstWidth(J)I
+    .locals 2
+
+    const/4 v0, 0x1
+    cmp-long v1, v0, p0
+    return v1
+.end method
