@@ -17,6 +17,8 @@ public class TestCoroutineNullableGetterResultJoin extends SmaliTest {
 				.code()
 				.contains("Normalize coroutine nullable getter completion through state dispatch")
 				.countString(1, "getParent()")
+				.countString(3, "break;")
+				.countString(1, "return parent;")
 				.doesNotContain("Unsupported multi-entry loop pattern")
 				.doesNotContain("Region traversal cycle prevented")
 				.doesNotContain("Method not decompiled")

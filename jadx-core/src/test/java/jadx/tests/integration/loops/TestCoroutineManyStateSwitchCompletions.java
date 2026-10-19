@@ -10,7 +10,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestCoroutineManyStateSwitchCompletions extends SmaliTest {
 
 	@Test
-	public void testNormalizesAllSwitchStatesWithOrdinaryHasNext() {
+	public void testNormalizesObfuscatedFailureChecksAcrossAllSwitchStates() {
 		disableCompilation();
 		allowWarnInCode();
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);

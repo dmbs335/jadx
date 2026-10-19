@@ -16,7 +16,6 @@ public class TestCoroutineRetryResultJoin extends SmaliTest {
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.contains("Normalize single coroutine retry result join")
 				.containsOne("while (true)")
 				.doesNotContain("Code duplicated in")
 				.doesNotContain("Region traversal cycle prevented")

@@ -1,0 +1,65 @@
+.version 45.3
+.class public super others/TestJavaJSRBranch
+
+.method public <init>()V
+    .max stack 1
+    .max locals 1
+    aload 0
+    invokespecial java/lang/Object <init> ()V
+    return
+.end method
+
+.method public static choose(I)I
+    .max stack 2
+    .max locals 3
+
+    iconst_0
+    istore 1
+    iload 0
+    ifeq :FIRST
+    jsr :SUB
+    iload 1
+    ireturn
+  :FIRST
+    jsr :SUB
+    iload 1
+    ireturn
+  :SUB
+    astore 2
+    iload 0
+    ifeq :ZERO
+    iconst_2
+    istore 1
+    goto :END
+  :ZERO
+    iconst_1
+    istore 1
+  :END
+    ret 2
+.end method
+
+.method public check()V
+    .max stack 2
+    .max locals 1
+    iconst_0
+    invokestatic others/TestJavaJSRBranch choose (I)I
+    iconst_1
+    isub
+    ifeq :SECOND
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :SECOND
+    iconst_3
+    invokestatic others/TestJavaJSRBranch choose (I)I
+    iconst_2
+    isub
+    ifeq :DONE
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :DONE
+    return
+.end method

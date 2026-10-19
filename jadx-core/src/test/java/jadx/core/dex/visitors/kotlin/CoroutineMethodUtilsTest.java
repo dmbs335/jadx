@@ -17,6 +17,22 @@ class CoroutineMethodUtilsTest {
 	}
 
 	@Test
+	void acceptsObfuscatedStateMachineShapeOnlyAtKnownBaseBoundary() {
+		assertThat(CoroutineMethodUtils.isObfuscatedStateMachineSignature(
+				false, List.of(ArgType.OBJECT), ArgType.OBJECT))
+						.isTrue();
+		assertThat(CoroutineMethodUtils.isObfuscatedStateMachineSignature(
+				true, List.of(ArgType.OBJECT), ArgType.OBJECT))
+						.isFalse();
+		assertThat(CoroutineMethodUtils.isObfuscatedStateMachineSignature(
+				false, List.of(ArgType.OBJECT, ArgType.OBJECT), ArgType.OBJECT))
+						.isFalse();
+		assertThat(CoroutineMethodUtils.isObfuscatedStateMachineSignature(
+				false, List.of(ArgType.OBJECT), ArgType.VOID))
+						.isFalse();
+	}
+
+	@Test
 	void acceptsKnownKotlinCoroutineBases() {
 		assertThat(CoroutineMethodUtils.isKnownCoroutineBase(
 				ArgType.object("kotlin.coroutines.jvm.internal.BaseContinuationImpl")))

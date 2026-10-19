@@ -10,12 +10,9 @@ public class TestTypeResolver25 extends SmaliTest {
 
 	@Test
 	public void testSmali() {
-		// TODO: type inference error not yet resolved
-		// Check that no stack overflow in type inference for now
-		allowWarnInCode();
-		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
+				.containsOne("((Closeable) t).close();")
 				.oneOf(c -> c.containsOne("t = obj;"),
 						c -> c.containsOne("t = (T) obj;"));
 	}

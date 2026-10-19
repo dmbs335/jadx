@@ -9,7 +9,7 @@
 .field private L$3:Ljava/lang/Object;
 .field private label:I
 
-.method public final invokeSuspend(Ljava/lang/Object;)Ljava/lang/Object;
+.method public final P(Ljava/lang/Object;)Ljava/lang/Object;
     .registers 12
 
     invoke-static {}, Lkotlin/coroutines/intrinsics/IntrinsicsKt;->getCOROUTINE_SUSPENDED()Ljava/lang/Object;
@@ -33,7 +33,7 @@
     check-cast v6, Ljava/util/HashSet;
     iget-object v7, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->L$0:Ljava/lang/Object;
     check-cast v7, Lkotlinx/coroutines/channels/ProducerScope;
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :add_key
 
     :bad_state
@@ -49,7 +49,7 @@
     check-cast v6, Ljava/util/HashSet;
     iget-object v7, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->L$0:Ljava/lang/Object;
     check-cast v7, Lkotlinx/coroutines/channels/ProducerScope;
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     move-object v9, v5
     move-object v5, v1
     move-object v1, v9
@@ -62,11 +62,11 @@
     check-cast v5, Ljava/util/HashSet;
     iget-object v6, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->L$0:Ljava/lang/Object;
     check-cast v6, Lkotlinx/coroutines/channels/ProducerScope;
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :has_next_result
 
     :initial
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     iget-object p1, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->L$0:Ljava/lang/Object;
     check-cast p1, Lkotlinx/coroutines/channels/ProducerScope;
     new-instance v1, Ljava/util/HashSet;
@@ -86,7 +86,7 @@
     const/4 p1, 0x0
     iput-object p1, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->L$3:Ljava/lang/Object;
     iput v4, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->label:I
-    invoke-interface {v1, p0}, Lkotlinx/coroutines/channels/ChannelIterator;->hasNext(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-interface {v1, p0}, Lkotlinx/coroutines/channels/ChannelIterator;->a(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object p1
     if-ne p1, v0, :has_next_result
     goto :suspended
@@ -105,7 +105,7 @@
     iput-object v1, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->L$2:Ljava/lang/Object;
     iput-object p1, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->L$3:Ljava/lang/Object;
     iput v3, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->label:I
-    invoke-interface {v7, p1, p0}, Lkotlin/jvm/functions/Function2;->invoke(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
+    invoke-interface {v7, p1, p0}, Lkotlin/jvm/functions/Function2;->M(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;
     move-result-object v7
     if-ne v7, v0, :selector_result
     goto :suspended
@@ -127,7 +127,7 @@
     iput-object v1, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->L$2:Ljava/lang/Object;
     iput-object p1, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->L$3:Ljava/lang/Object;
     iput v2, p0, Lloops/TestCoroutineIteratorCollectionSelectorLoop;->label:I
-    invoke-interface {v7, v5, p0}, Lkotlinx/coroutines/channels/SendChannel;->send(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-interface {v7, v5, p0}, Lkotlinx/coroutines/channels/SendChannel;->F(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object v5
     if-ne v5, v0, :send_result
 

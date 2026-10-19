@@ -78,6 +78,8 @@
     move-wide v8, p0
     move-object p0, p2
     move-wide p1, v8
+    move-object v9, p3
+    move-object p3, v9
 
     :discard
     invoke-interface {p0}, Lio/ktor/utils/io/ByteReadChannel;->getReadBuffer()Lkotlinx/io/Source;

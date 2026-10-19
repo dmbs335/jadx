@@ -13,6 +13,7 @@ public class TestLoopRestore3 extends SmaliTest {
 		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.countString(3, "while (");
+				.countString(3, "while (")
+				.contains("continue loop0;");
 	}
 }

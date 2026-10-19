@@ -12,6 +12,7 @@ public class TestSynchronizedDuplicatedFinallyCleanup extends SmaliTest {
 	public void test() {
 		String code = getClassNodeFromSmali().getCode().toString();
 		assertThat(code)
+				.contains("throws Throwable")
 				.doesNotContain("Method not decompiled")
 				.doesNotContain("missing block")
 				.doesNotContain("Code duplicated")

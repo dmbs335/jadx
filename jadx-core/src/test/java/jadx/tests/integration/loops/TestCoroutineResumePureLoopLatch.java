@@ -19,6 +19,7 @@ public class TestCoroutineResumePureLoopLatch extends SmaliTest {
 				.code()
 				.containsOne("Normalize 5-state switch coroutine completions through state dispatch")
 				.countString(5, "Split pure collection-loop latch for coroutine resume entry")
+				.doesNotContain("this =")
 				.doesNotContain("Region traversal cycle prevented")
 				.doesNotContain("Recursive region processing prevented")
 				.doesNotContain("Unsupported multi-entry loop pattern")

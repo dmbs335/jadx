@@ -53,7 +53,7 @@
     iput-object p2, v0, Lloops/TestCoroutineNullableSerializeResultLoopTail$convert$1;->L$2:Ljava/lang/Object;
     const/4 v3, 0x1
     iput v3, v0, Lloops/TestCoroutineNullableSerializeResultLoopTail$convert$1;->label:I
-    invoke-interface {p1, v5, v0}, Ltest/ContentConverter;->serialize(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-interface {p1, v5, v0}, Ltest/ContentConverter;->a(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object v6
     if-ne v6, v1, :direct_completion
     return-object v1
@@ -65,7 +65,7 @@
     check-cast v4, Ltest/OutgoingContent;
     if-eqz v4, :result_decision
     const-string v6, "serialized"
-    invoke-interface {p2, v6}, Lorg/slf4j/Logger;->trace(Ljava/lang/String;)V
+    invoke-interface {p2, v6}, Lorg/slf4j/Logger;->i(Ljava/lang/String;)V
 
     :result_decision
     if-nez v4, :success

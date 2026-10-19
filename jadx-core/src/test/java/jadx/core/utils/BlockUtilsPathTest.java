@@ -1,13 +1,34 @@
 package jadx.core.utils;
 
+import java.util.List;
+
 import org.junit.jupiter.api.Test;
 
+import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.nodes.BlockNode;
+import jadx.core.dex.nodes.InsnNode;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class BlockUtilsPathTest {
+	@Test
+	void findNonEmptyPredecessorsThroughEmptyBranches() {
+		BlockNode first = block(0);
+		BlockNode second = block(1);
+		BlockNode firstEmpty = block(2);
+		BlockNode secondEmpty = block(3);
+		BlockNode join = block(4);
+		first.getInstructions().add(new InsnNode(InsnType.CONST, 0));
+		second.getInstructions().add(new InsnNode(InsnType.CONST, 0));
+		connect(first, firstEmpty);
+		connect(second, secondEmpty);
+		connect(firstEmpty, join);
+		connect(secondEmpty, join);
+
+		assertThat(BlockUtils.followEmptyUpPathWithinSet(join,
+				List.of(first, second, firstEmpty, secondEmpty))).containsExactlyInAnyOrder(first, second);
+	}
 
 	@Test
 	void reuseClearedVisitedSet() {

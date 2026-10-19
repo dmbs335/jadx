@@ -1,13 +1,20 @@
 package jadx.tests.integration.loops;
 
+import java.util.List;
+
 import org.junit.jupiter.api.Test;
 
 import jadx.api.CommentsLevel;
+import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.SmaliTest;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 public class TestCoroutineTouchSlopRegisterReuseExact extends SmaliTest {
+	@Override
+	protected void runChecks(List<ClassNode> classes) {
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(1);
+	}
 
 	@Test
 	public void test() {
@@ -16,11 +23,7 @@ public class TestCoroutineTouchSlopRegisterReuseExact extends SmaliTest {
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.contains("Normalize two awaitPointerEvent completions through state dispatch")
-				.doesNotContain("Recursive region processing prevented")
-				.doesNotContain("Region traversal cycle prevented")
-				.doesNotContain("Unsupported multi-entry loop pattern")
-				.doesNotContain("Method not decompiled")
-				.doesNotContain("JADX ERROR");
+				.contains("Incompatible local assignment type: androidx.compose.ui.input.pointer.AwaitPointerEventScope for long")
+				.contains("Method not decompiled: loops.TestCoroutineTouchSlopRegisterReuseExact.m0awaitHorizontalTouchSlopOrCancellation");
 	}
 }

@@ -10,7 +10,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestCoroutineIteratorCollectionSelectorLoop extends SmaliTest {
 
 	@Test
-	public void test() {
+	public void testObfuscatedCoroutineAndSuspendCallNames() {
 		disableCompilation();
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmali())
@@ -24,7 +24,7 @@ public class TestCoroutineIteratorCollectionSelectorLoop extends SmaliTest {
 				.contains("Split coroutine resume collection-add tail before iterator loop header")
 				.containsOne("while (true) {")
 				.containsOne(".contains(obj)")
-				.containsOne(".send(")
+				.containsOne(".F(")
 				.containsOne("return Unit.INSTANCE;");
 	}
 }

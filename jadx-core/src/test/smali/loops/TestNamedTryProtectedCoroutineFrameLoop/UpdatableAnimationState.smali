@@ -76,6 +76,9 @@
     invoke-static {p3}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
     :try_end_4d
     .catchall {:try_start_4a .. :try_end_4d} :catchall_35
+    move-object v9, p3
+    move-object v10, v9
+    move-object v9, v10
     move-object p3, p2
     move-object p2, v2
     goto :goto_95

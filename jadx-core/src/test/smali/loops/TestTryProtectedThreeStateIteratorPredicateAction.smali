@@ -15,7 +15,7 @@
     return-void
 .end method
 
-.method public final invokeSuspend(Ljava/lang/Object;)Ljava/lang/Object;
+.method public final P(Ljava/lang/Object;)Ljava/lang/Object;
     .locals 12
 
     invoke-static {}, Lkotlin/coroutines/intrinsics/IntrinsicsKt;->getCOROUTINE_SUSPENDED()Ljava/lang/Object;
@@ -83,7 +83,7 @@
     const/4 v1, 0x0
     iput-object v1, p0, Lloops/TestTryProtectedThreeStateIteratorPredicateAction;->L$3:Ljava/lang/Object;
     iput v2, p0, Lloops/TestTryProtectedThreeStateIteratorPredicateAction;->label:I
-    invoke-interface {v6, p0}, Lkotlinx/coroutines/channels/ChannelIterator;->hasNext(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-interface {v6, p0}, Lkotlinx/coroutines/channels/ChannelIterator;->a(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object p1
     goto :outer_suspend_check
 
@@ -103,7 +103,7 @@
     iput-object v7, p0, Lloops/TestTryProtectedThreeStateIteratorPredicateAction;->L$2:Ljava/lang/Object;
     iput-object v11, p0, Lloops/TestTryProtectedThreeStateIteratorPredicateAction;->L$3:Ljava/lang/Object;
     iput v3, p0, Lloops/TestTryProtectedThreeStateIteratorPredicateAction;->label:I
-    invoke-interface {v7, p0}, Lkotlinx/coroutines/channels/ChannelIterator;->hasNext(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-interface {v7, p0}, Lkotlinx/coroutines/channels/ChannelIterator;->a(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object p1
     goto :paired_suspend_check
 
@@ -128,7 +128,7 @@
     const/4 v1, 0x0
     iput-object v1, p0, Lloops/TestTryProtectedThreeStateIteratorPredicateAction;->L$3:Ljava/lang/Object;
     iput v4, p0, Lloops/TestTryProtectedThreeStateIteratorPredicateAction;->label:I
-    invoke-interface {v8, v11, p0}, Lkotlinx/coroutines/channels/SendChannel;->send(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-interface {v8, v11, p0}, Lkotlinx/coroutines/channels/SendChannel;->F(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object p1
     goto :send_suspend_check
 

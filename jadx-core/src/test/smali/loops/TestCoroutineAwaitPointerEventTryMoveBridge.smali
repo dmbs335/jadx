@@ -12,7 +12,7 @@
 .end method
 
 .method public final invokeSuspend(Ljava/lang/Object;)Ljava/lang/Object;
-    .registers 7
+    .registers 8
 
     iget-object v0, p0, Lloops/TestCoroutineAwaitPointerEventTryMoveBridge;->L$0:Ljava/lang/Object;
     check-cast v0, Landroidx/compose/ui/input/pointer/AwaitPointerEventScope;

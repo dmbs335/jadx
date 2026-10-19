@@ -173,6 +173,154 @@ public class TestSemanticRoundTripCorpus8 extends IntegrationTest {
 		}
 	}
 
+	public static class SwitchSharedCatchFlow {
+		private int trace;
+
+		private void step(int value, boolean fail) {
+			trace = trace * 10 + value;
+			if (fail) {
+				throw new IllegalStateException();
+			}
+		}
+
+		private int run(int branch, boolean failBefore, boolean failProtected, boolean failAfter, boolean failHandler) {
+			trace = 0;
+			int result = 9;
+			try {
+				switch (branch) {
+					case 0:
+						step(1, failBefore);
+						try {
+							step(2, failProtected);
+						} catch (IllegalStateException e) {
+							step(3, failHandler);
+							break;
+						}
+						step(4, failAfter);
+						result = 0;
+						break;
+					case 1:
+						result = 5;
+						step(5, failBefore);
+						try {
+							step(6, failProtected);
+						} catch (IllegalStateException e) {
+							step(7, failHandler);
+							break;
+						}
+						step(8, failAfter);
+						result = 1;
+						break;
+					default:
+						result = -1;
+				}
+			} catch (IllegalStateException e) {
+				return -trace;
+			}
+			return result * 10000 + trace;
+		}
+
+		public void check() {
+			for (int branch = -1; branch < 3; branch++) {
+				for (int mask = 0; mask < 16; mask++) {
+					int actual = run(branch, (mask & 1) != 0, (mask & 2) != 0,
+							(mask & 4) != 0, (mask & 8) != 0);
+					int expected;
+					if (branch == 0) {
+						expected = (mask & 1) != 0 ? -1 : (mask & 2) != 0
+								? (mask & 8) != 0 ? -123 : 90123
+								: (mask & 4) != 0 ? -124 : 124;
+					} else if (branch == 1) {
+						expected = (mask & 1) != 0 ? -5 : (mask & 2) != 0
+								? (mask & 8) != 0 ? -567 : 50567
+									: (mask & 4) != 0 ? -568 : 10568;
+					} else {
+						expected = -10000;
+					}
+					if (actual != expected) {
+						throw new AssertionError("switch catch scope: " + branch + "/" + mask + " -> " + actual + " != " + expected);
+					}
+				}
+			}
+		}
+	}
+
+	public static class SynchronizedEarlyReturnCatchFlow {
+		private int trace;
+		private boolean registered;
+
+		private void schedule(Runnable task, boolean rejected) {
+			trace = trace * 10 + (Thread.holdsLock(this) ? 9 : 2);
+			if (rejected) {
+				throw new java.util.concurrent.RejectedExecutionException();
+			}
+			task.run();
+		}
+
+		private int run(boolean duplicate, boolean rejected) {
+			trace = 0;
+			synchronized (this) {
+				trace = trace * 10 + 1;
+				if (duplicate && registered) {
+					trace = trace * 10 + 3;
+					return trace;
+				}
+				registered = true;
+				trace = trace * 10 + 4;
+			}
+			try {
+				schedule(new Runnable() {
+					@Override
+					public void run() {
+						trace = trace * 10 + 6;
+					}
+				}, rejected);
+			} catch (java.util.concurrent.RejectedExecutionException ignored) {
+				trace = trace * 10 + 5;
+			}
+			return trace;
+		}
+
+		public void check() {
+			registered = false;
+			if (run(false, false) != 1426 || run(true, false) != 13
+					|| run(false, true) != 1425) {
+				throw new AssertionError("synchronized early return/catch boundary");
+			}
+		}
+	}
+
+	public static class StringSwitchNestedLoopFlow {
+		private int run(String action, int outerCount, int innerCount) {
+			int result = 0;
+			switch (action) {
+				case "concat":
+					for (int i = 0; i < outerCount; i++) {
+						for (int j = 0; j < innerCount; j++) {
+							result += 10;
+						}
+						result++;
+					}
+					break;
+				case "filter":
+					for (int i = 0; i < outerCount; i++) {
+						result += 2;
+					}
+					break;
+				default:
+					result = -1;
+			}
+			return result;
+		}
+
+		public void check() {
+			if (run("concat", 3, 2) != 63 || run("filter", 3, 2) != 6
+					|| run("missing", 3, 2) != -1) {
+				throw new AssertionError("string switch nested loop back edge");
+			}
+		}
+	}
+
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testConditionalUnboxingFlow() {
 		getClassNode(ConditionalUnboxingFlow.class);
@@ -201,5 +349,20 @@ public class TestSemanticRoundTripCorpus8 extends IntegrationTest {
 	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
 	public void testStringConcatNullFlow() {
 		getClassNode(StringConcatNullFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testSwitchSharedCatchFlow() {
+		getClassNode(SwitchSharedCatchFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testSynchronizedEarlyReturnCatchFlow() {
+		getClassNode(SynchronizedEarlyReturnCatchFlow.class);
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testStringSwitchNestedLoopFlow() {
+		getClassNode(StringSwitchNestedLoopFlow.class);
 	}
 }

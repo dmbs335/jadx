@@ -17,6 +17,8 @@ public class TestCoroutineIteratorDirectGetterJoin extends SmaliTest {
 				.code()
 				.contains("Normalize coroutine direct move/getter completion through result state")
 				.contains("this.result = objLoad;")
+				.countString(3, "break;")
+				.countString(1, "return parent;")
 				.doesNotContain("Unsupported multi-entry loop pattern")
 				.doesNotContain("Region traversal cycle prevented")
 				.doesNotContain("Method not decompiled")

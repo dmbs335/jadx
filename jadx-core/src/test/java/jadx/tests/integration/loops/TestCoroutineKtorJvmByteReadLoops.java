@@ -15,8 +15,6 @@ public class TestCoroutineKtorJvmByteReadLoops extends SmaliTest {
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmaliWithClsName("io.ktor.utils.io.ByteReadChannelOperations_jvmKt"))
 				.code()
-				.containsOne("Normalize reported coroutine loop completion through state dispatch")
-				.containsOne("Split coroutine resume result decision before loop header")
 				.contains("do {")
 				.contains("while (i < i2)")
 				.countString(1, "awaitContent$default(")

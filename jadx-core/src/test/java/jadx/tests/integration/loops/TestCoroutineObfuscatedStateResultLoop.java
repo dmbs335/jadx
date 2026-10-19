@@ -20,6 +20,8 @@ public class TestCoroutineObfuscatedStateResultLoop extends SmaliTest {
 				.containsOne("while (true)")
 				.contains(".a =")
 				.contains("hasNext()")
+				.contains("this.b |= Integer.MIN_VALUE;")
+				.contains("return run(this);")
 				.doesNotContain("Region traversal cycle prevented")
 				.doesNotContain("Unsupported multi-entry loop pattern")
 				.doesNotContain("Method not decompiled")

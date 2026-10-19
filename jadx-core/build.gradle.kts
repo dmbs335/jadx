@@ -9,6 +9,7 @@ dependencies {
 	implementation("com.google.code.gson:gson:2.14.0")
 
 	testImplementation("org.apache.commons:commons-lang3:3.20.0")
+	testImplementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.10")
 
 	testImplementation(project(":jadx-plugins:jadx-dex-input"))
 	// 'ClassNotFound' error is raised if set as 'testRuntime'
@@ -54,6 +55,9 @@ tasks.named<Test>("test") {
 	// disable cache to allow test's rerun,
 	// because most tests are integration and depends on plugins and environment
 	outputs.cacheIf { false }
+	// Smali fixtures are read directly by integration tests, not copied into test resources.
+	// Track them so changing only a fixture invalidates the test task's up-to-date state.
+	inputs.files(fileTree("src/test/smali") { include("**/*.smali") }).withPropertyName("smaliFixtures")
 
 	// exclude temp tests
 	exclude("**/tmp/*")

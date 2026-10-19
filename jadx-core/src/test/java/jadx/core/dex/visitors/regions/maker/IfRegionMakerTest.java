@@ -3,6 +3,7 @@ package jadx.core.dex.visitors.regions.maker;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
@@ -12,6 +13,8 @@ import jadx.core.dex.attributes.nodes.PhiListAttr;
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.info.MethodInfo;
+import jadx.core.dex.instructions.ArithNode;
+import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.IndexInsnNode;
@@ -34,6 +37,134 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 class IfRegionMakerTest {
+	@Test
+	void moveCarrierIsNotSharedGuardFailure() {
+		BlockNode carrier = new BlockNode(1, 0, 0);
+		BlockNode inheritedExit = new BlockNode(2, 1, 1);
+		carrier.getInstructions().add(new InsnNode(InsnType.MOVE, 0));
+		connect(carrier, inheritedExit);
+		carrier.updateCleanSuccessors();
+
+		assertThat(IfRegionMaker.isLinearMoveCarrierToInheritedExit(carrier, Set.of(inheritedExit))).isTrue();
+		assertThat(IfRegionMaker.isLinearMoveCarrierToInheritedExit(carrier, Set.of())).isFalse();
+
+		carrier.getInstructions().add(new InsnNode(InsnType.INVOKE, 0));
+		assertThat(IfRegionMaker.isLinearMoveCarrierToInheritedExit(carrier, Set.of(inheritedExit))).isFalse();
+	}
+
+	@Test
+	void collectContinuationFieldsAcrossLinearJoin() {
+		RootNode root = new RootNode(new JadxArgs());
+		ArgType continuationType = ArgType.object("test.SplitContinuation");
+		ClassInfo cls = ClassInfo.fromType(root, continuationType);
+		FieldInfo resultField = FieldInfo.from(root, cls, "result", ArgType.OBJECT);
+		FieldInfo labelField = FieldInfo.from(root, cls, "label", ArgType.INT);
+		BlockNode join = new BlockNode(1, 0, 0);
+		BlockNode labelRead = new BlockNode(2, 1, 1);
+		join.getInstructions().add(new IndexInsnNode(InsnType.IGET, resultField, 1));
+		labelRead.getInstructions().add(new IndexInsnNode(InsnType.IGET, labelField, 1));
+		connect(join, labelRead);
+		join.updateCleanSuccessors();
+		labelRead.updateCleanSuccessors();
+
+		assertThat(IfRegionMaker.collectContinuationJoinFields(join, continuationType))
+				.containsExactlyInAnyOrder(resultField, labelField);
+	}
+
+	@Test
+	void doNotCollectContinuationFieldsAcrossAnotherJoin() {
+		RootNode root = new RootNode(new JadxArgs());
+		ArgType continuationType = ArgType.object("test.SharedContinuation");
+		ClassInfo cls = ClassInfo.fromType(root, continuationType);
+		FieldInfo resultField = FieldInfo.from(root, cls, "result", ArgType.OBJECT);
+		FieldInfo labelField = FieldInfo.from(root, cls, "label", ArgType.INT);
+		BlockNode join = new BlockNode(1, 0, 0);
+		BlockNode other = new BlockNode(2, 1, 1);
+		BlockNode shared = new BlockNode(3, 2, 2);
+		join.getInstructions().add(new IndexInsnNode(InsnType.IGET, resultField, 1));
+		shared.getInstructions().add(new IndexInsnNode(InsnType.IGET, labelField, 1));
+		connect(join, shared);
+		connect(other, shared);
+		join.updateCleanSuccessors();
+		other.updateCleanSuccessors();
+		shared.updateCleanSuccessors();
+
+		assertThat(IfRegionMaker.collectContinuationJoinFields(join, continuationType))
+				.containsExactly(resultField);
+	}
+
+	@Test
+	void detectNormalizedCoroutineLabelBranch() {
+		RootNode root = new RootNode(new JadxArgs());
+		ArgType continuationType = ArgType.object("test.ProcessContinuation");
+		FieldInfo labelField = FieldInfo.from(
+				root, ClassInfo.fromType(root, continuationType), "label", ArgType.INT);
+
+		RegisterArg labelAssign = InsnArg.reg(0, ArgType.INT);
+		SSAVar labelVar = new SSAVar(0, 0, labelAssign);
+		IndexInsnNode labelGet = new IndexInsnNode(InsnType.IGET, labelField, 1);
+		labelGet.setResult(labelAssign);
+		labelGet.addArg(InsnArg.reg(1, continuationType));
+
+		RegisterArg labelUse = labelAssign.duplicate();
+		labelVar.use(labelUse);
+		RegisterArg normalizedAssign = InsnArg.reg(2, ArgType.INT);
+		SSAVar normalizedVar = new SSAVar(2, 0, normalizedAssign);
+		new ArithNode(ArithOp.OR, normalizedAssign, labelUse,
+				LiteralArg.make(Integer.MIN_VALUE, ArgType.INT));
+
+		RegisterArg normalizedUse = normalizedAssign.duplicate();
+		normalizedVar.use(normalizedUse);
+		RegisterArg stateAssign = InsnArg.reg(3, ArgType.INT);
+		SSAVar stateVar = new SSAVar(3, 0, stateAssign);
+		new ArithNode(ArithOp.SUB, stateAssign, normalizedUse,
+				LiteralArg.make(Integer.MIN_VALUE, ArgType.INT));
+
+		RegisterArg stateUse = stateAssign.duplicate();
+		stateVar.use(stateUse);
+		BlockNode labelBranch = new BlockNode(1, 0, 0);
+		labelBranch.getInstructions().add(new IfNode(
+				IfOp.EQ, 1, stateUse, LiteralArg.make(0, ArgType.INT)));
+
+		assertThat(IfRegionMaker.isCoroutineLabelIf(labelBranch)).isTrue();
+	}
+
+	@Test
+	void rejectUnrelatedArithmeticBranch() {
+		RegisterArg assign = InsnArg.reg(0, ArgType.INT);
+		SSAVar var = new SSAVar(0, 0, assign);
+		new ArithNode(ArithOp.SUB, assign,
+				LiteralArg.make(4, ArgType.INT), LiteralArg.make(1, ArgType.INT));
+		RegisterArg use = assign.duplicate();
+		var.use(use);
+		BlockNode branch = new BlockNode(1, 0, 0);
+		branch.getInstructions().add(new IfNode(
+				IfOp.EQ, 1, use, LiteralArg.make(0, ArgType.INT)));
+
+		assertThat(IfRegionMaker.isCoroutineLabelIf(branch)).isFalse();
+	}
+
+	@Test
+	void rejectSyntheticMethodExitAsSharedContinuation() {
+		BlockNode thenBlock = new BlockNode(1, 0, 0);
+		BlockNode elseBlock = new BlockNode(2, 1, 1);
+		BlockNode currentOut = new BlockNode(3, 2, 2);
+		BlockNode candidate = new BlockNode(4, 3, 3);
+		connect(thenBlock, candidate);
+		connect(elseBlock, candidate);
+		thenBlock.updateCleanSuccessors();
+		elseBlock.updateCleanSuccessors();
+		currentOut.updateCleanSuccessors();
+		candidate.updateCleanSuccessors();
+
+		assertThat(IfRegionMaker.isSharedContinuationCandidate(
+				currentOut, thenBlock, elseBlock, candidate)).isTrue();
+
+		candidate.add(AFlag.MTH_EXIT_BLOCK);
+		assertThat(IfRegionMaker.isSharedContinuationCandidate(
+				currentOut, thenBlock, elseBlock, candidate)).isFalse();
+	}
+
 	@Test
 	void memoizeSharedPathsAndRejectCycles() {
 		BlockNode start = new BlockNode(1, 0, 0);
@@ -154,12 +285,31 @@ class IfRegionMakerTest {
 	}
 
 	@Test
-	void acceptBranchStartAsJoinWithoutInspectingTerminalPaths() {
+	void distinguishLocalBranchStartJoinFromStrictPostDominator() {
 		BlockNode thenBlock = new BlockNode(1, 0, 0);
 		BlockNode elseBlock = new BlockNode(2, 1, 1);
+		connect(elseBlock, thenBlock);
+		thenBlock.updateCleanSuccessors();
+		elseBlock.updateCleanSuccessors();
 
 		assertThat(IfRegionMaker.isCommonPostDominator(thenBlock, elseBlock, thenBlock)).isTrue();
-		assertThat(IfRegionMaker.isCommonPostDominator(thenBlock, elseBlock, elseBlock)).isTrue();
+		assertThat(IfRegionMaker.isStrictCommonPostDominator(null, thenBlock, elseBlock, thenBlock)).isTrue();
+		assertThat(IfRegionMaker.isStrictCommonPostDominator(null, thenBlock, elseBlock, elseBlock)).isFalse();
+	}
+
+	@Test
+	void rejectBranchStartAsJoinWhenOtherBranchCanBypassIt() {
+		BlockNode thenBlock = new BlockNode(1, 0, 0);
+		BlockNode elseBlock = new BlockNode(2, 1, 1);
+		BlockNode bypass = new BlockNode(3, 2, 2);
+		connect(elseBlock, thenBlock);
+		connect(elseBlock, bypass);
+		thenBlock.updateCleanSuccessors();
+		elseBlock.updateCleanSuccessors();
+		bypass.updateCleanSuccessors();
+
+		assertThat(IfRegionMaker.isCommonPostDominator(thenBlock, elseBlock, thenBlock)).isTrue();
+		assertThat(IfRegionMaker.isStrictCommonPostDominator(null, thenBlock, elseBlock, thenBlock)).isFalse();
 	}
 
 	@Test

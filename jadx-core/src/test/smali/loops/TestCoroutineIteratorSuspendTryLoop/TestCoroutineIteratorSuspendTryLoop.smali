@@ -25,7 +25,7 @@
     move-object v0, v1
     iget v1, v0, Lloops/TestCoroutineIteratorSuspendTryLoop$Continuation;->label:I
     iget-object v2, v0, Lloops/TestCoroutineIteratorSuspendTryLoop$Continuation;->result:Ljava/lang/Object;
-    invoke-static {}, Lkotlin/coroutines/intrinsics/a;->getCOROUTINE_SUSPENDED()Ljava/lang/Object;
+    invoke-static {}, Lkotlin/coroutines/intrinsics/IntrinsicsKt;->getCOROUTINE_SUSPENDED()Ljava/lang/Object;
     move-result-object v3
 
     if-eqz v1, :initial

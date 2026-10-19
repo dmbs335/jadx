@@ -60,6 +60,8 @@ public class TestUnreachableCatch extends SmaliTest {
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.contains("IOException")
-				.contains("Collections.unmodifiableMap");
+				.containsLines(3, "if (font.getResultCode() != 0) {", "    continue;", "}")
+				.containsLines(3, "if (out.containsKey(uri)) {", "    continue;", "}")
+				.containsLines(2, "    out.put(uri, buffer);", "}", "return Collections.unmodifiableMap(out);");
 	}
 }

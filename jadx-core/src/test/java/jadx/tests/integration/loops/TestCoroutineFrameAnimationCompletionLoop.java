@@ -21,6 +21,8 @@ public class TestCoroutineFrameAnimationCompletionLoop extends SmaliTest {
 				.contains("withFrameNanos(")
 				.contains("getValueFromNanos(")
 				.contains("isFinishedFromNanos(")
+				.contains("this.label |= Integer.MIN_VALUE;")
+				.contains("return run(this);")
 				.doesNotContain("Region traversal cycle prevented")
 				.doesNotContain("Unsupported multi-entry loop pattern")
 				.doesNotContain("Method not decompiled")

@@ -32,7 +32,7 @@
 .end method
 
 .method public final invokeSuspend(Ljava/lang/Object;)Ljava/lang/Object;
-    .registers 3
+    .registers 4
 
     iput-object p1, p0, Lloops/TestCoroutineInlinedPendingSlotLoop;->a:Ljava/lang/Object;
     iget v0, p0, Lloops/TestCoroutineInlinedPendingSlotLoop;->y:I

@@ -2,18 +2,20 @@ package jadx.tests.integration.constructors;
 
 import org.junit.jupiter.api.Test;
 
-import jadx.tests.api.SmaliTest;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
-public class TestConstructorMoveWarning extends SmaliTest {
+public class TestConstructorMoveWarning extends ExpectedConstructorErrorTest {
 
 	@Test
 	public void test() {
 		disableCompilation();
-		allowWarnInCode();
+		// The field write in the bytecode precedes the super call. Moving the call
+		// ahead of the write can change what the parent constructor observes.
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.contains("'super' call moved to the top of the method (can break code semantics)");
+				.contains("Cannot move 'super' call to the top without changing code semantics")
+				.contains("JADX ERROR")
+				.contains("Method not decompiled:");
 	}
 }

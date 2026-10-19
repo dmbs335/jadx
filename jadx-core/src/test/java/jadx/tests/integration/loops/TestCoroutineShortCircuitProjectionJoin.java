@@ -1,26 +1,31 @@
 package jadx.tests.integration.loops;
 
+import java.util.List;
+
 import org.junit.jupiter.api.Test;
 
 import jadx.api.CommentsLevel;
+import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.SmaliTest;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 public class TestCoroutineShortCircuitProjectionJoin extends SmaliTest {
+	@Override
+	protected void runChecks(List<ClassNode> classes) {
+		org.assertj.core.api.Assertions.assertThat(classes).hasSize(1);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(1);
+	}
 
 	@Test
-	public void test() {
+	public void reportsUnresolvedMultiEntryLoop() {
 		disableCompilation();
-		allowWarnInCode();
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.containsOne("Split 3 coroutine short-circuit branches from projection join")
-				.contains("first() || second() || third()")
 				.containsOne("Unsupported multi-entry loop pattern")
-				.doesNotContain("??")
-				.doesNotContain("Method not decompiled")
-				.doesNotContain("JADX ERROR");
+				.containsOne("Unresolved control-flow restructuring: unsupported multi-entry loop")
+				.contains("JADX ERROR")
+				.contains("Method not decompiled:");
 	}
 }

@@ -18,10 +18,9 @@ public class TestJsonTreeReaderDeepRecursiveObjectLoop extends SmaliTest {
 		assertThat(getClassNodeFromSmaliWithClsName(
 				"loops.DeepRecursiveObjectReader"))
 						.code()
-						.containsOne("Normalize single-state direct completion bridge through state dispatch")
-						.containsOne("while (true)")
+						.containsOne("while (deepRecursiveObjectReader.a.canConsumeValue())")
 						.contains("callRecursive")
-						.contains("result = objCallRecursive")
+						.contains("objCallRecursive =")
 						.contains("linkedHashMap.put")
 						.contains("canConsumeValue")
 						.doesNotContain("Region traversal cycle prevented")

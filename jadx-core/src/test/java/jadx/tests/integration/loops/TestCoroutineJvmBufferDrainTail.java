@@ -15,7 +15,7 @@ public class TestCoroutineJvmBufferDrainTail extends SmaliTest {
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmaliWithClsName("io.ktor.utils.io.jvm.javaio.WritingKt"))
 				.code()
-				.contains("Preserved coroutine buffer-drain resume entry")
+				.contains("Split Ktor OutputStream copy resume bridge before loop header")
 				.countString(1, "while (")
 				.countString(1, "awaitContent$default(")
 				.contains("readTo$default(")

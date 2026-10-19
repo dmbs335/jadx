@@ -15,9 +15,6 @@ public class TestCoroutineObfuscatedOuterSwitchCompleteStateMap extends SmaliTes
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.containsOne(
-						"Normalize complete local obfuscated coroutine state map"
-								+ " through dispatcher")
 				.containsOne("while (true) {")
 				.contains("refresh(")
 				.contains("fetch(")

@@ -14,6 +14,13 @@
 
 .field public volatile b:Z
 
+.method public constructor <init>(Ljava/util/Map;)V
+    .registers 2
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    iput-object p1, p0, Ltypes/TestTypeResolver25;->a:Ljava/util/Map;
+    return-void
+.end method
+
 .method public k(Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;
     .registers 6
     .annotation system Ldalvik/annotation/Signature;

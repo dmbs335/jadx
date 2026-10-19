@@ -9,7 +9,7 @@
     return-object v0
 .end method
 
-.method public final invokeSuspend(Ljava/lang/Object;)Ljava/lang/Object;
+.method public final P(Ljava/lang/Object;)Ljava/lang/Object;
     .locals 10
 
     invoke-static {}, Lkotlin/coroutines/intrinsics/IntrinsicsKt;->getCOROUTINE_SUSPENDED()Ljava/lang/Object;
@@ -53,7 +53,7 @@
     :call_has_next
     const/4 v3, 0x1
     iput v3, p0, Lloops/TestTryProtectedManyStateChannelIteratorCompletions;->label:I
-    invoke-interface {v7, p0}, Lkotlinx/coroutines/channels/ChannelIterator;->hasNext(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-interface {v7, p0}, Lkotlinx/coroutines/channels/ChannelIterator;->a(Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object v4
     if-eq v4, v0, :suspended
     move-object v5, v4
@@ -68,7 +68,7 @@
 
     const/4 v3, 0x2
     iput v3, p0, Lloops/TestTryProtectedManyStateChannelIteratorCompletions;->label:I
-    invoke-interface {v6, v8, p0}, Lkotlinx/coroutines/channels/SendChannel;->send(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-interface {v6, v8, p0}, Lkotlinx/coroutines/channels/SendChannel;->F(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object v4
     if-eq v4, v0, :suspended
     move-object v5, v4
@@ -76,7 +76,7 @@
     :join_send_one
     const/4 v3, 0x3
     iput v3, p0, Lloops/TestTryProtectedManyStateChannelIteratorCompletions;->label:I
-    invoke-interface {v6, v8, p0}, Lkotlinx/coroutines/channels/SendChannel;->send(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-interface {v6, v8, p0}, Lkotlinx/coroutines/channels/SendChannel;->F(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object v4
     if-eq v4, v0, :suspended
     move-object v5, v4
@@ -84,7 +84,7 @@
     :join_send_two
     const/4 v3, 0x4
     iput v3, p0, Lloops/TestTryProtectedManyStateChannelIteratorCompletions;->label:I
-    invoke-interface {v6, v8, p0}, Lkotlinx/coroutines/channels/SendChannel;->send(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-interface {v6, v8, p0}, Lkotlinx/coroutines/channels/SendChannel;->F(Ljava/lang/Object;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object v4
     if-eq v4, v0, :suspended
     move-object v5, v4
@@ -95,7 +95,7 @@
     :done
     sget-object v5, Lkotlin/Unit;->INSTANCE:Lkotlin/Unit;
     const/4 v9, 0x0
-    invoke-static {v6, v9}, Lkotlinx/coroutines/channels/ChannelsKt;->cancelConsumed(Lkotlinx/coroutines/channels/ReceiveChannel;Ljava/lang/Throwable;)V
+    invoke-static {v6, v9}, Lkotlinx/coroutines/channels/ChannelsKt;->f(Lkotlinx/coroutines/channels/ReceiveChannel;Ljava/lang/Throwable;)V
     return-object v5
 
     :suspended
@@ -105,7 +105,7 @@
 
     :cleanup
     move-exception v9
-    invoke-static {v6, v9}, Lkotlinx/coroutines/channels/ChannelsKt;->cancelConsumed(Lkotlinx/coroutines/channels/ReceiveChannel;Ljava/lang/Throwable;)V
+    invoke-static {v6, v9}, Lkotlinx/coroutines/channels/ChannelsKt;->f(Lkotlinx/coroutines/channels/ReceiveChannel;Ljava/lang/Throwable;)V
     throw v9
 
     :state_switch

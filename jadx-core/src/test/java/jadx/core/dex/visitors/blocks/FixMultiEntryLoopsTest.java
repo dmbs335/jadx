@@ -1,6 +1,7 @@
 package jadx.core.dex.visitors.blocks;
 
 import java.util.List;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
@@ -11,6 +12,8 @@ import jadx.core.dex.attributes.nodes.SpecialEdgeAttr.SpecialEdgeType;
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.info.MethodInfo;
+import jadx.core.dex.instructions.ArithNode;
+import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.IndexInsnNode;
@@ -28,6 +31,91 @@ import jadx.core.dex.nodes.RootNode;
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 class FixMultiEntryLoopsTest {
+	@Test
+	void rejectsHeaderPreHeaderWhenResumeBypassesLoopInterior() {
+		BlockNode entry = block(0);
+		BlockNode loopHeader = block(1);
+		BlockNode body = block(2);
+		BlockNode latch = block(3);
+		BlockNode resume = block(4);
+		connect(entry, loopHeader);
+		connect(loopHeader, body);
+		connect(body, latch);
+		connect(latch, loopHeader);
+		assertThat(FixMultiEntryLoops.hasExternalEntryIntoLoopInterior(loopHeader)).isFalse();
+
+		connect(entry, resume);
+		connect(resume, body);
+		assertThat(FixMultiEntryLoops.hasExternalEntryIntoLoopInterior(loopHeader)).isTrue();
+	}
+
+	@Test
+	void testCollectUnreachableCyclicDirectPath() {
+		BlockNode enter = block(0);
+		BlockNode live = block(1);
+		BlockNode orphanEntry = block(2);
+		BlockNode orphanLoop = block(3);
+		BlockNode unrelatedOrphan = block(4);
+		connect(enter, live);
+		connect(orphanEntry, orphanLoop);
+		connect(orphanLoop, orphanEntry);
+
+		Set<BlockNode> unreachable = FixMultiEntryLoops.collectUnreachableBlocks(
+				List.of(enter, live, orphanEntry, orphanLoop, unrelatedOrphan), enter);
+
+		assertThat(unreachable).containsExactly(orphanEntry, orphanLoop, unrelatedOrphan);
+		assertThat(FixMultiEntryLoops.collectOrphanedDirectPaths(
+				List.of(enter, live, orphanEntry, orphanLoop, unrelatedOrphan), enter, Set.of(orphanEntry)))
+				.containsExactly(orphanEntry, orphanLoop);
+		assertThat(FixMultiEntryLoops.collectOrphanedDirectPaths(
+				List.of(enter, live, orphanEntry, orphanLoop, unrelatedOrphan), enter, Set.of(live)))
+				.isEmpty();
+	}
+
+	@Test
+	void testContinuationReentryStateDispatch() {
+		RootNode root = new RootNode(new JadxArgs());
+		ArgType continuationType = ArgType.object("test.TouchSlopContinuation");
+		ClassInfo continuationClass = ClassInfo.fromType(root, continuationType);
+		FieldInfo resultField = FieldInfo.from(
+				root, continuationClass, "result", ArgType.OBJECT);
+		FieldInfo labelField = FieldInfo.from(
+				root, continuationClass, "label", ArgType.INT);
+		FieldInfo touchSlopField = FieldInfo.from(
+				root, ClassInfo.fromName(root, "test.GestureConfig"), "touchSlop", ArgType.FLOAT);
+		ArgType singletonType = ArgType.object("kotlin.coroutines.intrinsics.CoroutineSingletons");
+		FieldInfo suspendedField = FieldInfo.from(
+				root,
+				ClassInfo.fromType(root, singletonType),
+				"COROUTINE_SUSPENDED",
+				singletonType);
+		BlockNode dispatch = block(0);
+		addFieldPut(dispatch, resultField, 1, ArgType.OBJECT, 0, continuationType);
+		addFieldGet(dispatch, labelField, 2, ArgType.INT, 0, continuationType);
+		addConst(dispatch, 3, Integer.MIN_VALUE, ArgType.INT);
+		dispatch.getInstructions().add(new ArithNode(
+				ArithOp.OR,
+				InsnArg.reg(2, ArgType.INT_BOOLEAN),
+				InsnArg.reg(2, ArgType.INT),
+				InsnArg.reg(3, ArgType.INT)));
+		addFieldPut(dispatch, labelField, 2, ArgType.INT, 0, continuationType);
+		addStaticFieldGet(dispatch, touchSlopField, 4, ArgType.FLOAT);
+		dispatch.getInstructions().add(new ArithNode(
+				ArithOp.SUB,
+				InsnArg.reg(2, ArgType.INT),
+				InsnArg.reg(2, ArgType.INT),
+				InsnArg.reg(3, ArgType.INT)));
+		addFieldPut(dispatch, labelField, 2, ArgType.INT, 0, continuationType);
+		addStaticFieldGet(dispatch, suspendedField, 3, singletonType);
+
+		assertThat(FixMultiEntryLoops.isContinuationReentryStateDispatch(
+				dispatch, labelField)).isTrue();
+
+		dispatch.getInstructions().add(new InsnNode(InsnType.INVOKE, 0));
+		assertThat(FixMultiEntryLoops.isContinuationReentryStateDispatch(
+				dispatch, labelField)).isFalse();
+	}
+
 	@Test
 	void failedProcessResultStopsAllFollowUpTransforms() throws Exception {
 		Class<?> resultClass = Class.forName(FixMultiEntryLoops.class.getName() + "$ProcessResult");
@@ -54,6 +142,27 @@ class FixMultiEntryLoopsTest {
 
 		assertThat(FixMultiEntryLoops.hasExclusivePredecessor(
 				directPath, suspendCheck)).isFalse();
+	}
+
+	@Test
+	void testBranchTargetRollbackWithDuplicateSyntheticOffsets() {
+		BlockNode source = block(0);
+		BlockNode thenBlock = new BlockNode(1, 1, 1);
+		BlockNode elseBlock = new BlockNode(2, 1, 1);
+		BlockNode temporaryCopy = new BlockNode(3, 1, 1);
+		IfNode branch = new IfNode(IfOp.EQ, 1,
+				InsnArg.reg(0, ArgType.INT), InsnArg.lit(0, ArgType.INT));
+		source.getInstructions().add(branch);
+		connect(source, thenBlock);
+		connect(source, elseBlock);
+		branch.initBlocks(source);
+		assertThat(branch.getThenBlock()).isSameAs(thenBlock);
+
+		BlockSplitter.replaceConnection(source, thenBlock, temporaryCopy);
+		assertThat(branch.getThenBlock()).isSameAs(temporaryCopy);
+		BlockSplitter.replaceConnection(source, temporaryCopy, thenBlock);
+		assertThat(branch.getThenBlock()).isSameAs(thenBlock);
+		assertThat(branch.getElseBlock()).isSameAs(elseBlock);
 	}
 
 	@Test
@@ -367,6 +476,19 @@ class FixMultiEntryLoopsTest {
 		assertThat(FixMultiEntryLoops
 				.isCoroutineDirectBridgeMoveJoinPath(backEdge))
 						.isFalse();
+	}
+
+	@Test
+	void testMoveTransportBlockAllowsOnlyTerminalGoto() {
+		BlockNode block = block(0);
+		block.getInstructions().add(new InsnNode(InsnType.MOVE, 1));
+		block.getInstructions().add(new InsnNode(InsnType.MOVE, 1));
+		block.getInstructions().add(new InsnNode(InsnType.GOTO, 0));
+
+		assertThat(FixMultiEntryLoops.isMoveTransportBlock(block, 3)).isTrue();
+
+		block.getInstructions().add(new InsnNode(InsnType.MOVE, 1));
+		assertThat(FixMultiEntryLoops.isMoveTransportBlock(block, 4)).isFalse();
 	}
 
 	@Test
@@ -1070,6 +1192,37 @@ class FixMultiEntryLoopsTest {
 				getter, ifInsn, closed)).isFalse();
 	}
 
+	@Test
+	void testProveMoveAliasBetweenLabelWriteAndInvoke() {
+		RootNode root = new RootNode(new JadxArgs());
+		BlockNode setup = block(0);
+		BlockNode invokeBlock = block(1);
+		InsnNode labelWrite = new InsnNode(InsnType.IPUT, 0);
+		setup.getInstructions().add(labelWrite);
+		addMove(setup, 4, 1, ArgType.OBJECT);
+		addMove(setup, 7, 4, ArgType.OBJECT);
+		MethodInfo method = MethodInfo.fromDetails(
+				root,
+				ClassInfo.fromName(root, "test.SuspendTarget"),
+				"invoke",
+				List.of(ArgType.OBJECT),
+				ArgType.OBJECT);
+		InvokeNode invoke = new InvokeNode(method, InvokeType.STATIC, 1);
+		invoke.addArg(InsnArg.reg(7, ArgType.OBJECT));
+		invoke.setResult(InsnArg.reg(8, ArgType.OBJECT));
+		invokeBlock.getInstructions().add(invoke);
+
+		assertThat(FixMultiEntryLoops.isMoveAliasBetween(
+				setup, invokeBlock, labelWrite, invoke, 1, 7)).isTrue();
+
+		InsnNode overwrite = new InsnNode(InsnType.CONST, 1);
+		overwrite.setResult(InsnArg.reg(4, ArgType.OBJECT));
+		overwrite.addArg(InsnArg.lit(0, ArgType.OBJECT));
+		setup.getInstructions().add(2, overwrite);
+		assertThat(FixMultiEntryLoops.isMoveAliasBetween(
+				setup, invokeBlock, labelWrite, invoke, 1, 7)).isFalse();
+	}
+
 	private static void addInvoke(RootNode root, BlockNode block, String name) {
 		MethodInfo method = MethodInfo.fromDetails(
 				root,
@@ -1086,6 +1239,46 @@ class FixMultiEntryLoopsTest {
 		move.setResult(InsnArg.reg(resultReg, type));
 		move.addArg(InsnArg.reg(sourceReg, type));
 		block.getInstructions().add(move);
+	}
+
+	private static void addConst(BlockNode block, int resultReg, long value, ArgType type) {
+		InsnNode constant = new InsnNode(InsnType.CONST, 1);
+		constant.setResult(InsnArg.reg(resultReg, type));
+		constant.addArg(InsnArg.lit(value, type));
+		block.getInstructions().add(constant);
+	}
+
+	private static void addFieldGet(
+			BlockNode block,
+			FieldInfo field,
+			int resultReg,
+			ArgType resultType,
+			int instanceReg,
+			ArgType instanceType) {
+		IndexInsnNode get = new IndexInsnNode(InsnType.IGET, field, 1);
+		get.setResult(InsnArg.reg(resultReg, resultType));
+		get.addArg(InsnArg.reg(instanceReg, instanceType));
+		block.getInstructions().add(get);
+	}
+
+	private static void addFieldPut(
+			BlockNode block,
+			FieldInfo field,
+			int valueReg,
+			ArgType valueType,
+			int instanceReg,
+			ArgType instanceType) {
+		IndexInsnNode put = new IndexInsnNode(InsnType.IPUT, field, 2);
+		put.addArg(InsnArg.reg(valueReg, valueType));
+		put.addArg(InsnArg.reg(instanceReg, instanceType));
+		block.getInstructions().add(put);
+	}
+
+	private static void addStaticFieldGet(
+			BlockNode block, FieldInfo field, int resultReg, ArgType resultType) {
+		IndexInsnNode get = new IndexInsnNode(InsnType.SGET, field, 0);
+		get.setResult(InsnArg.reg(resultReg, resultType));
+		block.getInstructions().add(get);
 	}
 
 	private static void connect(BlockNode source, BlockNode target) {

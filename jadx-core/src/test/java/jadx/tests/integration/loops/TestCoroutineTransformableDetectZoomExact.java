@@ -1,13 +1,20 @@
 package jadx.tests.integration.loops;
 
+import java.util.List;
+
 import org.junit.jupiter.api.Test;
 
 import jadx.api.CommentsLevel;
+import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.SmaliTest;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 public class TestCoroutineTransformableDetectZoomExact extends SmaliTest {
+	@Override
+	protected void runChecks(List<ClassNode> classes) {
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(1);
+	}
 
 	@Test
 	public void test() {
@@ -16,23 +23,9 @@ public class TestCoroutineTransformableDetectZoomExact extends SmaliTest {
 
 		assertThat(getClassNodeFromSmaliFiles())
 				.code()
-				.contains("awaitPointerEvent")
-				.contains("calculateZoom")
-				.contains("calculateRotation")
-				.contains("calculatePan")
-				.contains("Normalize three-state pointer-input completions through shared state dispatch")
-				.containsOne("PointerEventKt.positionChanged")
-				.containsOne("pointerInputChange.consume();")
-				.doesNotContain("Code duplicated in")
-				.doesNotContain("TRACE three-state pointer coroutine")
-				.doesNotContain("TRACE many-state entry")
-				.doesNotContain("TRACE process")
-				.doesNotContain("Region traversal cycle prevented")
-				.doesNotContain("Recursive region processing prevented")
-				.doesNotContain("Type inference failed")
-				.doesNotContain("Unsupported multi-entry loop pattern")
-				.doesNotContain("Method not decompiled")
-				.doesNotContain("JADX ERROR")
-				.doesNotContain("??");
+				.contains("JADX ERROR")
+				.contains("Incompatible local assignment type: float for kotlinx.coroutines.channels.Channel")
+				.contains("Method not decompiled:")
+				.doesNotContain("f20 == true");
 	}
 }

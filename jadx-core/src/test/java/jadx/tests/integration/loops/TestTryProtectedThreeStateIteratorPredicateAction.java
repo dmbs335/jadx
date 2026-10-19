@@ -10,7 +10,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestTryProtectedThreeStateIteratorPredicateAction extends SmaliTest {
 
 	@Test
-	public void test() {
+	public void testObfuscatedCoroutineAndSuspendCallNames() {
 		disableCompilation();
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmali())
@@ -18,9 +18,9 @@ public class TestTryProtectedThreeStateIteratorPredicateAction extends SmaliTest
 				.contains("Normalize three-state iterator predicate/action completions"
 						+ " through state dispatch")
 				.containsOne("while (true) {")
-				.contains("hasNext(")
+				.contains(".a(")
 				.contains("next()")
-				.contains("send(")
+				.contains(".F(")
 				.doesNotContain("Unsupported multi-entry loop pattern")
 				.doesNotContain("Region traversal cycle prevented")
 				.doesNotContain("Recursive region processing prevented")

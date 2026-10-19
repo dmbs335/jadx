@@ -21,6 +21,8 @@ public class TestDiscardedSequentialSuspendCompletion extends SmaliTest {
 						"Route discarded sequential suspend completion through state dispatch: 1 -> 2")
 				.countString(1, "function1.invoke(this)")
 				.contains("Function1 function1 = this.second;")
+				.contains("if (objInvoke == coroutine_suspended) {")
+				.countString(1, "break loop0;")
 				.contains("case 1:")
 				.contains("ResultKt.throwOnFailure(obj);")
 				.doesNotContain("Discarded sequential probe")

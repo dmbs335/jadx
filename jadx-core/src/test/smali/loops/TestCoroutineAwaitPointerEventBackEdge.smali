@@ -15,7 +15,8 @@
     const/4 v3, 0x1
     if-eqz v2, :initial
     if-ne v2, v3, :bad_state
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    # Release builds can rename ResultKt.throwOnFailure while retaining its stable ABI.
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :event_body
 
     :bad_state
@@ -24,7 +25,7 @@
     throw p1
 
     :initial
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
 
     :await_event
     sget-object p1, Landroidx/compose/ui/input/pointer/PointerEventPass;->Initial:Landroidx/compose/ui/input/pointer/PointerEventPass;

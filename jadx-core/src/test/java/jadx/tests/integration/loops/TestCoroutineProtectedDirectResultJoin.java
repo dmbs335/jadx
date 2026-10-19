@@ -15,9 +15,12 @@ public class TestCoroutineProtectedDirectResultJoin extends SmaliTest {
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.containsOne("Normalize protected direct coroutine completion through simple resume restore")
+				.containsOne("Normalize try-protected coroutine suspend completion through state dispatch")
+				.containsOne("continue;")
 				.contains("access$awaitCtrlMouseScrollOrNull(")
 				.contains("throwOnFailure(")
+				.doesNotContain("obj.trySend")
+				.doesNotContain("might not have been initialized")
 				.doesNotContain("Unsupported multi-entry loop pattern")
 				.doesNotContain("Method not decompiled")
 				.doesNotContain("JADX ERROR");

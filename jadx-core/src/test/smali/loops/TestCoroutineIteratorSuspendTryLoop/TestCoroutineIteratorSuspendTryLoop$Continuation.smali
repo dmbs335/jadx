@@ -1,6 +1,15 @@
 .class final Lloops/TestCoroutineIteratorSuspendTryLoop$Continuation;
 .super Lkotlin/coroutines/jvm/internal/ContinuationImpl;
 
+.annotation system Ldalvik/annotation/EnclosingClass;
+    value = Lloops/TestCoroutineIteratorSuspendTryLoop;
+.end annotation
+
+.annotation system Ldalvik/annotation/InnerClass;
+    accessFlags = 0x18
+    name = "Continuation"
+.end annotation
+
 .field public isCancelled:Z
 .field public iterator:Ljava/util/Iterator;
 .field public key:Ljava/lang/Object;

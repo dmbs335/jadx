@@ -31,10 +31,13 @@ public class TestConditions18 extends SmaliTest {
 		assertThat(getClassNodeFromSmali())
 				.code()
 				.containsLines(2,
-						"if (this != obj) {",
-						indent() + "return (obj instanceof TestConditions18) && st(this.map, ((TestConditions18) obj).map);",
+						"if (this == obj) {",
+						indent() + "return true;",
 						"}",
-						"return true;");
+						"if (obj instanceof TestConditions18) {",
+						indent() + "return st(this.map, ((TestConditions18) obj).map);",
+						"}",
+						"return false;");
 	}
 
 	@Test

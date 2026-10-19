@@ -29,39 +29,39 @@
     throw p1
 
     :state_zero
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :call_one
 
     :state_one
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :after_one
 
     :state_two
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :after_two
 
     :state_three
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :after_three
 
     :state_four
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :after_four
 
     :state_five
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :after_five
 
     :state_six
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :after_six
 
     :state_seven
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :after_seven
 
     :state_eight
-    invoke-static {p1}, Lkotlin/ResultKt;->throwOnFailure(Ljava/lang/Object;)V
+    invoke-static {p1}, Lkotlin/ResultKt;->b(Ljava/lang/Object;)V
     goto :after_eight
 
     :call_one

@@ -48,11 +48,10 @@ public class TestUnreachableCatch2 extends SmaliTest {
 
 	@Test
 	public void test() {
-		// TODO: result code not compilable because 'try' block split into 2 block and 'fis' var become
-		// uninitialized
-		disableCompilation();
 		assertThat(getClassNode(UnusedExceptionHandlers1.class))
 				.code()
+				.containsOne("for (Object obj : array) {")
+				.doesNotContain("i++;")
 				.doesNotContain("break;")
 				.countString(2, "} catch (IOException e");
 	}

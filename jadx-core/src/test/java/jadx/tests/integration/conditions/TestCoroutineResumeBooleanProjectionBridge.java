@@ -16,6 +16,8 @@ public class TestCoroutineResumeBooleanProjectionBridge extends SmaliTest {
 		assertThat(searchCls(loadFromSmaliFiles(),
 				"kotlinx.coroutines.channels.ChannelsKt__DeprecatedKt"))
 						.code()
+						.doesNotContain("Incomplete try/catch coverage")
+						.countString(2, "catch (Throwable ")
 						.containsOne("Split coroutine resume Boolean projection/branch before loop header")
 						.containsOne("while (true)")
 						.countString(2, ".add(")

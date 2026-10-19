@@ -16,8 +16,7 @@ public class TestDeclaredSynchronizedAliasedHandlers extends SmaliTest {
 				.contains(".g--;")
 				.containsOne("if (this.j >= 2000 || this.k >= 524288) {")
 				.containsOne("this.l = 42L;")
-				.containsOne("throw th;")
-				.containsOne("throw th2;")
-				.doesNotContain("th = th;", "finally");
+				.countString(2, "throw th")
+				.doesNotContain("th = th;", "finally", "Unsafe code duplication", "throws Throwable");
 	}
 }

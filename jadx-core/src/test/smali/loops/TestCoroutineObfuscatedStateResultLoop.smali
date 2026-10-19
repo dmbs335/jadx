@@ -14,7 +14,7 @@
 .end method
 
 .method public final invokeSuspend(Ljava/lang/Object;)Ljava/lang/Object;
-    .registers 3
+    .registers 4
 
     iput-object p1, p0, Lloops/TestCoroutineObfuscatedStateResultLoop;->a:Ljava/lang/Object;
     iget v0, p0, Lloops/TestCoroutineObfuscatedStateResultLoop;->b:I

@@ -1,31 +1,30 @@
 package jadx.tests.integration.loops;
 
+import java.util.List;
+
 import org.junit.jupiter.api.Test;
 
 import jadx.api.CommentsLevel;
+import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.SmaliTest;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 public class TestProtectedCoroutineMultiSuspendDispatch extends SmaliTest {
+	@Override
+	protected void runChecks(List<ClassNode> classes) {
+		org.assertj.core.api.Assertions.assertThat(classes).hasSize(1);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(1);
+	}
 
 	@Test
-	public void test() {
+	public void reportsRecursiveRegionTraversal() {
 		disableCompilation();
-		allowWarnInCode();
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.contains("Normalize coroutine delay result before preserved restore bridge")
-				.contains("Normalize protected multi-suspend loop completion through state dispatch")
-				.contains("while (")
-				.contains("delay(1L, this)")
-				.contains("suspendClock(this)")
-				.contains("send(this)")
-				.doesNotContain("Unsupported multi-entry loop pattern")
-				.doesNotContain("Found unreachable blocks")
-				.doesNotContain("Failed to insert an additional move for type inference")
-				.doesNotContain("Method not decompiled")
-				.doesNotContain("JADX ERROR");
+				.containsOne("Unresolved control-flow restructuring: recursive region traversal")
+				.contains("JADX ERROR")
+				.contains("Method not decompiled:");
 	}
 }

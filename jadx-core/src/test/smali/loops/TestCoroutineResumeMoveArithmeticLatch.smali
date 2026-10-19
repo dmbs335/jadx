@@ -75,8 +75,6 @@
     move v3, v11
     move-object v6, v10
     move-object v5, v9
-    move-object p0, v8
-
     :increment
     add-int/lit8 v3, v3, 0x1
     goto :loop_header

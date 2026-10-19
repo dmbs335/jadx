@@ -19,6 +19,7 @@ public class TestCoroutineResumeMoveArithmeticLatch extends SmaliTest {
 				.containsOne("while (")
 				.containsOne("if (!map.containsKey(str) ||")
 				.countString(2, "await(")
+				.doesNotContain("this =")
 				.doesNotContain("Unsupported multi-entry loop")
 				.doesNotContain("Region traversal cycle")
 				.doesNotContain("Code duplicated")

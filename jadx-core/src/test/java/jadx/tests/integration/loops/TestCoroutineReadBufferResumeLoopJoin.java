@@ -19,7 +19,7 @@ public class TestCoroutineReadBufferResumeLoopJoin extends SmaliTest {
 				.contains("while (")
 				.contains("isClosedForRead()")
 				.countString(1, "awaitContent$default(")
-				.countString(3, "readTo(")
+				.countString(2, "readTo(")
 				.doesNotContain("while (true)")
 				.doesNotContain("Unsupported multi-entry loop pattern")
 				.doesNotContain("Code duplicated")

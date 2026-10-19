@@ -16,10 +16,12 @@ public class TestCoroutineAwaitPointerEventTryMoveBridge extends SmaliTest {
 		getArgs().setCommentsLevel(CommentsLevel.DEBUG);
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.contains("Unsupported multi-entry loop pattern")
+				.containsOne("while (true)")
 				.contains("awaitPointerEvent(")
-				.contains("cleanup()")
-				.contains("Region traversal cycle prevented")
+				.countString(4, "cleanup()")
+				.doesNotContain("this =")
+				.doesNotContain("Unsupported multi-entry loop pattern")
+				.doesNotContain("Region traversal cycle prevented")
 				.doesNotContain("Method not decompiled")
 				.doesNotContain("JADX ERROR");
 	}

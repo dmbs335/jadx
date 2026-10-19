@@ -1,7 +1,10 @@
 package jadx.core.dex.visitors.blocks;
 
+import java.util.ArrayList;
+
 import org.junit.jupiter.api.Test;
 
+import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
 import jadx.core.dex.instructions.InsnType;
@@ -9,10 +12,38 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.InsnNode;
+import jadx.core.dex.trycatch.CatchAttr;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class BlockProcessorTest {
+	@Test
+	void protectsAssignmentsBeforeInstructionLevelTryEntry() {
+		BlockNode block = makeBranchBlock(0, ArgType.INT);
+		block.getInstructions().get(1).add(AFlag.TRY_ENTER);
+		assertThat(BlockProcessor.hasProtectedInstructions(block)).isTrue();
+	}
+
+	@Test
+	void protectsAssignmentsBeforeInstructionLevelCatchRange() {
+		BlockNode block = makeBranchBlock(0, ArgType.INT);
+		block.getInstructions().get(1).addAttr(CatchAttr.build(new ArrayList<>()));
+		assertThat(BlockProcessor.hasProtectedInstructions(block)).isTrue();
+	}
+
+	@Test
+	void detectsBlockLevelProtection() {
+		BlockNode block = makeBranchBlock(0, ArgType.INT);
+		block.addAttr(CatchAttr.build(new ArrayList<>()));
+		assertThat(BlockProcessor.hasProtectedInstructions(block)).isTrue();
+	}
+
+	@Test
+	void allowsUnprotectedLoopDeduplication() {
+		BlockNode block = makeBranchBlock(0, ArgType.INT);
+		block.add(AFlag.LOOP_START);
+		assertThat(BlockProcessor.hasProtectedInstructions(block)).isFalse();
+	}
 
 	@Test
 	void rejectEquivalentIfMergeAcrossPrimitiveAndReferenceLifetimes() {
