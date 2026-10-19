@@ -4,6 +4,12 @@
 .field public static bits:I
 .field public value:I
 
+.method public constructor <init>()V
+    .locals 0
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+
 .method public constructor <init>(I)V
     .locals 0
     invoke-direct {p0}, Ljava/lang/Object;-><init>()V
@@ -269,4 +275,50 @@
     int-to-double v1, v0
 
     return-wide v1
+.end method
+
+.method public check()V
+    .locals 6
+
+    const/4 v0, -0x4
+    const/4 v1, 0x1
+
+    invoke-static {v0, v1}, Ltypes/TestMixedBooleanBitOp;->orIntBoolean(IZ)I
+    move-result v2
+    const/4 v3, -0x3
+    if-ne v2, v3, :fail
+
+    invoke-static {v1, v0}, Ltypes/TestMixedBooleanBitOp;->xorBooleanInt(ZI)I
+    move-result v2
+    const/4 v3, -0x3
+    if-ne v2, v3, :fail
+
+    invoke-static {v0, v1}, Ltypes/TestMixedBooleanBitOp;->widenOrIntBoolean(IZ)J
+    move-result-wide v2
+    const-wide/16 v4, -0x3
+    cmp-long v2, v2, v4
+    if-nez v2, :fail
+
+    invoke-static {v0, v1}, Ltypes/TestMixedBooleanBitOp;->booleanCompareAndWidenOrIntBoolean(IZ)J
+    move-result-wide v2
+    const-wide/16 v4, -0x3
+    cmp-long v2, v2, v4
+    if-nez v2, :fail
+
+    const/16 v0, 0x100
+    invoke-static {v0, v1}, Ltypes/TestMixedBooleanBitOp;->narrowOrIntBoolean(IZ)B
+    move-result v2
+    if-ne v2, v1, :fail
+
+    const v0, 0x10000
+    invoke-static {v0, v1}, Ltypes/TestMixedBooleanBitOp;->charOrIntBoolean(IZ)C
+    move-result v2
+    if-ne v2, v1, :fail
+
+    return-void
+
+    :fail
+    new-instance v0, Ljava/lang/AssertionError;
+    invoke-direct {v0}, Ljava/lang/AssertionError;-><init>()V
+    throw v0
 .end method

@@ -12,6 +12,8 @@ import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.data.attributes.JadxAttrType;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.info.FieldInfo;
+import jadx.core.dex.instructions.ArithNode;
+import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.ConstClassNode;
 import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.IndexInsnNode;
@@ -44,6 +46,32 @@ public class InsnUtils {
 
 	public static String insnTypeToString(InsnType type) {
 		return type + "  ";
+	}
+
+	/**
+	 * Whether rendering an expression twice can preserve its value and observable effects.
+	 * Used by code generation for comparison instructions that render operands in two branches.
+	 */
+	public static boolean isRepeatableExpression(InsnNode insn) {
+		return !Boolean.TRUE.equals(insn.visitInsns(inner -> {
+			switch (inner.getType()) {
+				case CONST:
+				case MOVE:
+				case NEG:
+				case CAST:
+				case TERNARY:
+				case CMP_L:
+				case CMP_G:
+					return null;
+				case ARITH:
+					ArithOp op = ((ArithNode) inner).getOp();
+					return inner.contains(AFlag.ARITH_ONEARG) || op == ArithOp.DIV || op == ArithOp.REM
+							? Boolean.TRUE
+							: null;
+				default:
+					return Boolean.TRUE;
+			}
+		}));
 	}
 
 	public static String indexToString(Object index) {

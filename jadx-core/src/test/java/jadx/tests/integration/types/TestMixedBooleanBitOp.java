@@ -9,6 +9,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestMixedBooleanBitOp extends SmaliTest {
 	@Test
 	public void test() {
+		forceDecompiledCheck();
 		assertThat(getClassNodeFromSmali()).code()
 				.contains("return (z ? 1 : 0) & i;")
 				.contains("return i | (z ? 1 : 0);")

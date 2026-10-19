@@ -35,6 +35,7 @@ import jadx.core.dex.visitors.ModVisitor;
 import jadx.core.utils.BlockUtils;
 import jadx.core.utils.InsnList;
 import jadx.core.utils.InsnRemover;
+import jadx.core.utils.InsnUtils;
 import jadx.core.utils.RegionUtils;
 import jadx.core.utils.exceptions.JadxRuntimeException;
 
@@ -120,6 +121,14 @@ public class CodeShrinkVisitor extends AbstractVisitor {
 				|| assignInsn.contains(AFlag.DONT_GENERATE)
 				|| assignInsn.contains(AFlag.DONT_INLINE)
 				|| assignInsn.contains(AFlag.WRAPPED)) {
+			return null;
+		}
+		InsnType useType = arg.getParentInsn().getType();
+		if ((useType == InsnType.CMP_L || useType == InsnType.CMP_G)
+				&& argsInfo.getInsn().getType() != InsnType.IF
+				&& !InsnUtils.isRepeatableExpression(assignInsn)) {
+			// CMP codegen evaluates each operand in both the ordered and equality
+			// branches. Keep computed values in locals so calls and reads run once.
 			return null;
 		}
 		boolean assignInline = assignInsn.contains(AFlag.FORCE_ASSIGN_INLINE);

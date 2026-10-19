@@ -530,6 +530,17 @@ public class InsnGen {
 			case CMP_L:
 				checkNumericCmpOperand(insn.getArg(0));
 				checkNumericCmpOperand(insn.getArg(1));
+				if (ArgType.LONG.equals(getExpressionArgType(insn.getArg(0)))
+						&& ArgType.LONG.equals(getExpressionArgType(insn.getArg(1)))) {
+					code.add("Long.compare(");
+					addArg(code, insn.getArg(0));
+					code.add(", ");
+					addArg(code, insn.getArg(1));
+					code.add(')');
+					break;
+				}
+				checkRepeatedCmpOperand(insn.getArg(0));
+				checkRepeatedCmpOperand(insn.getArg(1));
 				code.add('(');
 				addArg(code, insn.getArg(0));
 				code.add(" > ");
@@ -544,6 +555,8 @@ public class InsnGen {
 			case CMP_G:
 				checkNumericCmpOperand(insn.getArg(0));
 				checkNumericCmpOperand(insn.getArg(1));
+				checkRepeatedCmpOperand(insn.getArg(0));
+				checkRepeatedCmpOperand(insn.getArg(1));
 				code.add('(');
 				addArg(code, insn.getArg(0));
 				code.add(" < ");
@@ -1547,24 +1560,61 @@ public class InsnGen {
 		if (isFallback()) {
 			return;
 		}
-		ArgType type = getExpressionArgType(arg);
+		checkNumericCmpType(getExpressionArgType(arg));
+		Set<SSAVar> visited = new HashSet<>();
+		List<InsnArg> pending = new ArrayList<>();
+		pending.add(arg);
+		for (int i = 0; i < pending.size(); i++) {
+			InsnArg current = pending.get(i);
+			InsnNode sourceInsn;
+			if (current instanceof RegisterArg) {
+				SSAVar sVar = ((RegisterArg) current).getSVar();
+				if (sVar == null || !visited.add(sVar)) {
+					continue;
+				}
+				sourceInsn = sVar.getAssignInsn();
+			} else if (current.isInsnWrap()) {
+				sourceInsn = current.unwrap();
+			} else {
+				continue;
+			}
+			ArgType declaredType = InsnUtils.getDeclaredResultType(sourceInsn);
+			if (declaredType != null) {
+				checkNumericCmpType(declaredType);
+			} else if (sourceInsn != null && (sourceInsn.getType() == InsnType.MOVE
+					|| sourceInsn.getType() == InsnType.PHI || sourceInsn.getType() == InsnType.TERNARY)) {
+				for (InsnArg sourceArg : sourceInsn.getArguments()) {
+					pending.add(sourceArg);
+				}
+			}
+		}
+	}
+
+	private void checkNumericCmpType(ArgType type) throws CodegenException {
 		if (type == null || !type.isTypeKnown() || type.isGenericType()) {
 			return;
 		}
 		if (type.isPrimitive()) {
-			if (!ArgType.BOOLEAN.equals(type)) {
-				return;
+			if (ArgType.BOOLEAN.equals(type)) {
+				throw new CodegenException("Non-numeric CMP operand: " + type);
 			}
 		} else if (type.isObject()) {
 			String cls = type.getObject();
-			if (cls.equals("java.lang.Integer") || cls.equals("java.lang.Long")
-					|| cls.equals("java.lang.Float") || cls.equals("java.lang.Double")
-					|| cls.equals("java.lang.Byte") || cls.equals("java.lang.Short")
-					|| cls.equals("java.lang.Character")) {
-				return;
+			if (!cls.equals("java.lang.Integer") && !cls.equals("java.lang.Long")
+					&& !cls.equals("java.lang.Float") && !cls.equals("java.lang.Double")
+					&& !cls.equals("java.lang.Byte") && !cls.equals("java.lang.Short")
+					&& !cls.equals("java.lang.Character")) {
+				throw new CodegenException("Non-numeric CMP operand: " + type);
 			}
+		} else {
+			throw new CodegenException("Non-numeric CMP operand: " + type);
 		}
-		throw new CodegenException("Non-numeric CMP operand: " + type);
+	}
+
+	private void checkRepeatedCmpOperand(InsnArg arg) throws CodegenException {
+		if (arg.isInsnWrap() && !InsnUtils.isRepeatableExpression(arg.unwrap())) {
+			throw new CodegenException("CMP operand would be evaluated more than once");
+		}
 	}
 
 	void checkMonitorOperand(InsnArg arg) throws CodegenException {

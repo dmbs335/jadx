@@ -12,7 +12,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestInvalidCmpOperand extends SmaliTest {
 	@Override
 	protected void runChecks(List<ClassNode> classes) {
-		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(4);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isEqualTo(7);
 	}
 
 	@Test
@@ -23,6 +23,9 @@ public class TestInvalidCmpOperand extends SmaliTest {
 				.contains("Non-numeric CMP operand: java.lang.Object")
 				.contains("Non-numeric CMP operand: java.lang.String")
 				.contains("Method not decompiled: types.TestInvalidCmpOperand.badInvoke(long):int")
-				.contains("return (j > j2 ? 1 : (j == j2 ? 0 : -1));");
+				.contains("Method not decompiled: types.TestInvalidCmpOperand.badField(long):int")
+				.contains("Method not decompiled: types.TestInvalidCmpOperand.badMoveAlias(long):int")
+				.contains("Method not decompiled: types.TestInvalidCmpOperand.badPhiAlias(long, boolean):int")
+				.contains("return Long.compare(j, j2);");
 	}
 }
