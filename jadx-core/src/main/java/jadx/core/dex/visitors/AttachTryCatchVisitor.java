@@ -1,7 +1,11 @@
 package jadx.core.dex.visitors;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -43,10 +47,11 @@ public class AttachTryCatchVisitor extends AbstractVisitor {
 			return;
 		}
 		ICodeReader codeReader = mth.getCodeReader();
-		initTryCatches(mth, mth.getInstructions(), codeReader.getTries(), codeReader.getCodeFormat() == CodeFormat.DEX);
+		CodeFormat codeFormat = codeReader.getCodeFormat();
+		initTryCatches(mth, mth.getInstructions(), codeReader.getTries(), codeFormat == CodeFormat.DEX || codeFormat == CodeFormat.JVM);
 	}
 
-	private static void initTryCatches(MethodNode mth, InsnNode[] insnByOffset, List<ITry> tries, boolean dexCode) {
+	private static void initTryCatches(MethodNode mth, InsnNode[] insnByOffset, List<ITry> tries, boolean validateBounds) {
 		if (tries.isEmpty()) {
 			return;
 		}
@@ -54,9 +59,12 @@ public class AttachTryCatchVisitor extends AbstractVisitor {
 			LOG.debug("Raw try blocks in {}", mth);
 			tries.forEach(tryData -> LOG.debug(" - {}", tryData));
 		}
+		if (tries.size() > 1) {
+			validateSharedHandlerTypes(tries);
+		}
 		for (ITry tryData : tries) {
-			if (dexCode) {
-				validateDexTry(tryData, insnByOffset);
+			if (validateBounds) {
+				validateTryBounds(tryData, insnByOffset);
 			}
 			List<ExceptionHandler> handlers = convertToHandlers(mth, tryData.getCatch(), insnByOffset);
 			if (handlers.isEmpty()) {
@@ -66,7 +74,35 @@ public class AttachTryCatchVisitor extends AbstractVisitor {
 		}
 	}
 
-	private static void validateDexTry(ITry tryData, InsnNode[] insnByOffset) {
+	private static void validateSharedHandlerTypes(List<ITry> tries) {
+		// ExceptionHandler stores catch types per handler offset, not per try range.
+		// Different type sets at one offset would widen one catch and silently drop another range.
+		Map<Integer, Set<String>> handlerTypes = new HashMap<>();
+		for (ITry tryData : tries) {
+			ICatch catchData = tryData.getCatch();
+			int[] handlers = catchData.getHandlers();
+			String[] types = catchData.getTypes();
+			if (handlers.length != types.length) {
+				throw new JadxRuntimeException("Exception handler types count does not match targets count");
+			}
+			Map<Integer, Set<String>> currentTypes = new HashMap<>();
+			for (int i = 0; i < handlers.length; i++) {
+				currentTypes.computeIfAbsent(handlers[i], key -> new HashSet<>()).add(types[i]);
+			}
+			int catchAll = catchData.getCatchAllHandler();
+			if (catchAll != -1) {
+				currentTypes.computeIfAbsent(catchAll, key -> new HashSet<>()).add(null);
+			}
+			for (Map.Entry<Integer, Set<String>> entry : currentTypes.entrySet()) {
+				Set<String> previousTypes = handlerTypes.putIfAbsent(entry.getKey(), entry.getValue());
+				if (previousTypes != null && !previousTypes.equals(entry.getValue())) {
+					throw new JadxRuntimeException("Exception handler shared by try ranges with different catch types: " + entry.getKey());
+				}
+			}
+		}
+	}
+
+	private static void validateTryBounds(ITry tryData, InsnNode[] insnByOffset) {
 		int start = tryData.getStartOffset();
 		long endExclusive = (long) tryData.getEndOffset() + 1;
 		if (start < 0 || start >= insnByOffset.length) {

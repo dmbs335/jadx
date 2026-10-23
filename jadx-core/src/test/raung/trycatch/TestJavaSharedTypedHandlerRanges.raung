@@ -1,0 +1,67 @@
+.version 49.0
+.class public trycatch/TestJavaSharedTypedHandlerRanges
+.super java/lang/Object
+
+.method public static test(Z)V
+    .max stack 1
+    .max locals 2
+
+    iload 0
+    ifeq :second
+  :first_start
+    invokestatic trycatch/TestJavaSharedTypedHandlerRanges first ()V
+  :first_end
+    .catch java/lang/IllegalArgumentException :first_start .. :first_end goto :handler
+    goto :done
+
+  :second
+  :second_start
+    invokestatic trycatch/TestJavaSharedTypedHandlerRanges second ()V
+  :second_end
+    .catch java/lang/IllegalStateException :second_start .. :second_end goto :handler
+
+  :done
+    return
+
+  :handler
+    astore 1
+    return
+.end method
+
+.method public static sameTypes(Z)V
+    .max stack 1
+    .max locals 2
+
+    iload 0
+    ifeq :same_second
+  :same_first_start
+    invokestatic trycatch/TestJavaSharedTypedHandlerRanges first ()V
+  :same_first_end
+    .catch java/lang/IllegalArgumentException :same_first_start .. :same_first_end goto :same_handler
+    goto :same_done
+
+  :same_second
+  :same_second_start
+    invokestatic trycatch/TestJavaSharedTypedHandlerRanges second ()V
+  :same_second_end
+    .catch java/lang/IllegalArgumentException :same_second_start .. :same_second_end goto :same_handler
+
+  :same_done
+    return
+
+  :same_handler
+    astore 1
+    return
+.end method
+
+.method private static first()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static second()V
+    .max stack 0
+    .max locals 0
+    return
+.end method

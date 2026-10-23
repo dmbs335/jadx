@@ -12,7 +12,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestInvalidMoveException extends SmaliTest {
 	@Override
 	protected void runChecks(List<ClassNode> classes) {
-		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isGreaterThanOrEqualTo(4);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isGreaterThanOrEqualTo(5);
 	}
 
 	@Test
@@ -25,6 +25,7 @@ public class TestInvalidMoveException extends SmaliTest {
 				.contains("Method not decompiled: types.TestInvalidMoveException.orphan():java.lang.Object")
 				.contains("Method not decompiled: types.TestInvalidMoveException.delayedHandler():java.lang.Object")
 				.contains("Method not decompiled: types.TestInvalidMoveException.branchToHandler():java.lang.Object")
+				.contains("Method not decompiled: types.TestInvalidMoveException.conditionalBranchToHandler(boolean):java.lang.Object")
 				.contains("Method not decompiled: types.TestInvalidMoveException.fallthroughIntoHandler():java.lang.Object")
 				.doesNotContain("Method not decompiled: types.TestInvalidMoveException.validHandler");
 	}

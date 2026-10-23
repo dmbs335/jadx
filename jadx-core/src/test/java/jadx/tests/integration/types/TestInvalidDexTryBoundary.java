@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.BiConsumer;
 import java.util.zip.Adler32;
 
 import org.junit.jupiter.api.Test;
@@ -32,6 +33,31 @@ public class TestInvalidDexTryBoundary extends SmaliTest {
 
 	@Test
 	public void testTryStartInsideInstruction() throws Exception {
+		assertInvalidTry((data, tryOffset) -> {
+			org.assertj.core.api.Assertions.assertThat(data.getInt(tryOffset)).isZero();
+			data.putInt(tryOffset, 1); // middle of the two-unit const/16 instruction
+		}, "Try range starts inside instruction", "try-start-inside-instruction.dex");
+	}
+
+	@Test
+	public void testTryEndInsideInstruction() throws Exception {
+		assertInvalidTry((data, tryOffset) -> {
+			org.assertj.core.api.Assertions.assertThat(data.getShort(tryOffset + 4)).isEqualTo((short) 2);
+			data.putShort(tryOffset + 4, (short) 1); // end falls inside const/16
+		}, "Try range ends inside instruction", "try-end-inside-instruction.dex");
+	}
+
+	@Test
+	public void testHandlerInsideInstruction() throws Exception {
+		assertInvalidTry((data, tryOffset) -> {
+			int handlerListOffset = tryOffset + 8;
+			org.assertj.core.api.Assertions.assertThat(data.get(handlerListOffset)).isEqualTo((byte) 1); // one handler list
+			org.assertj.core.api.Assertions.assertThat(data.get(handlerListOffset + 1)).isZero(); // catchall only
+			data.put(handlerListOffset + 2, (byte) 1); // middle of const/16
+		}, "Exception handler target is not an instruction", "handler-inside-instruction.dex");
+	}
+
+	private void assertInvalidTry(BiConsumer<ByteBuffer, Integer> mutate, String error, String fileName) throws Exception {
 		disableCompilation();
 		File smaliFile = new File("src/test/smali/types/TestInvalidDexTryBoundary.smali");
 		if (!smaliFile.exists()) {
@@ -50,18 +76,17 @@ public class TestInvalidDexTryBoundary extends SmaliTest {
 		int insnsSize = data.getInt(codeOffset + 12);
 		org.assertj.core.api.Assertions.assertThat(data.getShort(codeOffset + 6)).isEqualTo((short) 1);
 		int tryOffset = codeOffset + 16 + insnsSize * 2 + (insnsSize % 2) * 2;
-		org.assertj.core.api.Assertions.assertThat(data.getInt(tryOffset)).isZero();
-		data.putInt(tryOffset, 1); // middle of the two-unit const/16 instruction
+		mutate.accept(data, tryOffset);
 		byte[] signature = MessageDigest.getInstance("SHA-1").digest(Arrays.copyOfRange(dex, 32, dex.length));
 		System.arraycopy(signature, 0, dex, 12, signature.length);
 		Adler32 checksum = new Adler32();
 		checksum.update(dex, 12, dex.length - 12);
 		data.putInt(8, (int) checksum.getValue());
-		Path dexFile = dexDir.resolve("try-start-inside-instruction.dex");
+		Path dexFile = dexDir.resolve(fileName);
 		Files.write(dexFile, dex);
 		assertThat(getClassNodeFromFiles(List.of(dexFile.toFile()), "types.TestInvalidDexTryBoundary"))
 				.code()
-				.contains("Try range starts inside instruction")
+				.contains(error)
 				.contains("Method not decompiled: types.TestInvalidDexTryBoundary.run():int");
 	}
 

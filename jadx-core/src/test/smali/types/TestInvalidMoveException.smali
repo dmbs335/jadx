@@ -35,6 +35,20 @@
     return-object v0
 .end method
 
+.method public static conditionalBranchToHandler(Z)Ljava/lang/Object;
+    .locals 1
+    if-eqz p0, :handler
+    :try_start
+    const/4 v0, 0x0
+    throw v0
+    :try_end
+    .catchall {:try_start .. :try_end} :handler
+
+    :handler
+    move-exception v0
+    return-object v0
+.end method
+
 .method public static fallthroughIntoHandler()Ljava/lang/Object;
     .locals 1
     :try_start
