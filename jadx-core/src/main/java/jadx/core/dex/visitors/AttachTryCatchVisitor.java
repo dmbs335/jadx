@@ -1,6 +1,7 @@
 package jadx.core.dex.visitors;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -15,6 +16,8 @@ import jadx.api.plugins.input.data.CodeFormat;
 import jadx.api.plugins.input.data.ICatch;
 import jadx.api.plugins.input.data.ICodeReader;
 import jadx.api.plugins.input.data.ITry;
+import jadx.api.plugins.input.data.impl.CatchData;
+import jadx.api.plugins.input.data.impl.TryData;
 import jadx.api.plugins.utils.Utils;
 import jadx.core.Consts;
 import jadx.core.dex.attributes.AFlag;
@@ -48,7 +51,96 @@ public class AttachTryCatchVisitor extends AbstractVisitor {
 		}
 		ICodeReader codeReader = mth.getCodeReader();
 		CodeFormat codeFormat = codeReader.getCodeFormat();
-		initTryCatches(mth, mth.getInstructions(), codeReader.getTries(), codeFormat == CodeFormat.DEX || codeFormat == CodeFormat.JVM);
+		List<ITry> tries = codeReader.getTries();
+		if (codeFormat == CodeFormat.JVM) {
+			tries = splitJvmShadowedHandlers(mth, tries);
+		}
+		initTryCatches(mth, mth.getInstructions(), tries, codeFormat == CodeFormat.DEX || codeFormat == CodeFormat.JVM);
+	}
+
+	private static List<ITry> splitJvmShadowedHandlers(MethodNode mth, List<ITry> tries) {
+		List<ITry> result = new ArrayList<>(tries.size());
+		for (ITry current : tries) {
+			List<ITry> parts = new ArrayList<>(1);
+			parts.add(current);
+			for (ITry preceding : result) {
+				List<ITry> updated = new ArrayList<>(parts.size());
+				for (ITry part : parts) {
+					int overlapStart = Math.max(part.getStartOffset(), preceding.getStartOffset());
+					int overlapEnd = Math.min(part.getEndOffset(), preceding.getEndOffset());
+					if (overlapStart > overlapEnd) {
+						updated.add(part);
+						continue;
+					}
+					ICatch filteredCatch = removeShadowedTypes(mth, part.getCatch(), preceding.getCatch());
+					if (filteredCatch == part.getCatch()) {
+						updated.add(part);
+						continue;
+					}
+					if (part.getStartOffset() < overlapStart) {
+						updated.add(new TryData(part.getStartOffset(), overlapStart - 1, part.getCatch()));
+					}
+					if (filteredCatch.getHandlers().length != 0 || filteredCatch.getCatchAllHandler() != -1) {
+						updated.add(new TryData(overlapStart, overlapEnd, filteredCatch));
+					}
+					if (overlapEnd < part.getEndOffset()) {
+						updated.add(new TryData(overlapEnd + 1, part.getEndOffset(), part.getCatch()));
+					}
+				}
+				parts = updated;
+				if (parts.isEmpty()) {
+					break;
+				}
+			}
+			result.addAll(parts);
+		}
+		return result;
+	}
+
+	private static ICatch removeShadowedTypes(MethodNode mth, ICatch current, ICatch preceding) {
+		int[] handlers = current.getHandlers();
+		String[] types = current.getTypes();
+		if (handlers.length != types.length) {
+			throw new JadxRuntimeException("Exception handler types count does not match targets count");
+		}
+		if (handlers.length == 0) {
+			return current;
+		}
+		int[] precedingHandlers = preceding.getHandlers();
+		String[] precedingTypes = preceding.getTypes();
+		if (precedingHandlers.length != precedingTypes.length) {
+			throw new JadxRuntimeException("Exception handler types count does not match targets count");
+		}
+		if (precedingHandlers.length == 0 && preceding.getCatchAllHandler() == -1) {
+			return current;
+		}
+		int[] keptHandlers = new int[handlers.length];
+		String[] keptTypes = new String[types.length];
+		int keptCount = 0;
+		for (int i = 0; i < handlers.length; i++) {
+			ClassInfo currentType = ClassInfo.fromName(mth.root(), types[i]);
+			boolean shadowed = false;
+			if (!Consts.CLASS_THROWABLE.equals(currentType.getFullName())) {
+				shadowed = preceding.getCatchAllHandler() != -1;
+				for (String precedingTypeName : precedingTypes) {
+					ClassInfo precedingType = ClassInfo.fromName(mth.root(), precedingTypeName);
+					if (mth.root().getTypeCompare().compareTypes(precedingType, currentType).isWiderOrEqual()) {
+						shadowed = true;
+						break;
+					}
+				}
+			}
+			if (!shadowed) {
+				keptHandlers[keptCount] = handlers[i];
+				keptTypes[keptCount] = types[i];
+				keptCount++;
+			}
+		}
+		if (keptCount == handlers.length) {
+			return current;
+		}
+		return new CatchData(Arrays.copyOf(keptHandlers, keptCount), Arrays.copyOf(keptTypes, keptCount),
+				current.getCatchAllHandler());
 	}
 
 	private static void initTryCatches(MethodNode mth, InsnNode[] insnByOffset, List<ITry> tries, boolean validateBounds) {
@@ -185,9 +277,24 @@ public class AttachTryCatchVisitor extends AbstractVisitor {
 
 		int handlersCount = handlerOffsetArr.length;
 		List<ExceptionHandler> list = new ArrayList<>(handlersCount);
+		boolean jvm = mth.getCodeReader().getCodeFormat() == CodeFormat.JVM;
+		List<ClassInfo> precedingTypes = jvm ? new ArrayList<>(handlersCount) : null;
 		for (int i = 0; i < handlersCount; i++) {
 			int handlerOffset = handlerOffsetArr[i];
 			ClassInfo type = ClassInfo.fromName(mth.root(), handlerTypes[i]);
+			if (jvm) {
+				boolean shadowed = false;
+				for (ClassInfo precedingType : precedingTypes) {
+					if (mth.root().getTypeCompare().compareTypes(precedingType, type).isWiderOrEqual()) {
+						shadowed = true;
+						break;
+					}
+				}
+				if (shadowed) {
+					continue;
+				}
+				precedingTypes.add(type);
+			}
 			Utils.addToList(list, createHandler(mth, insnByOffset, handlerOffset, type));
 		}
 		int allHandlerOffset = catchBlock.getCatchAllHandler();

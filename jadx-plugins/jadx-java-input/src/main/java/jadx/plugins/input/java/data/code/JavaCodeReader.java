@@ -8,7 +8,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
-import java.util.stream.Collectors;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -179,7 +178,11 @@ public class JavaCodeReader implements ICodeReader {
 			return Collections.emptyList();
 		}
 		ConstPoolReader constPool = clsData.getConstPoolReader();
-		Map<JavaTryData, List<JavaSingleCatch>> tries = new HashMap<>(excTableLen);
+		Map<JavaTryData, Integer> currentRun = new HashMap<>();
+		List<JavaTryData> orderedTries = new ArrayList<>(excTableLen);
+		List<List<JavaSingleCatch>> orderedCatches = new ArrayList<>(excTableLen);
+		List<JavaTryData> precedingCatchAllRanges = new ArrayList<>();
+		JavaTryData previousOriginalRange = null;
 		for (int i = 0; i < excTableLen; i++) {
 			int start = reader.readU2();
 			int end = reader.readU2();
@@ -188,22 +191,66 @@ public class JavaCodeReader implements ICodeReader {
 			if (end <= start) {
 				throw new JavaClassParseException("Invalid exception table range: " + start + " .. " + end);
 			}
+			String catchType = type == 0 ? null : constPool.getClass(type);
+			if (type != 0 && catchType == null) {
+				throw new JavaClassParseException("Invalid exception handler type at index: " + type);
+			}
+			boolean catchAll = catchType == null || "Ljava/lang/Throwable;".equals(catchType);
 			// JVM exception table end_pc is exclusive; ITry end offset is inclusive.
-			JavaTryData tryData = new JavaTryData(start, end - 1);
-			List<JavaSingleCatch> catches = tries.computeIfAbsent(tryData, k -> new ArrayList<>());
-			if (type == 0) {
-				catches.add(new JavaSingleCatch(handler, null));
-			} else {
-				catches.add(new JavaSingleCatch(handler, constPool.getClass(type)));
+			JavaTryData originalRange = new JavaTryData(start, end - 1);
+			if (!originalRange.equals(previousOriginalRange)) {
+				// Only adjacent entries for one range can be grouped. Grouping across
+				// intervening ranges would change JVM exception-table precedence.
+				currentRun.clear();
+				previousOriginalRange = originalRange;
+			}
+			List<JavaTryData> availableRanges = new ArrayList<>(1);
+			availableRanges.add(originalRange);
+			// The JVM tests exception entries in table order. Earlier catch-all
+			// entries shadow later typed handlers on their overlapping ranges.
+			// Keep catch-all ranges intact: overlapping synthetic finally handlers
+			// are needed by the downstream try/finally region reconstruction.
+			if (!catchAll) {
+				for (JavaTryData catchAllRange : precedingCatchAllRanges) {
+					availableRanges = subtractRange(availableRanges, catchAllRange);
+				}
+			}
+			JavaSingleCatch singleCatch = new JavaSingleCatch(handler, catchType);
+			for (JavaTryData availableRange : availableRanges) {
+				Integer index = currentRun.get(availableRange);
+				if (index == null) {
+					index = orderedTries.size();
+					currentRun.put(availableRange, index);
+					orderedTries.add(availableRange);
+					orderedCatches.add(new ArrayList<>());
+				}
+				orderedCatches.get(index).add(singleCatch);
+			}
+			if (catchAll) {
+				precedingCatchAllRanges.add(originalRange);
 			}
 		}
-		return tries.entrySet().stream()
-				.map(e -> {
-					JavaTryData tryData = e.getKey();
-					tryData.setCatch(convertSingleCatches(e.getValue()));
-					return tryData;
-				})
-				.collect(Collectors.toList());
+		for (int i = 0; i < orderedTries.size(); i++) {
+			orderedTries.get(i).setCatch(convertSingleCatches(orderedCatches.get(i)));
+		}
+		return new ArrayList<>(orderedTries);
+	}
+
+	private static List<JavaTryData> subtractRange(List<JavaTryData> ranges, JavaTryData excluded) {
+		List<JavaTryData> result = new ArrayList<>(ranges.size() + 1);
+		for (JavaTryData range : ranges) {
+			if (excluded.getEndOffset() < range.getStartOffset() || excluded.getStartOffset() > range.getEndOffset()) {
+				result.add(range);
+				continue;
+			}
+			if (range.getStartOffset() < excluded.getStartOffset()) {
+				result.add(new JavaTryData(range.getStartOffset(), excluded.getStartOffset() - 1));
+			}
+			if (range.getEndOffset() > excluded.getEndOffset()) {
+				result.add(new JavaTryData(excluded.getEndOffset() + 1, range.getEndOffset()));
+			}
+		}
+		return result;
 	}
 
 	private static CatchData convertSingleCatches(List<JavaSingleCatch> list) {
@@ -217,6 +264,11 @@ public class JavaCodeReader implements ICodeReader {
 				break;
 			}
 			typedCount++;
+			if ("Ljava/lang/Throwable;".equals(singleCatch.getType())) {
+				// Keep an explicit Throwable type for try-with-resources/finally
+				// reconstruction, but ignore handlers it shadows in table order.
+				break;
+			}
 		}
 		int[] handlers = new int[typedCount];
 		String[] types = new String[typedCount];

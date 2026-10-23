@@ -1,0 +1,51 @@
+.version 49.0
+.class public trycatch/TestJavaPartialSupertypeCatchPrecedence
+.super java/lang/Object
+
+.method public static test()V
+    .max stack 1
+    .max locals 1
+
+  :try_start
+    invokestatic trycatch/TestJavaPartialSupertypeCatchPrecedence first ()V
+  :middle
+    invokestatic trycatch/TestJavaPartialSupertypeCatchPrecedence second ()V
+  :try_end
+    .catch java/lang/RuntimeException :try_start .. :middle goto :broad_handler
+    .catch java/lang/IllegalStateException :try_start .. :try_end goto :narrow_handler
+    return
+
+  :broad_handler
+    astore 0
+    invokestatic trycatch/TestJavaPartialSupertypeCatchPrecedence handled ()V
+    return
+
+  :narrow_handler
+    astore 0
+    invokestatic trycatch/TestJavaPartialSupertypeCatchPrecedence typed ()V
+    return
+.end method
+
+.method private static first()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static second()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static handled()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static typed()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
