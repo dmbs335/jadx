@@ -363,14 +363,7 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 
 	@Nullable
 	private static InsnNode getInsnAtOffset(InsnNode[] insnByOffset, int offset) {
-		int len = insnByOffset.length;
-		for (int i = offset; i < len; i++) {
-			InsnNode insnNode = insnByOffset[i];
-			if (insnNode != null && insnNode.getType() != InsnType.NOP) {
-				return insnNode;
-			}
-		}
-		return null;
+		return offset >= 0 && offset < insnByOffset.length ? insnByOffset[offset] : null;
 	}
 
 	private static void removeInsn(InsnNode[] insnByOffset, InsnNode insn) {

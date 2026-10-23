@@ -12,7 +12,7 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestInvalidFillArrayPayload extends SmaliTest {
 	@Override
 	protected void runChecks(List<ClassNode> classes) {
-		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isGreaterThanOrEqualTo(1);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isGreaterThanOrEqualTo(2);
 	}
 
 	@Test
@@ -22,6 +22,7 @@ public class TestInvalidFillArrayPayload extends SmaliTest {
 				.code()
 				.contains("Payload for fill-array not found")
 				.contains("Method not decompiled: arrays.TestInvalidFillArrayPayload.test():int[]")
+				.contains("Method not decompiled: arrays.TestInvalidFillArrayPayload.beforePayload():int[]")
 				.contains("{1, 2, 3}")
 				.doesNotContain("Repaired invalid fill-array reference")
 				.doesNotContain("Method not decompiled: arrays.TestInvalidFillArrayPayload.valid():int[]");

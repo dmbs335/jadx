@@ -7,7 +7,9 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import jadx.api.plugins.input.data.CodeFormat;
 import jadx.api.plugins.input.data.ICatch;
+import jadx.api.plugins.input.data.ICodeReader;
 import jadx.api.plugins.input.data.ITry;
 import jadx.api.plugins.utils.Utils;
 import jadx.core.Consts;
@@ -21,6 +23,7 @@ import jadx.core.dex.trycatch.CatchAttr;
 import jadx.core.dex.trycatch.ExcHandlerAttr;
 import jadx.core.dex.trycatch.ExceptionHandler;
 import jadx.core.utils.exceptions.JadxException;
+import jadx.core.utils.exceptions.JadxRuntimeException;
 
 import static jadx.core.dex.visitors.ProcessInstructionsVisitor.getNextInsnOffset;
 
@@ -39,10 +42,11 @@ public class AttachTryCatchVisitor extends AbstractVisitor {
 		if (mth.isNoCode()) {
 			return;
 		}
-		initTryCatches(mth, mth.getInstructions(), mth.getCodeReader().getTries());
+		ICodeReader codeReader = mth.getCodeReader();
+		initTryCatches(mth, mth.getInstructions(), codeReader.getTries(), codeReader.getCodeFormat() == CodeFormat.DEX);
 	}
 
-	private static void initTryCatches(MethodNode mth, InsnNode[] insnByOffset, List<ITry> tries) {
+	private static void initTryCatches(MethodNode mth, InsnNode[] insnByOffset, List<ITry> tries, boolean dexCode) {
 		if (tries.isEmpty()) {
 			return;
 		}
@@ -51,11 +55,48 @@ public class AttachTryCatchVisitor extends AbstractVisitor {
 			tries.forEach(tryData -> LOG.debug(" - {}", tryData));
 		}
 		for (ITry tryData : tries) {
+			if (dexCode) {
+				validateDexTry(tryData, insnByOffset);
+			}
 			List<ExceptionHandler> handlers = convertToHandlers(mth, tryData.getCatch(), insnByOffset);
 			if (handlers.isEmpty()) {
 				continue;
 			}
 			markTryBounds(insnByOffset, tryData, CatchAttr.build(handlers));
+		}
+	}
+
+	private static void validateDexTry(ITry tryData, InsnNode[] insnByOffset) {
+		int start = tryData.getStartOffset();
+		long endExclusive = (long) tryData.getEndOffset() + 1;
+		if (start < 0 || start >= insnByOffset.length) {
+			throw new JadxRuntimeException("Try range starts outside method: " + start);
+		}
+		if (endExclusive <= start || endExclusive > insnByOffset.length) {
+			throw new JadxRuntimeException("Try range ends outside method: " + endExclusive);
+		}
+		if (insnByOffset[start] == null) {
+			throw new JadxRuntimeException("Try range starts inside instruction: " + start);
+		}
+		if (endExclusive < insnByOffset.length && insnByOffset[(int) endExclusive] == null) {
+			throw new JadxRuntimeException("Try range ends inside instruction: " + endExclusive);
+		}
+		ICatch catchData = tryData.getCatch();
+		for (int handler : catchData.getHandlers()) {
+			validateDexHandler(handler, insnByOffset);
+		}
+		int catchAll = catchData.getCatchAllHandler();
+		if (catchAll != -1) {
+			validateDexHandler(catchAll, insnByOffset);
+		}
+	}
+
+	private static void validateDexHandler(int handler, InsnNode[] insnByOffset) {
+		if (handler < 0 || handler >= insnByOffset.length) {
+			throw new JadxRuntimeException("Exception handler target is outside method: " + handler);
+		}
+		if (insnByOffset[handler] == null) {
+			throw new JadxRuntimeException("Exception handler target is not an instruction: " + handler);
 		}
 	}
 

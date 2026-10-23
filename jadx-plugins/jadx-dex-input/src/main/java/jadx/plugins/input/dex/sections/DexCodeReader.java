@@ -64,6 +64,9 @@ public class DexCodeReader extends SectionReader implements ICodeReader {
 		DexInsnData insnData = new DexInsnData(this, super.copy());
 		pos(12);
 		int size = readInt();
+		if (size < 0) {
+			throw new DexException("Negative method code size: " + size);
+		}
 		int offset = 0; // in code units (2 byte)
 		while (offset < size) {
 			int insnStart = getAbsPos();
@@ -83,13 +86,24 @@ public class DexCodeReader extends SectionReader implements ICodeReader {
 				insnData.setRegsCount(0);
 				insnData.setLength(1);
 			}
+			if (insnData.getLength() > 0) {
+				checkInstructionLength(offset, insnData.getLength(), size);
+			}
 
 			insnConsumer.accept(insnData);
 
 			if (!insnData.isDecoded()) {
 				skip(insnData);
 			}
+			checkInstructionLength(offset, insnData.getLength(), size);
 			offset += insnData.getLength();
+		}
+	}
+
+	private static void checkInstructionLength(int offset, int length, int size) {
+		if (length <= 0 || length > size - offset) {
+			throw new DexException("Instruction extends past declared method code: offset=" + offset
+					+ ", length=" + length + ", size=" + size);
 		}
 	}
 

@@ -9,6 +9,7 @@ import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import jadx.api.plugins.input.data.AccessFlags;
 import jadx.api.plugins.input.data.IClassData;
 import jadx.api.plugins.input.data.IFieldData;
 import jadx.api.plugins.input.data.IMethodData;
@@ -165,11 +166,23 @@ public class DexClassData extends SectionReader implements IClassData {
 			initMethodRef(mthIdx, methodRef);
 			methodData.setAccessFlags(accFlags);
 			if (codeOff == 0) {
-				methodData.setCodeReader(null);
+				if ((accFlags & (AccessFlags.ABSTRACT | AccessFlags.NATIVE)) == 0) {
+					methodData.setCodeReader(new MissingDexCodeReader(super.copy()));
+				} else {
+					methodData.setCodeReader(null);
+				}
 			} else {
-				dexCodeReader.setMthId(mthIdx);
-				dexCodeReader.setOffset(codeOff);
-				methodData.setCodeReader(dexCodeReader);
+				if ((accFlags & AccessFlags.NATIVE) != 0) {
+					methodData.setCodeReader(new UnexpectedDexCodeReader(super.copy(), codeOff, mthIdx,
+							"Native DEX method unexpectedly has a code item"));
+				} else if ((accFlags & AccessFlags.ABSTRACT) != 0) {
+					methodData.setCodeReader(new UnexpectedDexCodeReader(super.copy(), codeOff, mthIdx,
+							"Abstract DEX method unexpectedly has a code item"));
+				} else {
+					dexCodeReader.setMthId(mthIdx);
+					dexCodeReader.setOffset(codeOff);
+					methodData.setCodeReader(dexCodeReader);
+				}
 			}
 			methodData.setAnnotationsOffset(annotationOffsets.get(mthIdx));
 			methodData.setParamAnnotationsOffset(paramsAnnotationOffsets.get(mthIdx));

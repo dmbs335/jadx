@@ -33,3 +33,20 @@
         0x3
     .end array-data
 .end method
+
+.method public static beforePayload()[I
+    .registers 2
+
+    const/4 v0, 0x3
+    new-array v0, v0, [I
+    fill-array-data v0, :wrong_target
+    return-object v0
+
+    :wrong_target
+    nop
+    .array-data 4
+        0x1
+        0x2
+        0x3
+    .end array-data
+.end method

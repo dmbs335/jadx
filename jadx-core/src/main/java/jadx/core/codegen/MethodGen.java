@@ -111,6 +111,11 @@ public class MethodGen {
 		if (clsAccFlags.isAnnotation()) {
 			ai = ai.remove(AccessFlags.PUBLIC);
 		}
+		if (!mth.isNoCode()) {
+			// Java methods with a body cannot retain abstract or native modifiers, even when the
+			// malformed input carries them. The original flags remain available in method metadata.
+			ai = ai.remove(AccessFlags.ABSTRACT).remove(AccessFlags.NATIVE);
+		}
 		if (mth.getMethodInfo().hasAlias() && !ai.isConstructor()) {
 			CodeGenUtils.addRenamedComment(code, mth, mth.getName());
 		}

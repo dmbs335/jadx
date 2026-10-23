@@ -15,6 +15,7 @@ dependencies {
 	// 'ClassNotFound' error is raised if set as 'testRuntime'
 	// for the plugins below when running the tests from vscode.
 	testImplementation(project(":jadx-plugins:jadx-smali-input"))
+	testImplementation("com.android.tools.smali:smali:3.0.9")
 	testImplementation(project(":jadx-plugins:jadx-java-convert"))
 	testImplementation(project(":jadx-plugins:jadx-java-input"))
 	testImplementation(project(":jadx-plugins:jadx-raung-input"))
