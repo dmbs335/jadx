@@ -50,7 +50,6 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 	}
 
 	private static void initJumps(MethodNode mth, InsnNode[] insnByOffset) {
-		FillArrayRepair fillArrayRepair = findFillArrayRepair(insnByOffset);
 		ICodeReader codeReader = mth.getCodeReader();
 		if (codeReader != null && codeReader.getCodeFormat() == CodeFormat.DEX) {
 			validateDexSpecialInstructions(codeReader, insnByOffset);
@@ -68,30 +67,30 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 					}
 					int defCaseOffset = sw.getDefaultCaseOffset();
 					if (defCaseOffset != -1) {
-						addJump(mth, insnByOffset, offset, defCaseOffset);
+						addJump(insnByOffset, offset, defCaseOffset);
 					}
 					for (int target : sw.getTargets()) {
-						addJump(mth, insnByOffset, offset, target);
+						addJump(insnByOffset, offset, target);
 					}
 					break;
 
 				case IF:
 					int next = getNextInsnOffset(insnByOffset, offset);
 					if (next != -1) {
-						addJump(mth, insnByOffset, offset, next);
+						addJump(insnByOffset, offset, next);
 					}
-					addJump(mth, insnByOffset, offset, ((IfNode) insn).getTarget());
+					addJump(insnByOffset, offset, ((IfNode) insn).getTarget());
 					break;
 
 				case GOTO:
-					addJump(mth, insnByOffset, offset, ((GotoNode) insn).getTarget());
+					addJump(insnByOffset, offset, ((GotoNode) insn).getTarget());
 					break;
 
 				case JAVA_JSR:
-					addJump(mth, insnByOffset, offset, ((JsrNode) insn).getTarget());
+					addJump(insnByOffset, offset, ((JsrNode) insn).getTarget());
 					int onRet = getNextInsnOffset(insnByOffset, offset);
 					if (onRet != -1) {
-						addJump(mth, insnByOffset, offset, onRet);
+						addJump(insnByOffset, offset, onRet);
 					}
 					break;
 
@@ -116,12 +115,6 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 
 				case FILL_ARRAY:
 					FillArrayInsn fillArrayInsn = (FillArrayInsn) insn;
-					if (fillArrayRepair != null && fillArrayRepair.insn == fillArrayInsn) {
-						fillArrayInsn.setArrayData(fillArrayRepair.data);
-						removeInsn(insnByOffset, fillArrayRepair.data);
-						mth.addWarnComment("Repaired invalid fill-array reference using the unique payload in this method");
-						break;
-					}
 					int target = fillArrayInsn.getTarget();
 					InsnNode arrDataInsn = getInsnAtOffset(insnByOffset, target);
 					if (arrDataInsn != null && arrDataInsn.getType() == InsnType.FILL_ARRAY_DATA) {
@@ -135,49 +128,6 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 				default:
 					break;
 			}
-		}
-	}
-
-	private static @Nullable FillArrayRepair findFillArrayRepair(InsnNode[] insnByOffset) {
-		FillArrayData solePayload = null;
-		for (InsnNode insn : insnByOffset) {
-			if (insn != null && insn.getType() == InsnType.FILL_ARRAY_DATA) {
-				if (solePayload != null) {
-					return null;
-				}
-				solePayload = (FillArrayData) insn;
-			}
-		}
-		if (solePayload == null) {
-			return null;
-		}
-		FillArrayInsn invalidFill = null;
-		for (InsnNode insn : insnByOffset) {
-			if (insn == null || insn.getType() != InsnType.FILL_ARRAY) {
-				continue;
-			}
-			FillArrayInsn fillArrayInsn = (FillArrayInsn) insn;
-			InsnNode targetInsn = getInsnAtOffset(insnByOffset, fillArrayInsn.getTarget());
-			if (targetInsn == solePayload) {
-				return null;
-			}
-			if (targetInsn == null || targetInsn.getType() != InsnType.FILL_ARRAY_DATA) {
-				if (invalidFill != null) {
-					return null;
-				}
-				invalidFill = fillArrayInsn;
-			}
-		}
-		return invalidFill == null ? null : new FillArrayRepair(invalidFill, solePayload);
-	}
-
-	private static final class FillArrayRepair {
-		private final FillArrayInsn insn;
-		private final FillArrayData data;
-
-		private FillArrayRepair(FillArrayInsn insn, FillArrayData data) {
-			this.insn = insn;
-			this.data = data;
 		}
 	}
 
@@ -216,15 +166,17 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 		removeInsn(insnByOffset, nextInsn);
 	}
 
-	private static void addJump(MethodNode mth, InsnNode[] insnByOffset, int offset, int target) {
+	static void addJump(InsnNode[] insnByOffset, int offset, int target) {
 		try {
 			insnByOffset[target].addAttr(AType.JUMP, new JumpInfo(offset, target));
 		} catch (Exception e) {
-			mth.addError("Failed to set jump: " + InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target), e);
+			throw new JadxRuntimeException("Failed to set jump: "
+					+ InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target), e);
 		}
 	}
 
 	private static void validateDexSpecialInstructions(ICodeReader codeReader, InsnNode[] insnByOffset) {
+		validateDexMethodHasInstructions(insnByOffset);
 		boolean[] handlerStarts = new boolean[insnByOffset.length];
 		boolean[] payloadStarts = new boolean[insnByOffset.length];
 		boolean hasPayload = false;
@@ -266,6 +218,12 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 		}
 		if (hasPayload || hasMoveException || mayFallOffMethodEnd(insnByOffset, payloadStarts)) {
 			validateDexSpecialReachability(insnByOffset, payloadStarts, handlerStarts);
+		}
+	}
+
+	static void validateDexMethodHasInstructions(InsnNode[] insnByOffset) {
+		if (insnByOffset.length == 0) {
+			throw new JadxRuntimeException("Control flow exits empty method without return or throw");
 		}
 	}
 
@@ -352,30 +310,43 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 		}
 	}
 
-	private static void markHandlerStart(InsnNode[] insnByOffset, boolean[] handlerStarts, boolean[] payloadStarts, int handler) {
-		if (handler >= 0 && handler < handlerStarts.length) {
-			handlerStarts[handler] = true;
-			if (payloadStarts[handler]) {
-				throw new JadxRuntimeException("Exception handler targets data payload: " + InsnUtils.formatOffset(handler));
-			}
-			if (insnByOffset[handler] instanceof MoveResultNode) {
-				throw new JadxRuntimeException("Exception handler targets move-result: " + InsnUtils.formatOffset(handler));
-			}
+	static void markHandlerStart(InsnNode[] insnByOffset, boolean[] handlerStarts, boolean[] payloadStarts, int handler) {
+		if (handler == -1) {
+			return; // no catch-all handler
+		}
+		if (handler < 0 || handler >= handlerStarts.length) {
+			throw new JadxRuntimeException("Exception handler target is outside method: " + InsnUtils.formatOffset(handler));
+		}
+		if (insnByOffset[handler] == null) {
+			throw new JadxRuntimeException("Exception handler target is not an instruction: " + InsnUtils.formatOffset(handler));
+		}
+		handlerStarts[handler] = true;
+		if (payloadStarts[handler]) {
+			throw new JadxRuntimeException("Exception handler targets data payload: " + InsnUtils.formatOffset(handler));
+		}
+		if (insnByOffset[handler] instanceof MoveResultNode) {
+			throw new JadxRuntimeException("Exception handler targets move-result: " + InsnUtils.formatOffset(handler));
 		}
 	}
 
-	private static void validateDexBranchTarget(InsnNode[] insnByOffset, boolean[] payloadStarts, int offset, int target) {
-		if (target >= 0 && target < insnByOffset.length) {
-			if (payloadStarts[target]) {
-				throw new JadxRuntimeException("Branch targets data payload: "
-						+ InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target));
-			}
-			InsnNode targetInsn = insnByOffset[target];
-			if (targetInsn instanceof MoveResultNode || targetInsn != null && targetInsn.getType() == InsnType.MOVE_EXCEPTION) {
-				String targetName = targetInsn instanceof MoveResultNode ? "move-result" : "move-exception";
-				throw new JadxRuntimeException("Branch targets " + targetName + ": "
-						+ InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target));
-			}
+	static void validateDexBranchTarget(InsnNode[] insnByOffset, boolean[] payloadStarts, int offset, int target) {
+		if (target < 0 || target >= insnByOffset.length) {
+			throw new JadxRuntimeException("Branch target is outside method: "
+					+ InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target));
+		}
+		if (payloadStarts[target]) {
+			throw new JadxRuntimeException("Branch targets data payload: "
+					+ InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target));
+		}
+		InsnNode targetInsn = insnByOffset[target];
+		if (targetInsn == null) {
+			throw new JadxRuntimeException("Branch target is not an instruction: "
+					+ InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target));
+		}
+		if (targetInsn instanceof MoveResultNode || targetInsn.getType() == InsnType.MOVE_EXCEPTION) {
+			String targetName = targetInsn instanceof MoveResultNode ? "move-result" : "move-exception";
+			throw new JadxRuntimeException("Branch targets " + targetName + ": "
+					+ InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target));
 		}
 	}
 
