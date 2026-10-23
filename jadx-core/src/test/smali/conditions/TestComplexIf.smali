@@ -587,7 +587,7 @@
     return v2
 
     :cond_7
-    iget-object v0, p0, Lconditions/TestComplexIf;->b:I
+    iget v0, p0, Lconditions/TestComplexIf;->b:I
 
     and-int/lit8 v0, v0, 0xf
 

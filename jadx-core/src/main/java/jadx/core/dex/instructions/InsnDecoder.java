@@ -24,6 +24,7 @@ import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.java.JsrNode;
+import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.dex.nodes.MethodNode;
@@ -377,13 +378,16 @@ public class InsnDecoder {
 				return returnInsn;
 
 			case INSTANCE_OF:
-				InsnNode instInsn = new IndexInsnNode(InsnType.INSTANCE_OF, ArgType.parse(insn.getIndexAsType()), 1);
+				ArgType instanceOfType = ArgType.parse(insn.getIndexAsType());
+				validateReferenceTypeOperand("instance-of", instanceOfType);
+				InsnNode instInsn = new IndexInsnNode(InsnType.INSTANCE_OF, instanceOfType, 1);
 				instInsn.setResult(InsnArg.reg(insn, 0, ArgType.BOOLEAN));
 				instInsn.addArg(InsnArg.reg(insn, 1, ArgType.UNKNOWN_OBJECT));
 				return instInsn;
 
 			case CHECK_CAST:
 				ArgType castType = ArgType.parse(insn.getIndexAsType());
+				validateReferenceTypeOperand("check-cast", castType);
 				InsnNode checkCastInsn = new IndexInsnNode(InsnType.CHECK_CAST, castType, 1);
 				checkCastInsn.setResult(InsnArg.reg(insn, 0, castType));
 				checkCastInsn.addArg(InsnArg.reg(insn, insn.getRegsCount() == 2 ? 1 : 0, ArgType.UNKNOWN_OBJECT));
@@ -652,6 +656,12 @@ public class InsnDecoder {
 		}
 	}
 
+	private static void validateReferenceTypeOperand(String opcode, ArgType type) throws DecodeException {
+		if (type.isTypeKnown() && !type.isObject() && !type.isArray()) {
+			throw new DecodeException(opcode + " type must be a reference: " + type);
+		}
+	}
+
 	private ArgType tryResolveFieldType(FieldInfo igetFld) {
 		FieldNode fieldNode = root.resolveField(igetFld);
 		if (fieldNode != null) {
@@ -749,13 +759,38 @@ public class InsnDecoder {
 		return new InvokeNode(mthInfo, insn, type, false);
 	}
 
-	private InsnNode invoke(InsnData insn, InvokeType type, boolean isRange) {
+	private InsnNode invoke(InsnData insn, InvokeType type, boolean isRange) throws DecodeException {
 		IMethodRef mthRef = InsnDataUtils.getMethodRef(insn);
 		if (mthRef == null) {
 			throw new JadxRuntimeException("Failed to load method reference for insn: " + insn);
 		}
 		MethodInfo mthInfo = MethodInfo.fromRef(root, mthRef);
+		// Only an exact local declaration establishes staticness. External or inherited
+		// references can be unresolved here, so don't infer it from the call site.
+		ClassNode declaredClass = root.resolveClass(mthInfo.getDeclClass());
+		if (declaredClass != null) {
+			if (type == InvokeType.INTERFACE && !declaredClass.getAccessFlags().isInterface()) {
+				throw new DecodeException("Invoke opcode INTERFACE requires an interface method owner: " + mthInfo);
+			}
+			MethodNode target = declaredClass.searchMethod(mthInfo);
+			if (target != null) {
+				validateInvokeKind(type, mthInfo, target);
+			}
+		}
 		return new InvokeNode(mthInfo, insn, type, isRange);
+	}
+
+	private static void validateInvokeKind(InvokeType type, MethodInfo mthInfo, MethodNode target) throws DecodeException {
+		if (target.getAccessFlags().isStatic() != (type == InvokeType.STATIC)) {
+			throw new DecodeException("Invoke opcode " + type + " does not match declared method staticness: " + mthInfo);
+		}
+		if (type == InvokeType.DIRECT && !mthInfo.isConstructor() && !target.getAccessFlags().isPrivate()) {
+			throw new DecodeException("Invoke opcode DIRECT requires a private method or constructor: " + mthInfo);
+		}
+		if ((type == InvokeType.VIRTUAL || type == InvokeType.SUPER || type == InvokeType.INTERFACE)
+				&& (mthInfo.isConstructor() || target.getAccessFlags().isPrivate())) {
+			throw new DecodeException("Invoke opcode " + type + " cannot target a private method or constructor: " + mthInfo);
+		}
 	}
 
 	private InsnNode arrayGet(InsnData insn, ArgType argType) {
