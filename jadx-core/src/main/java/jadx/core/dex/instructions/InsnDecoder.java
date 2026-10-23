@@ -854,6 +854,10 @@ public class InsnDecoder {
 		if (codeFormat == CodeFormat.DEX && type == InvokeType.DIRECT && !mthInfo.isConstructor() && !target.getAccessFlags().isPrivate()) {
 			throw new DecodeException("Invoke opcode DIRECT requires a private method or constructor: " + mthInfo);
 		}
+		if (codeFormat == CodeFormat.DEX && type == InvokeType.DIRECT && !mthInfo.isConstructor() && target.getAccessFlags().isPrivate()
+				&& !Objects.equals(mthInfo.getDeclClass(), method.getParentClass().getClassInfo())) {
+			throw new DecodeException("Invoke opcode DIRECT cannot target a private method outside its declaring class: " + mthInfo);
+		}
 		if (codeFormat == CodeFormat.DEX && (type == InvokeType.VIRTUAL || type == InvokeType.SUPER || type == InvokeType.INTERFACE)
 				&& (mthInfo.isConstructor() || target.getAccessFlags().isPrivate())) {
 			throw new DecodeException("Invoke opcode " + type + " cannot target a private method or constructor: " + mthInfo);

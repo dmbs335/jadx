@@ -57,4 +57,5 @@
     if-ne v1, v1, :cond_magic
     :cond_magic
     const/4 v1, 0x0
+    return-void
 .end method

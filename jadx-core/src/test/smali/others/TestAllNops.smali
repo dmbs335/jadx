@@ -12,6 +12,9 @@
     nop
 
     nop
+
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
 .end method
 
 .method private test()Z
@@ -48,6 +51,8 @@
     .line 1487
     nop
 
+    const/4 v0, 0x0
+    return v0
 .end method
 
 .method private testWithTryCatch()Z
@@ -89,4 +94,6 @@
     .line 1487
     nop
 
+    const/4 v0, 0x0
+    return v0
 .end method

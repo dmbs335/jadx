@@ -14,3 +14,10 @@
     move-result v0
     return v0
 .end method
+
+.method public static callAsDirect(Ltypes/TestInvalidInterfaceInvokeOwner$I;)I
+    .locals 1
+    invoke-direct {p0}, Ltypes/TestInvalidInterfaceInvokeOwner$I;->privateValue()I
+    move-result v0
+    return v0
+.end method

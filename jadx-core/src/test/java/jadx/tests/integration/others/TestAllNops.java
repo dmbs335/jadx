@@ -13,7 +13,9 @@ public class TestAllNops extends SmaliTest {
 		disableCompilation();
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.containsLines(1, "private boolean test() {", "}")
-				.containsLines(1, "private boolean testWithTryCatch() {", "}");
+				.contains("private boolean test() {")
+				.contains("private boolean testWithTryCatch() {")
+				.contains("return false;")
+				.doesNotContain("nop;");
 	}
 }

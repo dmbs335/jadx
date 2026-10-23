@@ -8,4 +8,5 @@
     .locals 1
     new-instance v0, LBuggyConstructor;
     invoke-direct {v0}, LBuggyConstructor;-><init>()V
+    return-void
 .end method

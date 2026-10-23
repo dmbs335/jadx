@@ -1,7 +1,13 @@
 package jadx.core.dex.visitors;
 
+import java.util.ArrayDeque;
+
 import org.jetbrains.annotations.Nullable;
 
+import jadx.api.plugins.input.data.CodeFormat;
+import jadx.api.plugins.input.data.ICatch;
+import jadx.api.plugins.input.data.ICodeReader;
+import jadx.api.plugins.input.data.ITry;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.InvalidMoveResultAttr;
 import jadx.core.dex.attributes.nodes.JumpInfo;
@@ -45,6 +51,10 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 
 	private static void initJumps(MethodNode mth, InsnNode[] insnByOffset) {
 		FillArrayRepair fillArrayRepair = findFillArrayRepair(insnByOffset);
+		ICodeReader codeReader = mth.getCodeReader();
+		if (codeReader != null && codeReader.getCodeFormat() == CodeFormat.DEX) {
+			validateDexSpecialInstructions(codeReader, insnByOffset);
+		}
 		for (int offset = 0; offset < insnByOffset.length; offset++) {
 			InsnNode insn = insnByOffset[offset];
 			if (insn == null) {
@@ -211,6 +221,161 @@ public class ProcessInstructionsVisitor extends AbstractVisitor {
 			insnByOffset[target].addAttr(AType.JUMP, new JumpInfo(offset, target));
 		} catch (Exception e) {
 			mth.addError("Failed to set jump: " + InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target), e);
+		}
+	}
+
+	private static void validateDexSpecialInstructions(ICodeReader codeReader, InsnNode[] insnByOffset) {
+		boolean[] handlerStarts = new boolean[insnByOffset.length];
+		boolean[] payloadStarts = new boolean[insnByOffset.length];
+		boolean hasPayload = false;
+		boolean hasMoveException = false;
+		for (int offset = 0; offset < insnByOffset.length; offset++) {
+			InsnNode insn = insnByOffset[offset];
+			if (insn != null && (insn.getType() == InsnType.SWITCH_DATA || insn.getType() == InsnType.FILL_ARRAY_DATA)) {
+				payloadStarts[offset] = true;
+				hasPayload = true;
+			}
+		}
+		for (ITry tryBlock : codeReader.getTries()) {
+			ICatch catchData = tryBlock.getCatch();
+			for (int handler : catchData.getHandlers()) {
+				markHandlerStart(insnByOffset, handlerStarts, payloadStarts, handler);
+			}
+			markHandlerStart(insnByOffset, handlerStarts, payloadStarts, catchData.getCatchAllHandler());
+		}
+		for (int offset = 0; offset < insnByOffset.length; offset++) {
+			InsnNode insn = insnByOffset[offset];
+			if (insn != null && insn.getType() == InsnType.MOVE_EXCEPTION) {
+				hasMoveException = true;
+				if (!handlerStarts[offset] || offset == 0) {
+					throw new JadxRuntimeException("move-exception is not the first instruction of an exception handler: "
+							+ InsnUtils.formatOffset(offset));
+				}
+			}
+			if (insn instanceof SwitchInsn) {
+				SwitchInsn sw = (SwitchInsn) insn;
+				if (sw.needData()) {
+					attachSwitchData(insnByOffset, offset, sw);
+				}
+				for (int target : sw.getTargets()) {
+					validateDexBranchTarget(insnByOffset, payloadStarts, offset, target);
+				}
+			} else if (insn instanceof GotoNode) {
+				validateDexBranchTarget(insnByOffset, payloadStarts, offset, ((GotoNode) insn).getTarget());
+			}
+		}
+		if (hasPayload || hasMoveException || mayFallOffMethodEnd(insnByOffset, payloadStarts)) {
+			validateDexSpecialReachability(insnByOffset, payloadStarts, handlerStarts);
+		}
+	}
+
+	private static boolean mayFallOffMethodEnd(InsnNode[] insnByOffset, boolean[] payloadStarts) {
+		for (int offset = insnByOffset.length - 1; offset >= 0; offset--) {
+			InsnNode insn = insnByOffset[offset];
+			if (insn != null && !payloadStarts[offset]) {
+				InsnType type = insn.getType();
+				return type != InsnType.RETURN && type != InsnType.THROW && type != InsnType.GOTO;
+			}
+		}
+		return false;
+	}
+
+	private static void validateDexSpecialReachability(InsnNode[] insnByOffset, boolean[] payloadStarts, boolean[] handlerStarts) {
+		boolean[] visited = new boolean[insnByOffset.length];
+		ArrayDeque<Integer> pending = new ArrayDeque<>();
+		queueDexOffset(pending, visited, 0);
+		for (int offset = 0; offset < handlerStarts.length; offset++) {
+			if (handlerStarts[offset]) {
+				queueDexOffset(pending, visited, offset);
+			}
+		}
+		while (!pending.isEmpty()) {
+			int offset = pending.removeFirst();
+			if (payloadStarts[offset]) {
+				throw new JadxRuntimeException("Control flow reaches data payload: " + InsnUtils.formatOffset(offset));
+			}
+			InsnNode insn = insnByOffset[offset];
+			if (insn == null) {
+				continue;
+			}
+			switch (insn.getType()) {
+				case GOTO:
+					queueDexOffset(pending, visited, ((GotoNode) insn).getTarget());
+					break;
+				case IF:
+					queueDexOffset(pending, visited, ((IfNode) insn).getTarget());
+					queueDexFallthrough(pending, visited, insnByOffset, payloadStarts, offset);
+					break;
+				case SWITCH:
+					for (int target : ((SwitchInsn) insn).getTargets()) {
+						queueDexOffset(pending, visited, target);
+					}
+					queueDexFallthrough(pending, visited, insnByOffset, payloadStarts, offset);
+					break;
+				case RETURN:
+				case THROW:
+					break;
+				default:
+					queueDexFallthrough(pending, visited, insnByOffset, payloadStarts, offset);
+					break;
+			}
+		}
+	}
+
+	private static void queueDexFallthrough(ArrayDeque<Integer> pending, boolean[] visited,
+			InsnNode[] insnByOffset, boolean[] payloadStarts, int offset) {
+		int next = nextDexCodeOffset(insnByOffset, payloadStarts, offset);
+		if (next == -1) {
+			throw new JadxRuntimeException("Control flow exits method without return or throw: " + InsnUtils.formatOffset(offset));
+		}
+		InsnNode nextInsn = insnByOffset[next];
+		if (nextInsn != null && nextInsn.getType() == InsnType.MOVE_EXCEPTION) {
+			throw new JadxRuntimeException("Control flow falls through to move-exception: "
+					+ InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(next));
+		}
+		queueDexOffset(pending, visited, next);
+	}
+
+	private static int nextDexCodeOffset(InsnNode[] insnByOffset, boolean[] payloadStarts, int offset) {
+		for (int next = offset + 1; next < insnByOffset.length; next++) {
+			if (insnByOffset[next] != null || payloadStarts[next]) {
+				return next;
+			}
+		}
+		return -1;
+	}
+
+	private static void queueDexOffset(ArrayDeque<Integer> pending, boolean[] visited, int offset) {
+		if (offset >= 0 && offset < visited.length && !visited[offset]) {
+			visited[offset] = true;
+			pending.add(offset);
+		}
+	}
+
+	private static void markHandlerStart(InsnNode[] insnByOffset, boolean[] handlerStarts, boolean[] payloadStarts, int handler) {
+		if (handler >= 0 && handler < handlerStarts.length) {
+			handlerStarts[handler] = true;
+			if (payloadStarts[handler]) {
+				throw new JadxRuntimeException("Exception handler targets data payload: " + InsnUtils.formatOffset(handler));
+			}
+			if (insnByOffset[handler] instanceof MoveResultNode) {
+				throw new JadxRuntimeException("Exception handler targets move-result: " + InsnUtils.formatOffset(handler));
+			}
+		}
+	}
+
+	private static void validateDexBranchTarget(InsnNode[] insnByOffset, boolean[] payloadStarts, int offset, int target) {
+		if (target >= 0 && target < insnByOffset.length) {
+			if (payloadStarts[target]) {
+				throw new JadxRuntimeException("Branch targets data payload: "
+						+ InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target));
+			}
+			InsnNode targetInsn = insnByOffset[target];
+			if (targetInsn instanceof MoveResultNode || targetInsn != null && targetInsn.getType() == InsnType.MOVE_EXCEPTION) {
+				String targetName = targetInsn instanceof MoveResultNode ? "move-result" : "move-exception";
+				throw new JadxRuntimeException("Branch targets " + targetName + ": "
+						+ InsnUtils.formatOffset(offset) + " -> " + InsnUtils.formatOffset(target));
+			}
 		}
 	}
 
