@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import jadx.api.plugins.input.data.CodeFormat;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.LoopInfo;
@@ -117,6 +118,9 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			return changed && !tryBlocks.isEmpty();
 		});
 		restoreNestedCatchOrder(mth, mth.getRegion());
+		if (mth.getCodeReader().getCodeFormat() == CodeFormat.JVM) {
+			moveSharedCatchTails(mth.getRegion());
+		}
 		// Evaluate coverage only after wrapping is finished. Nested descriptors may
 		// still be covered by an outer region during the traversal.
 		if (splitTryBlock != null
@@ -133,6 +137,116 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 				mth.addError("Incorrect try/catch scope: unprotected throwing code was included in handler scope", null);
 			}
 		}
+	}
+
+	/**
+	 * A catch can flow into the same unprotected tail as its try body. Keep its exit
+	 * while walking enclosing try regions: the tail must be outside each try whose
+	 * bytecode range does not protect it. A plain sequential path is required so
+	 * moving the suffix does not change the other branch's control flow.
+	 */
+	private static Set<BlockNode> moveSharedCatchTails(IRegion region) {
+		Map<IContainer, Set<BlockNode>> childExits = new IdentityHashMap<>();
+		Set<BlockNode> exits = Collections.newSetFromMap(new IdentityHashMap<>());
+		for (IContainer child : new ArrayList<>(region.getSubBlocks())) {
+			if (child instanceof IRegion) {
+				Set<BlockNode> nestedExits = moveSharedCatchTails((IRegion) child);
+				childExits.put(child, nestedExits);
+				exits.addAll(nestedExits);
+			}
+		}
+		if (region instanceof TryCatchRegion) {
+			TryCatchRegion tryCatch = (TryCatchRegion) region;
+			if (tryCatch.getCatchRegions().size() == 1) {
+				IContainer catchRegion = tryCatch.getCatchRegions().values().iterator().next();
+				exits.addAll(getCatchBoundaryTargets(catchRegion));
+			}
+		}
+		if (!(region instanceof Region)) {
+			return exits;
+		}
+		List<IContainer> children = region.getSubBlocks();
+		for (int index = 0; index < children.size(); index++) {
+			IContainer child = children.get(index);
+			if (!(child instanceof TryCatchRegion)) {
+				continue;
+			}
+			TryCatchRegion tryCatch = (TryCatchRegion) child;
+			TryCatchBlockAttr tb = tryCatch.getTryCatchBlock();
+			if (tb == null || !(tryCatch.getTryRegion() instanceof Region)) {
+				continue;
+			}
+			for (BlockNode exit : childExits.getOrDefault(child, Collections.emptySet())) {
+				if (tb.getBlocks().contains(exit)) {
+					continue;
+				}
+				List<Region> path = new ArrayList<>();
+				List<Integer> positions = new ArrayList<>();
+				if (!findSequentialTailPath((Region) tryCatch.getTryRegion(), exit, path, positions)) {
+					continue;
+				}
+				if (!isUnprotectedTail(path, positions, tb)) {
+					continue;
+				}
+				Region tail = new Region(region);
+				for (int depth = path.size() - 1; depth >= 0; depth--) {
+					List<IContainer> blocks = path.get(depth).getSubBlocks();
+					int start = positions.get(depth) + (depth == path.size() - 1 ? 0 : 1);
+					List<IContainer> moved = new ArrayList<>(blocks.subList(start, blocks.size()));
+					blocks.subList(start, blocks.size()).clear();
+					for (IContainer block : moved) {
+						tail.add(block);
+					}
+				}
+				children.add(++index, tail);
+			}
+		}
+		return exits;
+	}
+
+	private static boolean findSequentialTailPath(Region region, BlockNode target,
+			List<Region> path, List<Integer> positions) {
+		List<IContainer> children = region.getSubBlocks();
+		for (int index = 0; index < children.size(); index++) {
+			IContainer child = children.get(index);
+			if (child == target || child instanceof Region
+					&& findSequentialTailPath((Region) child, target, path, positions)) {
+				path.add(0, region);
+				positions.add(0, index);
+				return true;
+			}
+			if (child instanceof IfRegion) {
+				IfRegion branch = (IfRegion) child;
+				IContainer thenRegion = branch.getThenRegion();
+				IContainer elseRegion = branch.getElseRegion();
+				if ((thenRegion instanceof Region && elseRegion != null
+						&& RegionUtils.hasExitBlock(elseRegion)
+						&& findSequentialTailPath((Region) thenRegion, target, path, positions))
+						|| (elseRegion instanceof Region && thenRegion != null
+								&& RegionUtils.hasExitBlock(thenRegion)
+								&& findSequentialTailPath((Region) elseRegion, target, path, positions))) {
+					path.add(0, region);
+					positions.add(0, index);
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static boolean isUnprotectedTail(
+			List<Region> path, List<Integer> positions, TryCatchBlockAttr tb) {
+		for (int depth = 0; depth < path.size(); depth++) {
+			List<IContainer> children = path.get(depth).getSubBlocks();
+			int start = positions.get(depth) + (depth == path.size() - 1 ? 0 : 1);
+			for (int index = start; index < children.size(); index++) {
+				IContainer child = children.get(index);
+				if (containsProtectedBlock(child, tb)) {
+					return false;
+				}
+			}
+		}
+		return true;
 	}
 
 	/**

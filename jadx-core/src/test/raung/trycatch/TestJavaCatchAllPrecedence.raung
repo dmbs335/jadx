@@ -1,0 +1,43 @@
+.version 49.0
+.class public trycatch/TestJavaCatchAllPrecedence
+.super java/lang/Object
+
+.method public static test()V
+    .max stack 1
+    .max locals 1
+
+  :try_start
+    invokestatic trycatch/TestJavaCatchAllPrecedence first ()V
+  :try_end
+    .catch all :try_start .. :try_end goto :all_handler
+    .catch java/lang/IllegalStateException :try_start .. :try_end goto :typed_handler
+    return
+
+  :all_handler
+    astore 0
+    invokestatic trycatch/TestJavaCatchAllPrecedence handled ()V
+    return
+
+  :typed_handler
+    astore 0
+    invokestatic trycatch/TestJavaCatchAllPrecedence wrong ()V
+    return
+.end method
+
+.method private static first()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static handled()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static wrong()V
+    .max stack 0
+    .max locals 0
+    return
+.end method

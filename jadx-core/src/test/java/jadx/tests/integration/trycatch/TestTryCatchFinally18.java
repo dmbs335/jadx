@@ -1,6 +1,5 @@
 package jadx.tests.integration.trycatch;
 
-import jadx.NotYetImplemented;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.SmaliTest;
 import jadx.tests.api.extensions.profiles.TestProfile;
@@ -57,7 +56,6 @@ public class TestTryCatchFinally18 extends SmaliTest {
 				.doesNotContain("catch (Throwable");
 	}
 
-	@NotYetImplemented("To be investigated why J8 does not work")
 	@TestWithProfiles({ TestProfile.JAVA8 })
 	public void testJ8() {
 		disableCompilation();

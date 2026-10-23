@@ -185,7 +185,11 @@ public class JavaCodeReader implements ICodeReader {
 			int end = reader.readU2();
 			int handler = reader.readU2();
 			int type = reader.readU2();
-			JavaTryData tryData = new JavaTryData(start, end);
+			if (end <= start) {
+				throw new JavaClassParseException("Invalid exception table range: " + start + " .. " + end);
+			}
+			// JVM exception table end_pc is exclusive; ITry end offset is inclusive.
+			JavaTryData tryData = new JavaTryData(start, end - 1);
 			List<JavaSingleCatch> catches = tries.computeIfAbsent(tryData, k -> new ArrayList<>());
 			if (type == 0) {
 				catches.add(new JavaSingleCatch(handler, null));
@@ -204,17 +208,19 @@ public class JavaCodeReader implements ICodeReader {
 
 	private static CatchData convertSingleCatches(List<JavaSingleCatch> list) {
 		int allHandler = -1;
+		int typedCount = 0;
 		for (JavaSingleCatch singleCatch : list) {
 			if (singleCatch.getType() == null) {
 				allHandler = singleCatch.getHandler();
-				list.remove(singleCatch);
+				// JVM exception entries are tested in table order. A catch-all shadows
+				// every later entry for this same protected range.
 				break;
 			}
+			typedCount++;
 		}
-		int len = list.size();
-		int[] handlers = new int[len];
-		String[] types = new String[len];
-		for (int i = 0; i < len; i++) {
+		int[] handlers = new int[typedCount];
+		String[] types = new String[typedCount];
+		for (int i = 0; i < typedCount; i++) {
 			JavaSingleCatch singleCatch = list.get(i);
 			handlers[i] = singleCatch.getHandler();
 			types[i] = singleCatch.getType();

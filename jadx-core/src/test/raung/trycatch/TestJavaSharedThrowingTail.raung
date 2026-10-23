@@ -1,0 +1,47 @@
+.version 49.0
+.class public trycatch/TestJavaSharedThrowingTail
+.super java/lang/Object
+
+.method public static test()V
+    .max stack 1
+    .max locals 1
+
+  :outer_start
+  :try_start
+    invokestatic trycatch/TestJavaSharedThrowingTail first ()V
+  :try_end
+    .catch java/lang/IllegalStateException :try_start .. :try_end goto :handler
+    goto :tail
+
+  :handler
+    astore 0
+    invokestatic trycatch/TestJavaSharedThrowingTail handle ()V
+
+  :outer_end
+    .catch all :outer_start .. :outer_end goto :outer_handler
+  :tail
+    invokestatic trycatch/TestJavaSharedThrowingTail second ()V
+    return
+
+  :outer_handler
+    astore 0
+    return
+.end method
+
+.method private static first()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static handle()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static second()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
