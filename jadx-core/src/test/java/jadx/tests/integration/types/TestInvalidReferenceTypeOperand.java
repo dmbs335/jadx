@@ -12,19 +12,18 @@ import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 public class TestInvalidReferenceTypeOperand extends SmaliTest {
 	@Override
 	protected void runChecks(List<ClassNode> classes) {
-		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isGreaterThanOrEqualTo(2);
+		org.assertj.core.api.Assertions.assertThat(classes.get(0).root().getErrorsCounter().getErrorCount()).isGreaterThanOrEqualTo(1);
 	}
 
 	@Test
 	public void test() {
 		disableCompilation();
 		assertThat(getClassNodeFromSmali()).code()
-				.contains("check-cast type must be a reference: int")
-				.contains("instance-of type must be a reference: int")
+				.contains("check-cast to primitive cannot be represented as a Java cast: int")
 				.contains(
 						"Method not decompiled: types.TestInvalidReferenceTypeOperand.checkCastPrimitive(java.lang.Object):java.lang.Object")
-				.contains(
-						"Method not decompiled: types.TestInvalidReferenceTypeOperand.instanceOfPrimitive(java.lang.Object):boolean")
+				.contains("return false;")
+				.doesNotContain("Method not decompiled: types.TestInvalidReferenceTypeOperand.instanceOfPrimitive")
 				.doesNotContain("Method not decompiled: types.TestInvalidReferenceTypeOperand.valid");
 	}
 }

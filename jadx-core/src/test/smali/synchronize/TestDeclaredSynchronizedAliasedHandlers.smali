@@ -98,7 +98,7 @@
     move-object v4, p0
 
     :try_start_65
-    invoke-virtual/range {v4 .. v9}, Lsynchronize/TestDeclaredSynchronizedAliasedHandlers;->g(IJJ)V
+    invoke-direct/range {v4 .. v9}, Lsynchronize/TestDeclaredSynchronizedAliasedHandlers;->g(IJJ)V
     iput-wide v0, v4, Lsynchronize/TestDeclaredSynchronizedAliasedHandlers;->h:J
     const-wide/16 v0, 0x0
     iput-wide v0, v4, Lsynchronize/TestDeclaredSynchronizedAliasedHandlers;->i:J

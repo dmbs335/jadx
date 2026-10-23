@@ -157,7 +157,7 @@
     iput-object p2, v2, Lloops/TestCoroutineProtectedTypedRestoreCompletion$loop$1;->L$2:Ljava/lang/Object;
     const/4 p2, 0x2
     iput p2, v2, Lloops/TestCoroutineProtectedTypedRestoreCompletion$loop$1;->label:I
-    invoke-virtual {p0, v5, p1, v2}, Lloops/TestCoroutineProtectedTypedRestoreCompletion;->b(Lio/ktor/websocket/Frame;Ljava/nio/ByteBuffer;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-direct {p0, v5, p1, v2}, Lloops/TestCoroutineProtectedTypedRestoreCompletion;->b(Lio/ktor/websocket/Frame;Ljava/nio/ByteBuffer;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object p2
     if-ne p2, v1, :cond_b8
     goto/16 :goto_18d
@@ -285,7 +285,7 @@
     goto :goto_18d
     :cond_169
     :goto_169
-    invoke-virtual {p0}, Lloops/TestCoroutineProtectedTypedRestoreCompletion;->a()V
+    invoke-direct {p0}, Lloops/TestCoroutineProtectedTypedRestoreCompletion;->a()V
     sget-object p1, Lkotlin/Unit;->INSTANCE:Lkotlin/Unit;
     return-object p1
     :goto_16f

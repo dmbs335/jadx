@@ -8,6 +8,10 @@ import org.jetbrains.annotations.Nullable;
 import jadx.api.plugins.input.insns.InsnData;
 
 public interface ICodeReader {
+	default CodeFormat getCodeFormat() {
+		return CodeFormat.UNKNOWN;
+	}
+
 	ICodeReader copy();
 
 	void visitInstructions(Consumer<InsnData> insnConsumer);

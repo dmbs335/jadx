@@ -9,6 +9,7 @@ import java.util.function.Consumer;
 
 import org.jetbrains.annotations.Nullable;
 
+import jadx.api.plugins.input.data.CodeFormat;
 import jadx.api.plugins.input.data.ICatch;
 import jadx.api.plugins.input.data.ICodeReader;
 import jadx.api.plugins.input.data.IDebugInfo;
@@ -26,6 +27,11 @@ import jadx.plugins.input.dex.sections.debuginfo.DebugInfoParser;
 public class DexCodeReader extends SectionReader implements ICodeReader {
 
 	private int mthId;
+
+	@Override
+	public CodeFormat getCodeFormat() {
+		return CodeFormat.DEX;
+	}
 
 	public DexCodeReader(SectionReader in) {
 		super(in.getDexReader(), in.getOffset());

@@ -87,7 +87,7 @@
     iput-object p1, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->L$0:Ljava/lang/Object;
     iput-object p2, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->L$1:Ljava/lang/Object;
     iput v3, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->label:I
-    invoke-virtual {p0, p2, v0}, Lloops/TestCoroutineThreeStateSelectorProcess;->select(Ljava/nio/channels/Selector;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-direct {p0, p2, v0}, Lloops/TestCoroutineThreeStateSelectorProcess;->select(Ljava/nio/channels/Selector;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object v11
     if-eq v11, v1, :suspended
 
@@ -122,7 +122,7 @@
     iput-object p2, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->L$1:Ljava/lang/Object;
     const/4 v7, 0x3
     iput v7, v0, Lloops/TestCoroutineThreeStateSelectorProcess$process$1;->label:I
-    invoke-virtual {p0, p1, v0}, Lloops/TestCoroutineThreeStateSelectorProcess;->receive(Lio/ktor/network/selector/LockFreeMPSCQueue;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
+    invoke-direct {p0, p1, v0}, Lloops/TestCoroutineThreeStateSelectorProcess;->receive(Lio/ktor/network/selector/LockFreeMPSCQueue;Lkotlin/coroutines/Continuation;)Ljava/lang/Object;
     move-result-object v11
     if-eq v11, v1, :suspended
 

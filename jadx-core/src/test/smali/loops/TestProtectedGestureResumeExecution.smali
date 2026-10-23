@@ -145,14 +145,14 @@
     move-object v4, p0
 
     :loop_header
-    invoke-virtual {v4}, Lloops/TestProtectedGestureResumeExecution;->isActive()Z
+    invoke-direct {v4}, Lloops/TestProtectedGestureResumeExecution;->isActive()Z
     move-result v5
     if-eqz v5, :done
 
     :try_start_main
     iput-object v1, v4, Lloops/TestProtectedGestureResumeExecution;->L$0:Ljava/lang/Object;
     iput v2, v4, Lloops/TestProtectedGestureResumeExecution;->label:I
-    invoke-virtual {v4}, Lloops/TestProtectedGestureResumeExecution;->block()Ljava/lang/Object;
+    invoke-direct {v4}, Lloops/TestProtectedGestureResumeExecution;->block()Ljava/lang/Object;
     move-result-object v5
     if-ne v5, v0, :await_call
     return-object v0
@@ -161,7 +161,7 @@
     iput-object v1, v4, Lloops/TestProtectedGestureResumeExecution;->L$0:Ljava/lang/Object;
     const/4 v6, 0x2
     iput v6, v4, Lloops/TestProtectedGestureResumeExecution;->label:I
-    invoke-virtual {v4}, Lloops/TestProtectedGestureResumeExecution;->await()Ljava/lang/Object;
+    invoke-direct {v4}, Lloops/TestProtectedGestureResumeExecution;->await()Ljava/lang/Object;
     move-result-object v5
     :try_end_main
     .catch Ljava/util/concurrent/CancellationException; {:try_start_main .. :try_end_main} :catch_main
@@ -178,14 +178,14 @@
     move-object v4, v7
 
     :catch_join
-    invoke-virtual {v5}, Lloops/TestProtectedGestureResumeExecution;->isActive()Z
+    invoke-direct {v5}, Lloops/TestProtectedGestureResumeExecution;->isActive()Z
     move-result v6
     if-eqz v6, :rethrow
     move-object v4, v5
     iput-object v1, v5, Lloops/TestProtectedGestureResumeExecution;->L$0:Ljava/lang/Object;
     const/4 v6, 0x3
     iput v6, v5, Lloops/TestProtectedGestureResumeExecution;->label:I
-    invoke-virtual {v5}, Lloops/TestProtectedGestureResumeExecution;->await()Ljava/lang/Object;
+    invoke-direct {v5}, Lloops/TestProtectedGestureResumeExecution;->await()Ljava/lang/Object;
     move-result-object v4
     if-ne v4, v0, :after_catch_await
     return-object v0

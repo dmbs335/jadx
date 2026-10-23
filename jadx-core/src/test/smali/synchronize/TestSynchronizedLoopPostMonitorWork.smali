@@ -34,7 +34,7 @@
     :work
     monitor-exit v0
     :try_end
-    invoke-virtual {v1}, Lsynchronize/TestSynchronizedLoopPostMonitorWork;->work()V
+    invoke-direct {v1}, Lsynchronize/TestSynchronizedLoopPostMonitorWork;->work()V
     goto :loop
 
     :catchall

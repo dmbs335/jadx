@@ -3,6 +3,7 @@ package jadx.core.dex.instructions;
 import java.util.List;
 import java.util.Objects;
 
+import jadx.api.plugins.input.data.CodeFormat;
 import jadx.api.plugins.input.data.ICodeReader;
 import jadx.api.plugins.input.data.IMethodProto;
 import jadx.api.plugins.input.data.IMethodRef;
@@ -37,6 +38,8 @@ import jadx.core.utils.input.InsnDataUtils;
 public class InsnDecoder {
 	private final MethodNode method;
 	private final RootNode root;
+	private CodeFormat codeFormat = CodeFormat.UNKNOWN;
+	private Opcode previousDexOpcode = Opcode.UNKNOWN;
 
 	public InsnDecoder(MethodNode mthNode) {
 		this.method = mthNode;
@@ -44,12 +47,17 @@ public class InsnDecoder {
 	}
 
 	public InsnNode[] process(ICodeReader codeReader) {
+		codeFormat = codeReader.getCodeFormat();
+		previousDexOpcode = Opcode.UNKNOWN;
 		InsnNode[] instructions = new InsnNode[codeReader.getUnitsCount()];
 		codeReader.visitInstructions(rawInsn -> {
 			int offset = rawInsn.getOffset();
 			InsnNode insn;
 			try {
 				rawInsn.decode();
+				if (codeFormat == CodeFormat.DEX) {
+					validateMoveResultPlacement(rawInsn.getOpcode());
+				}
 				insn = decode(rawInsn);
 			} catch (Exception e) {
 				boolean mthWithErrors = method.contains(AType.JADX_ERROR);
@@ -379,7 +387,13 @@ public class InsnDecoder {
 
 			case INSTANCE_OF:
 				ArgType instanceOfType = ArgType.parse(insn.getIndexAsType());
-				validateReferenceTypeOperand("instance-of", instanceOfType);
+				if (isPrimitiveType(instanceOfType)) {
+					if (codeFormat == CodeFormat.DEX) {
+						// DEX defines instance-of against a primitive type as always false.
+						return insn(InsnType.CONST, InsnArg.reg(insn, 0, ArgType.BOOLEAN), InsnArg.lit(0, ArgType.BOOLEAN));
+					}
+					throw new DecodeException("instance-of with primitive type is unsupported for this input format: " + instanceOfType);
+				}
 				InsnNode instInsn = new IndexInsnNode(InsnType.INSTANCE_OF, instanceOfType, 1);
 				instInsn.setResult(InsnArg.reg(insn, 0, ArgType.BOOLEAN));
 				instInsn.addArg(InsnArg.reg(insn, 1, ArgType.UNKNOWN_OBJECT));
@@ -387,7 +401,10 @@ public class InsnDecoder {
 
 			case CHECK_CAST:
 				ArgType castType = ArgType.parse(insn.getIndexAsType());
-				validateReferenceTypeOperand("check-cast", castType);
+				if (isPrimitiveType(castType)) {
+					// In DEX this always throws; emitting a Java primitive cast would change its meaning.
+					throw new DecodeException("check-cast to primitive cannot be represented as a Java cast: " + castType);
+				}
 				InsnNode checkCastInsn = new IndexInsnNode(InsnType.CHECK_CAST, castType, 1);
 				checkCastInsn.setResult(InsnArg.reg(insn, 0, castType));
 				checkCastInsn.addArg(InsnArg.reg(insn, insn.getRegsCount() == 2 ? 1 : 0, ArgType.UNKNOWN_OBJECT));
@@ -404,7 +421,7 @@ public class InsnDecoder {
 				FieldInfo igetFld = FieldInfo.fromRef(root, insn.getIndexAsField());
 				validateFieldOpcode(insn.getOpcode(), igetFld.getType());
 				InsnNode igetInsn = new IndexInsnNode(InsnType.IGET, igetFld, 1);
-				igetInsn.setResult(InsnArg.reg(insn, 0, tryResolveFieldType(igetFld)));
+				igetInsn.setResult(InsnArg.reg(insn, 0, resolveFieldTypeAndValidateAccess(insn.getOpcode(), igetFld, false)));
 				igetInsn.addArg(InsnArg.reg(insn, 1, igetFld.getDeclClass().getType()));
 				return igetInsn;
 
@@ -419,7 +436,7 @@ public class InsnDecoder {
 				FieldInfo iputFld = FieldInfo.fromRef(root, insn.getIndexAsField());
 				validateFieldOpcode(insn.getOpcode(), iputFld.getType());
 				InsnNode iputInsn = new FieldPutNode(InsnType.IPUT, iputFld, 2);
-				iputInsn.addArg(InsnArg.reg(insn, 0, tryResolveFieldType(iputFld)));
+				iputInsn.addArg(InsnArg.reg(insn, 0, resolveFieldTypeAndValidateAccess(insn.getOpcode(), iputFld, false)));
 				iputInsn.addArg(InsnArg.reg(insn, 1, iputFld.getDeclClass().getType()));
 				return iputInsn;
 
@@ -434,7 +451,7 @@ public class InsnDecoder {
 				FieldInfo sgetFld = FieldInfo.fromRef(root, insn.getIndexAsField());
 				validateFieldOpcode(insn.getOpcode(), sgetFld.getType());
 				InsnNode sgetInsn = new IndexInsnNode(InsnType.SGET, sgetFld, 0);
-				sgetInsn.setResult(InsnArg.reg(insn, 0, tryResolveFieldType(sgetFld)));
+				sgetInsn.setResult(InsnArg.reg(insn, 0, resolveFieldTypeAndValidateAccess(insn.getOpcode(), sgetFld, true)));
 				return sgetInsn;
 
 			case SPUT:
@@ -448,7 +465,7 @@ public class InsnDecoder {
 				FieldInfo sputFld = FieldInfo.fromRef(root, insn.getIndexAsField());
 				validateFieldOpcode(insn.getOpcode(), sputFld.getType());
 				InsnNode sputInsn = new FieldPutNode(InsnType.SPUT, sputFld, 1);
-				sputInsn.addArg(InsnArg.reg(insn, 0, tryResolveFieldType(sputFld)));
+				sputInsn.addArg(InsnArg.reg(insn, 0, resolveFieldTypeAndValidateAccess(insn.getOpcode(), sputFld, true)));
 				return sputInsn;
 
 			case ARRAY_LENGTH:
@@ -527,6 +544,11 @@ public class InsnDecoder {
 
 			case NEW_INSTANCE:
 				ArgType clsType = ArgType.parse(insn.getIndexAsType());
+				ClassNode newInstanceClass = clsType.isObject() ? root.resolveClass(clsType) : null;
+				if (newInstanceClass != null
+						&& (newInstanceClass.getAccessFlags().isAbstract() || newInstanceClass.getAccessFlags().isInterface())) {
+					throw new DecodeException("new-instance cannot instantiate abstract or interface class: " + clsType);
+				}
 				IndexInsnNode newInstInsn = new IndexInsnNode(InsnType.NEW_INSTANCE, clsType, 0);
 				newInstInsn.setResult(InsnArg.reg(insn, 0, clsType));
 				return newInstInsn;
@@ -656,18 +678,60 @@ public class InsnDecoder {
 		}
 	}
 
-	private static void validateReferenceTypeOperand(String opcode, ArgType type) throws DecodeException {
-		if (type.isTypeKnown() && !type.isObject() && !type.isArray()) {
-			throw new DecodeException(opcode + " type must be a reference: " + type);
+	private static boolean isPrimitiveType(ArgType type) {
+		return type.isTypeKnown() && !type.isObject() && !type.isArray();
+	}
+
+	private void validateMoveResultPlacement(Opcode opcode) throws DecodeException {
+		Opcode previous = previousDexOpcode;
+		previousDexOpcode = opcode;
+		switch (opcode) {
+			case MOVE_RESULT:
+			case MOVE_RESULT_NARROW:
+			case MOVE_RESULT_WIDE:
+			case MOVE_RESULT_OBJECT:
+				if (!allowsMoveResult(previous)) {
+					throw new DecodeException("move-result must immediately follow invoke or filled-new-array, found after " + previous);
+				}
+				break;
+			default:
+				break;
 		}
 	}
 
-	private ArgType tryResolveFieldType(FieldInfo igetFld) {
-		FieldNode fieldNode = root.resolveField(igetFld);
+	private static boolean allowsMoveResult(Opcode opcode) {
+		switch (opcode) {
+			case INVOKE_DIRECT:
+			case INVOKE_DIRECT_RANGE:
+			case INVOKE_INTERFACE:
+			case INVOKE_INTERFACE_RANGE:
+			case INVOKE_STATIC:
+			case INVOKE_STATIC_RANGE:
+			case INVOKE_SUPER:
+			case INVOKE_SUPER_RANGE:
+			case INVOKE_VIRTUAL:
+			case INVOKE_VIRTUAL_RANGE:
+			case INVOKE_POLYMORPHIC:
+			case INVOKE_POLYMORPHIC_RANGE:
+			case INVOKE_CUSTOM:
+			case INVOKE_CUSTOM_RANGE:
+			case FILLED_NEW_ARRAY:
+			case FILLED_NEW_ARRAY_RANGE:
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	private ArgType resolveFieldTypeAndValidateAccess(Opcode opcode, FieldInfo fieldInfo, boolean staticOpcode) throws DecodeException {
+		FieldNode fieldNode = root.resolveField(fieldInfo);
 		if (fieldNode != null) {
+			if (fieldNode.getAccessFlags().isStatic() != staticOpcode) {
+				throw new DecodeException("Field opcode " + opcode + " does not match declared field staticness: " + fieldInfo);
+			}
 			return fieldNode.getType();
 		}
-		return igetFld.getType();
+		return fieldInfo.getType();
 	}
 
 	private InsnNode filledNewArray(InsnData insn, boolean isRange) {
@@ -772,6 +836,9 @@ public class InsnDecoder {
 			if (type == InvokeType.INTERFACE && !declaredClass.getAccessFlags().isInterface()) {
 				throw new DecodeException("Invoke opcode INTERFACE requires an interface method owner: " + mthInfo);
 			}
+			if (codeFormat == CodeFormat.DEX && type == InvokeType.VIRTUAL && declaredClass.getAccessFlags().isInterface()) {
+				throw new DecodeException("Invoke opcode VIRTUAL requires a class method owner: " + mthInfo);
+			}
 			MethodNode target = declaredClass.searchMethod(mthInfo);
 			if (target != null) {
 				validateInvokeKind(type, mthInfo, target);
@@ -780,14 +847,14 @@ public class InsnDecoder {
 		return new InvokeNode(mthInfo, insn, type, isRange);
 	}
 
-	private static void validateInvokeKind(InvokeType type, MethodInfo mthInfo, MethodNode target) throws DecodeException {
+	private void validateInvokeKind(InvokeType type, MethodInfo mthInfo, MethodNode target) throws DecodeException {
 		if (target.getAccessFlags().isStatic() != (type == InvokeType.STATIC)) {
 			throw new DecodeException("Invoke opcode " + type + " does not match declared method staticness: " + mthInfo);
 		}
-		if (type == InvokeType.DIRECT && !mthInfo.isConstructor() && !target.getAccessFlags().isPrivate()) {
+		if (codeFormat == CodeFormat.DEX && type == InvokeType.DIRECT && !mthInfo.isConstructor() && !target.getAccessFlags().isPrivate()) {
 			throw new DecodeException("Invoke opcode DIRECT requires a private method or constructor: " + mthInfo);
 		}
-		if ((type == InvokeType.VIRTUAL || type == InvokeType.SUPER || type == InvokeType.INTERFACE)
+		if (codeFormat == CodeFormat.DEX && (type == InvokeType.VIRTUAL || type == InvokeType.SUPER || type == InvokeType.INTERFACE)
 				&& (mthInfo.isConstructor() || target.getAccessFlags().isPrivate())) {
 			throw new DecodeException("Invoke opcode " + type + " cannot target a private method or constructor: " + mthInfo);
 		}

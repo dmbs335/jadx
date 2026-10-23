@@ -39,10 +39,6 @@
 
     invoke-virtual {v5}, Ljava/lang/String;->getBytes()[B
 
-    nop
-
-    nop
-
     move-result-object v7
 
     nop
@@ -56,10 +52,6 @@
     nop
 
     invoke-static {v7, v8}, Landroid/util/Base64;->decode([BI)[B
-
-    nop
-
-    nop
 
     move-result-object v3
 
@@ -114,10 +106,6 @@
 
     invoke-virtual {v4}, Ljava/lang/String;->length()I
 
-    nop
-
-    nop
-
     move-result v7
 
     nop
@@ -132,10 +120,6 @@
 
     invoke-virtual {v4, v0}, Ljava/lang/String;->charAt(I)C
 
-    nop
-
-    nop
-
     move-result v7
 
     nop
@@ -143,10 +127,6 @@
     nop
 
     invoke-virtual {v1}, Ljava/lang/String;->length()I
-
-    nop
-
-    nop
 
     move-result v8
 
@@ -161,10 +141,6 @@
     nop
 
     invoke-virtual {v1, v8}, Ljava/lang/String;->charAt(I)C
-
-    nop
-
-    nop
 
     move-result v8
 
@@ -206,10 +182,6 @@
     nop
 
     invoke-virtual {v6}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
-
-    nop
-
-    nop
 
     move-result-object v2
 

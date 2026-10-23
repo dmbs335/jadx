@@ -12,6 +12,7 @@ import java.util.stream.Collectors;
 
 import org.jetbrains.annotations.Nullable;
 
+import jadx.api.plugins.input.data.CodeFormat;
 import jadx.api.plugins.input.data.ICodeReader;
 import jadx.api.plugins.input.data.IDebugInfo;
 import jadx.api.plugins.input.data.ILocalVar;
@@ -34,6 +35,10 @@ import jadx.plugins.input.java.data.code.trycatch.JavaTryData;
 import jadx.plugins.input.java.utils.JavaClassParseException;
 
 public class JavaCodeReader implements ICodeReader {
+	@Override
+	public CodeFormat getCodeFormat() {
+		return CodeFormat.JVM;
+	}
 
 	private final JavaClassData clsData;
 	private final DataReader reader;

@@ -46,7 +46,7 @@
 
     invoke-direct {v1, p0, p0}, Linner/OuterCls$1;-><init>(Linner/OuterCls;Ljava/lang/Runnable;)V
 
-    invoke-direct {p0, v1}, Linner/OuterCls;->use(Ljava/lang/Thread;)V
+    invoke-virtual {p0, v1}, Linner/OuterCls;->use(Ljava/lang/Thread;)V
 
     return-void
 .end method

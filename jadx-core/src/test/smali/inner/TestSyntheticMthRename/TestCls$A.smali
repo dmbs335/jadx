@@ -58,7 +58,7 @@
     .line 9
     check-cast p1, [Ljava/lang/Runnable;
 
-    invoke-virtual {p0, p1}, Linner/TestCls$A;->renamedCall([Ljava/lang/Runnable;)Ljava/lang/String;
+    invoke-direct {p0, p1}, Linner/TestCls$A;->renamedCall([Ljava/lang/Runnable;)Ljava/lang/String;
 
     move-result-object v0
 
