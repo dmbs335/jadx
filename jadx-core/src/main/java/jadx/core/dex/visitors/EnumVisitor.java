@@ -306,7 +306,9 @@ public class EnumVisitor extends AbstractVisitor {
 		boolean usedBySideEffect = coResArg != null && coResArg.getSVar().getUseList().stream()
 				.map(RegisterArg::getParentInsn)
 				.anyMatch(useInsn -> useInsn != null
-						&& (useInsn.getType() == InsnType.INVOKE || useInsn.getType() == InsnType.SPUT)
+						&& (useInsn.getType() == InsnType.INVOKE
+								|| useInsn.getType() == InsnType.SPUT
+								|| useInsn.getType() == InsnType.IPUT)
 						&& !data.toRemove.contains(useInsn));
 		if (coResArg == null || (coResArg.getSVar().getUseList().size() <= 2 && !usedBySideEffect)) {
 			data.toRemove.add(co);
