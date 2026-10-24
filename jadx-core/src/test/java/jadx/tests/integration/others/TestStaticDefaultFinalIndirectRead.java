@@ -12,7 +12,7 @@ public class TestStaticDefaultFinalIndirectRead extends SmaliTest {
 		assertThat(getClassNodeFromSmali())
 				.runDecompiledAutoCheck(this)
 				.code()
-				.containsOne("JADX WARN: Final modifier removed: static field is read through a call before assignment")
+				.containsOne("JADX WARN: Final modifier removed: static field is read indirectly before assignment")
 				.contains("observed = readInitial()");
 	}
 }

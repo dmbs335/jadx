@@ -37,6 +37,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.RegisterArg;
+import jadx.core.dex.instructions.mods.ConstructorInsn;
 import jadx.core.dex.nodes.BlockNode;
 import jadx.core.dex.nodes.ClassNode;
 import jadx.core.dex.nodes.FieldNode;
@@ -153,10 +154,10 @@ public class ExtractFieldInit extends AbstractVisitor {
 					field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
 					field.addWarnComment("Final modifier removed: static field is read before assignment in class initializer");
 				} else if (possiblyObservedFinalFields.contains(field)) {
-					// A call can read the default value before the field is assigned.
+					// A call or triggered class initializer can read the default value before assignment.
 					// Keeping it final would turn a literal write into a Java constant.
 					field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
-					field.addWarnComment("Final modifier removed: static field is read through a call before assignment");
+					field.addWarnComment("Final modifier removed: static field is read indirectly before assignment");
 				} else if (supertypeObservedFinalFields.contains(field)) {
 					field.remove(JadxAttrType.CONSTANT_VALUE);
 					field.addWarnComment(
@@ -190,8 +191,34 @@ public class ExtractFieldInit extends AbstractVisitor {
 
 	private static boolean isIndirectStaticFieldReadBeforeWrite(ClassNode cls, MethodNode mth, FieldInitInfo target) {
 		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
-		return hasInsnBeforeFieldWrite(mth, target, innerInsn -> innerInsn instanceof BaseInvokeNode
-				&& invocationReadsField(cls, (BaseInvokeNode) innerInsn, fieldInfo, InsnType.SGET, new HashSet<>()), false);
+		return hasInsnBeforeFieldWrite(mth, target,
+				innerInsn -> staticInitTriggerReadsField(cls, innerInsn, fieldInfo), true);
+	}
+
+	private static boolean staticInitTriggerReadsField(ClassNode cls, InsnNode insn, FieldInfo fieldInfo) {
+		if (insn instanceof BaseInvokeNode) {
+			BaseInvokeNode invoke = (BaseInvokeNode) insn;
+			if (invocationReadsField(cls, invoke, fieldInfo, InsnType.SGET, new HashSet<>())) {
+				return true;
+			}
+			if (invoke instanceof InvokeNode && ((InvokeNode) invoke).getInvokeType() == InvokeType.STATIC) {
+				return triggeredClassInitReadsField(cls, invoke.getCallMth().getDeclClass().getType(), fieldInfo, new HashSet<>());
+			}
+			if (invoke instanceof ConstructorInsn && ((ConstructorInsn) invoke).isNewInstance()) {
+				return triggeredClassInitReadsField(cls, invoke.getCallMth().getDeclClass().getType(), fieldInfo, new HashSet<>());
+			}
+		}
+		if (insn instanceof IndexInsnNode) {
+			IndexInsnNode indexInsn = (IndexInsnNode) insn;
+			if (insn.getType() == InsnType.SGET || insn.getType() == InsnType.SPUT) {
+				FieldInfo usedField = (FieldInfo) indexInsn.getIndex();
+				return triggeredClassInitReadsField(cls, usedField.getDeclClass().getType(), fieldInfo, new HashSet<>());
+			}
+			if (insn.getType() == InsnType.NEW_INSTANCE) {
+				return triggeredClassInitReadsField(cls, (ArgType) indexInsn.getIndex(), fieldInfo, new HashSet<>());
+			}
+		}
+		return false;
 	}
 
 	private static boolean isStaticFieldReadDuringSupertypeInit(ClassNode cls, FieldInitInfo target) {
