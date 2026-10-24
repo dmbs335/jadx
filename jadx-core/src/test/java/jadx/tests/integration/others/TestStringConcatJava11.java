@@ -31,6 +31,10 @@ public class TestStringConcatJava11 extends RaungTest {
 		public String test2(final String s) {
 			return s + "test" + s + 7;
 		}
+
+		public String testWide(final long value, final int suffix) {
+			return value + ":" + suffix;
+		}
 	}
 
 	@Test
@@ -58,6 +62,7 @@ public class TestStringConcatJava11 extends RaungTest {
 		assertThat(getClassNode(TestCls.class))
 				.code()
 				.containsOne("return str + \"test\";")
-				.containsOne("return str + \"test\" + str + \"7\";");
+				.containsOne("return str + \"test\" + str + \"7\";")
+				.containsOne("return j + \":\" + i;");
 	}
 }

@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Objects;
 
 import jadx.api.plugins.input.data.IMethodHandle;
+import jadx.api.plugins.input.data.IMethodProto;
 import jadx.api.plugins.input.data.IMethodRef;
 import jadx.api.plugins.input.data.MethodHandleType;
 import jadx.api.plugins.input.data.annotations.EncodedType;
@@ -50,10 +51,12 @@ public class CustomStringConcat {
 
 	public static InsnNode buildStringConcat(InsnData insn, boolean isRange, List<EncodedValue> values) {
 		try {
-			int argsCount = values.size() - 3 + insn.getRegsCount();
+			IMethodProto callProto = (IMethodProto) values.get(2).getValue();
+			List<String> argTypes = callProto.getArgTypes();
+			int argsCount = values.size() - 3 + argTypes.size();
 			InsnNode concat = new InsnNode(InsnType.STR_CONCAT, argsCount);
 			String recipe = (String) values.get(3).getValue();
-			processRecipe(recipe, concat, values, insn);
+			processRecipe(recipe, concat, values, insn, argTypes);
 			int resReg = insn.getResultReg();
 			if (resReg != -1) {
 				concat.setResult(InsnArg.reg(resReg, ArgType.STRING));
@@ -67,10 +70,12 @@ public class CustomStringConcat {
 		}
 	}
 
-	private static void processRecipe(String recipe, InsnNode concat, List<EncodedValue> values, InsnData insn) {
+	private static void processRecipe(String recipe, InsnNode concat, List<EncodedValue> values, InsnData insn,
+			List<String> argTypes) {
 		int len = recipe.length();
 		int offset = 0;
 		int argNum = 0;
+		int regSlot = 0;
 		int constNum = 4;
 		StringBuilder sb = new StringBuilder(len);
 		while (offset < len) {
@@ -84,8 +89,19 @@ public class CustomStringConcat {
 					sb.setLength(0);
 				}
 				if (argTag) {
-					concat.addArg(InsnArg.reg(insn, argNum++, ArgType.UNKNOWN));
+					if (argNum >= argTypes.size()) {
+						throw new JadxRuntimeException("String concat recipe has excess dynamic argument tags");
+					}
+					ArgType argType = ArgType.parse(argTypes.get(argNum++));
+					if (regSlot >= insn.getRegsCount()) {
+						throw new JadxRuntimeException("String concat recipe references a missing argument register");
+					}
+					concat.addArg(InsnArg.reg(insn, regSlot, argType));
+					regSlot += argType.equals(ArgType.LONG) || argType.equals(ArgType.DOUBLE) ? 2 : 1;
 				} else {
+					if (constNum >= values.size()) {
+						throw new JadxRuntimeException("String concat recipe has excess constant tags");
+					}
 					InsnArg constArg = buildInsnArgFromEncodedValue(values.get(constNum++));
 					concat.addArg(constArg);
 				}
@@ -96,12 +112,20 @@ public class CustomStringConcat {
 		if (sb.length() != 0) {
 			concat.addArg(InsnArg.wrapArg(new ConstStringNode(sb.toString())));
 		}
+		if (argNum != argTypes.size() || regSlot != insn.getRegsCount() || constNum != values.size()) {
+			throw new JadxRuntimeException("String concat recipe does not match call arguments or constants: "
+					+ "arguments=" + argNum + '/' + argTypes.size() + ", registers=" + regSlot + '/' + insn.getRegsCount()
+					+ ", constants=" + (constNum - 4) + '/' + (values.size() - 4));
+		}
 	}
 
 	private static InsnArg buildInsnArgFromEncodedValue(EncodedValue encodedValue) {
+		if (encodedValue.getType() == EncodedType.ENCODED_NULL) {
+			throw new JadxRuntimeException("Null string concat bootstrap constant");
+		}
 		Object value = EncodedValueUtils.convertToConstValue(encodedValue);
 		if (value == null) {
-			return InsnArg.lit(0, ArgType.UNKNOWN);
+			throw new JadxRuntimeException("Unsupported string concat constant: " + encodedValue);
 		}
 		if (value instanceof LiteralArg) {
 			return ((LiteralArg) value);
