@@ -393,7 +393,9 @@ public class InsnNode extends LineAttrNode {
 		if (this == other) {
 			return true;
 		}
-		if (insnType != other.insnType) {
+		// Subclasses can carry semantic data not represented by the opcode or argument list.
+		// Comparing a base instruction to a specialized one must not depend on operand order.
+		if (insnType != other.insnType || getClass() != other.getClass()) {
 			return false;
 		}
 		int size = arguments.size();

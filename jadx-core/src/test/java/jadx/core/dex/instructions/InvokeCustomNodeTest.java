@@ -29,6 +29,19 @@ class InvokeCustomNodeTest {
 		assertThat(first.isSame(makeCustomNode(lambda, target, 1))).isTrue();
 	}
 
+	@Test
+	void customCallMustNotMatchPlainCallInEitherOrder() {
+		RootNode root = new RootNode(new JadxArgs());
+		ClassInfo cls = ClassInfo.fromName(root, "test.Lambda");
+		MethodInfo lambda = MethodInfo.fromDetails(root, cls, "lambda", List.of(), ArgType.OBJECT);
+		MethodInfo target = MethodInfo.fromDetails(root, cls, "target", List.of(ArgType.INT), ArgType.VOID);
+		InvokeNode plain = new InvokeNode(lambda, InvokeType.CUSTOM, 0);
+		InvokeCustomNode custom = makeCustomNode(lambda, target, 1);
+
+		assertThat(plain.isSame(custom)).isFalse();
+		assertThat(custom.isSame(plain)).isFalse();
+	}
+
 	private static InvokeCustomNode makeCustomNode(MethodInfo lambda, MethodInfo target, int value) {
 		InsnData insn = (InsnData) Proxy.newProxyInstance(InsnData.class.getClassLoader(),
 				new Class<?>[] { InsnData.class }, (proxy, method, args) -> {

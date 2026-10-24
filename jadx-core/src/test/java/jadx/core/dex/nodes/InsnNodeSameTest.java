@@ -2,15 +2,28 @@ package jadx.core.dex.nodes;
 
 import org.junit.jupiter.api.Test;
 
+import jadx.api.plugins.input.insns.Opcode;
 import jadx.core.dex.instructions.ArithNode;
 import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.ReturnNode;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class InsnNodeSameTest {
+	@Test
+	void specializedInstructionMustNotMatchGenericInstructionInEitherOrder() {
+		InsnNode generic = new InsnNode(InsnType.RETURN, 1);
+		generic.addArg(InsnArg.reg(0, ArgType.INT));
+		ReturnNode specialized = new ReturnNode(Opcode.RETURN_INT);
+		specialized.addArg(InsnArg.reg(0, ArgType.INT));
+
+		assertThat(generic.isSame(specialized)).isFalse();
+		assertThat(specialized.isSame(generic)).isFalse();
+	}
+
 	@Test
 	void wrappedArgumentMustNotMatchPlainArgumentInEitherOrder() {
 		InsnNode plain = new InsnNode(InsnType.RETURN, 1);
