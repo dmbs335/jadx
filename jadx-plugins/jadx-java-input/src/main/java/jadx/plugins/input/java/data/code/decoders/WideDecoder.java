@@ -29,28 +29,41 @@ public class WideDecoder implements IJavaInsnDecoder {
 			case 0x17: // fload
 			case 0x19: // aload
 				state.local(1, index).push(0);
+				insn.setOpcode(Opcode.MOVE);
 				break;
 
 			case 0x16: // lload
 			case 0x18: // dload
 				state.local(1, index).pushWide(0);
+				insn.setOpcode(Opcode.MOVE_WIDE);
 				break;
 
 			case 0x36:
-			case 0x37:
 			case 0x38:
-			case 0x39:
 			case 0x3a:
 				// *store
 				state.pop(1).local(0, index);
+				insn.setOpcode(Opcode.MOVE);
 				break;
+
+			case 0x37: // lstore
+			case 0x39: // dstore
+				state.pop(1).local(0, index);
+				insn.setOpcode(Opcode.MOVE_WIDE);
+				break;
+
+			case 0xa9: // ret
+				state.local(0, index);
+				insn.setPayloadSize(3);
+				insn.setRegsCount(1);
+				insn.setOpcode(Opcode.JAVA_RET);
+				return;
 
 			default:
 				throw new JavaClassParseException("Unexpected opcode in 'wide': 0x" + Integer.toHexString(opcode));
 		}
 		insn.setPayloadSize(3);
 		insn.setRegsCount(2);
-		insn.setOpcode(Opcode.MOVE);
 	}
 
 	@Override

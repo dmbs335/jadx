@@ -1,0 +1,31 @@
+.version 45.3
+.class public super others/TestJavaWideLocalStore
+
+.method public static choose(J)J
+    .max stack 4
+    .max locals 260
+    lload 0
+    lstore 256
+    lload 256
+    lconst_1
+    lsub
+    lreturn
+.end method
+
+.method public check()V
+    .max stack 4
+    .max locals 0
+    lconst_1
+    lconst_1
+    ladd
+    invokestatic others/TestJavaWideLocalStore choose (J)J
+    lconst_1
+    lcmp
+    ifeq :DONE
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :DONE
+    return
+.end method

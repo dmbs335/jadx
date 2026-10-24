@@ -1,0 +1,29 @@
+.version 45.3
+.class public super others/TestJavaWideRet
+
+.method public static choose(I)I
+    .max stack 2
+    .max locals 258
+    jsr :SUB
+    iload 0
+    ireturn
+  :SUB
+    astore 256
+    iinc 0 1
+    ret 256
+.end method
+
+.method public check()V
+    .max stack 2
+    .max locals 0
+    iconst_4
+    invokestatic others/TestJavaWideRet choose (I)I
+    iconst_5
+    if_icmpeq :DONE
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :DONE
+    return
+.end method
