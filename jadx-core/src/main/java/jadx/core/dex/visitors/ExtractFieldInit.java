@@ -18,12 +18,15 @@ import jadx.api.plugins.input.insns.Opcode;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.FieldInitInsnAttr;
+import jadx.core.dex.attributes.nodes.MethodOverrideAttr;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.BaseInvokeNode;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.InvokeNode;
+import jadx.core.dex.instructions.InvokeType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -170,7 +173,7 @@ public class ExtractFieldInit extends AbstractVisitor {
 	private static boolean isIndirectStaticFieldReadBeforeWrite(ClassNode cls, MethodNode mth, FieldInitInfo target) {
 		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
 		return hasInsnBeforeFieldWrite(mth, target, innerInsn -> innerInsn instanceof BaseInvokeNode
-				&& methodReadsField(cls, ((BaseInvokeNode) innerInsn).getCallMth(), fieldInfo, InsnType.SGET, new HashSet<>()), false);
+				&& invocationReadsField(cls, (BaseInvokeNode) innerInsn, fieldInfo, InsnType.SGET, new HashSet<>()), false);
 	}
 
 	private static boolean isInstanceFieldReadBeforeWrite(ClassNode cls, MethodNode mth, FieldInitInfo target) {
@@ -178,8 +181,37 @@ public class ExtractFieldInit extends AbstractVisitor {
 		return hasInsnBeforeFieldWrite(mth, target, innerInsn -> innerInsn.getType() == InsnType.IGET
 				&& fieldInfo.equals(((IndexInsnNode) innerInsn).getIndex()), true)
 				|| hasInsnBeforeFieldWrite(mth, target, innerInsn -> innerInsn instanceof BaseInvokeNode
-						&& methodReadsField(cls, ((BaseInvokeNode) innerInsn).getCallMth(), fieldInfo, InsnType.IGET, new HashSet<>()),
+						&& invocationReadsField(cls, (BaseInvokeNode) innerInsn, fieldInfo, InsnType.IGET, new HashSet<>()),
 						false);
+	}
+
+	private static boolean invocationReadsField(ClassNode cls, BaseInvokeNode invoke, FieldInfo fieldInfo,
+			InsnType readType, Set<MethodInfo> visited) {
+		boolean virtualCall = invoke instanceof InvokeNode
+				&& (((InvokeNode) invoke).getInvokeType() == InvokeType.VIRTUAL
+						|| ((InvokeNode) invoke).getInvokeType() == InvokeType.INTERFACE);
+		return calledMethodReadsField(cls, invoke.getCallMth(), fieldInfo, readType, visited, virtualCall);
+	}
+
+	private static boolean calledMethodReadsField(ClassNode cls, MethodInfo calledMth, FieldInfo fieldInfo,
+			InsnType readType, Set<MethodInfo> visited, boolean virtualCall) {
+		if (methodReadsField(cls, calledMth, fieldInfo, readType, visited)) {
+			return true;
+		}
+		if (!virtualCall) {
+			return false;
+		}
+		MethodNode baseMth = cls.root().resolveMethod(calledMth);
+		MethodOverrideAttr overrideAttr = baseMth == null ? null : baseMth.get(AType.METHOD_OVERRIDE);
+		if (overrideAttr == null) {
+			return false;
+		}
+		for (MethodNode relatedMth : overrideAttr.getRelatedMthNodes()) {
+			if (methodReadsField(cls, relatedMth.getMethodInfo(), fieldInfo, readType, visited)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static boolean methodReadsField(ClassNode cls, MethodInfo calledMth, FieldInfo fieldInfo,
@@ -204,7 +236,7 @@ public class ExtractFieldInit extends AbstractVisitor {
 						return true;
 					}
 					if (innerInsn instanceof BaseInvokeNode
-							&& methodReadsField(cls, ((BaseInvokeNode) innerInsn).getCallMth(), fieldInfo, readType, visited)) {
+							&& invocationReadsField(cls, (BaseInvokeNode) innerInsn, fieldInfo, readType, visited)) {
 						return true;
 					}
 					return null;
@@ -236,7 +268,8 @@ public class ExtractFieldInit extends AbstractVisitor {
 			} else if (opcode.name().startsWith("INVOKE") && insnData.getIndexType() == InsnIndexType.METHOD_REF) {
 				insnData.decode();
 				MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
-				found[0] = methodReadsField(cls, calledMth, fieldInfo, readType, visited);
+				boolean virtualCall = opcode.name().startsWith("INVOKE_VIRTUAL") || opcode.name().startsWith("INVOKE_INTERFACE");
+				found[0] = calledMethodReadsField(cls, calledMth, fieldInfo, readType, visited, virtualCall);
 			}
 		});
 		return found[0];
