@@ -364,10 +364,12 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			TryCatchRegion widerRegion = (TryCatchRegion) children.get(i + 1);
 			TryCatchBlockAttr narrow = narrowRegion.getTryCatchBlock();
 			TryCatchBlockAttr wider = widerRegion.getTryCatchBlock();
+			// Sibling catch bodies are outside both protected ranges, so a terminal throw
+			// from the shared wider handler still propagates rather than being recaught.
 			if (narrow == null || wider == null || !overlapping.contains(narrow)
 					|| narrow.getOuterTryBlock() != wider
 					|| !hasNonThrowingTerminalReturnHandlers(narrow)
-					|| !hasNonThrowingTerminalReturnHandlers(wider)) {
+					|| !hasIndependentTerminalHandlers(wider)) {
 				continue;
 			}
 			for (ExceptionHandler handler : wider.getHandlers()) {

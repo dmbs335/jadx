@@ -1,0 +1,105 @@
+.version 49.0
+.class public trycatch/TestJavaOverlappingTypedCatchWiderThrow
+.super java/lang/Object
+
+.method public static test(I)I
+    .max stack 2
+    .max locals 2
+  :start
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchWiderThrow first (I)V
+  :middle
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchWiderThrow second (I)V
+  :end
+    .catch java/lang/IllegalArgumentException :start .. :middle goto :argument
+    .catch java/lang/IllegalStateException :start .. :end goto :state
+    iconst_0
+    ireturn
+  :argument
+    astore 1
+    iinc 0 1
+    iload 0
+    ireturn
+  :state
+    astore 1
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+.end method
+
+.method public check()V
+    .max stack 3
+    .max locals 1
+    iconst_1
+    invokestatic trycatch/TestJavaOverlappingTypedCatchWiderThrow test (I)I
+    iconst_2
+    if_icmpeq :first_state_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :first_state_case
+  :first_try_start
+    iconst_2
+    invokestatic trycatch/TestJavaOverlappingTypedCatchWiderThrow test (I)I
+    pop
+  :first_try_end
+    .catch java/lang/IllegalArgumentException :first_try_start .. :first_try_end goto :first_caught
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :first_caught
+    astore 0
+  :second_try_start
+    iconst_3
+    invokestatic trycatch/TestJavaOverlappingTypedCatchWiderThrow test (I)I
+    pop
+  :second_try_end
+    .catch java/lang/IllegalArgumentException :second_try_start .. :second_try_end goto :second_caught
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :second_caught
+    astore 0
+    return
+.end method
+
+.method private static first(I)V
+    .max stack 2
+    .max locals 1
+    iload 0
+    iconst_1
+    if_icmpeq :argument
+    iload 0
+    iconst_2
+    if_icmpeq :state
+    return
+  :argument
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+  :state
+    new java/lang/IllegalStateException
+    dup
+    invokespecial java/lang/IllegalStateException <init> ()V
+    athrow
+.end method
+
+.method private static second(I)V
+    .max stack 2
+    .max locals 1
+    iload 0
+    iconst_3
+    if_icmpne :done
+    new java/lang/IllegalStateException
+    dup
+    invokespecial java/lang/IllegalStateException <init> ()V
+    athrow
+  :done
+    return
+.end method
