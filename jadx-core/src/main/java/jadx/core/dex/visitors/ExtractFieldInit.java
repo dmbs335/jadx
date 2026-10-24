@@ -489,40 +489,54 @@ public class ExtractFieldInit extends AbstractVisitor {
 		if (codeReader == null) {
 			return false;
 		}
+		Set<Integer> aliases = new HashSet<>();
+		aliases.add(trackedReg);
 		boolean[] dispatch = { false };
 		codeReader.copy().visitInstructions(insnData -> {
 			// JVM stack register mappings depend on preceding load instructions.
 			insnData.decode();
-			if (dispatch[0] || !insnData.getOpcode().name().startsWith("INVOKE")
+			String opcodeName = insnData.getOpcode().name();
+			if (("MOVE_OBJECT".equals(opcodeName)
+					|| codeReader.getCodeFormat() == CodeFormat.JVM && "MOVE".equals(opcodeName)
+							&& (insnData.getOpcodeMnemonic().startsWith("aload")
+									|| insnData.getOpcodeMnemonic().startsWith("astore")
+									|| "dup".equals(insnData.getOpcodeMnemonic())))
+					&& insnData.getRegsCount() >= 2 && aliases.contains(insnData.getReg(1))) {
+				aliases.add(insnData.getReg(0));
+			}
+			if (dispatch[0] || !opcodeName.startsWith("INVOKE")
 					|| insnData.getIndexType() != InsnIndexType.METHOD_REF) {
 				return;
 			}
 			if (insnData.getRegsCount() == 0) {
 				return;
 			}
-			String opcodeName = insnData.getOpcode().name();
 			MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
 			MethodNode callee = cls.root().resolveMethod(calledMth);
-			if (opcodeName.startsWith("INVOKE_STATIC")) {
-				int operandIndex = 0;
-				int parameterReg = callee == null || callee.getCodeReader() == null ? 0 : getRawParameterStart(callee);
-				for (ArgType argType : calledMth.getArgumentsTypes()) {
-					if (operandIndex < insnData.getRegsCount() && insnData.getReg(operandIndex) == trackedReg) {
-						dispatch[0] = callee == null || callee.getCodeReader() == null
-								|| methodCallsOverridableMethod(cls, callee, parameterReg, visited);
-						if (dispatch[0]) {
-							return;
-						}
+			boolean staticCall = opcodeName.startsWith("INVOKE_STATIC");
+			boolean virtualCall = opcodeName.startsWith("INVOKE_VIRTUAL") || opcodeName.startsWith("INVOKE_INTERFACE");
+			int operandIndex = staticCall ? 0 : 1;
+			int parameterReg = callee == null || callee.getCodeReader() == null ? 0 : getRawParameterStart(callee);
+			for (ArgType argType : calledMth.getArgumentsTypes()) {
+				if (operandIndex < insnData.getRegsCount() && aliases.contains(insnData.getReg(operandIndex))) {
+					dispatch[0] = virtualCall && (callee == null
+							|| !callee.getAccessFlags().isFinal() && !callee.getParentClass().getAccessFlags().isFinal())
+							|| callee == null || callee.getCodeReader() == null
+							|| methodCallsOverridableMethod(cls, callee, parameterReg, visited);
+					if (dispatch[0]) {
+						return;
 					}
-					operandIndex += codeReader.getCodeFormat() == CodeFormat.JVM ? 1 : argType.getRegCount();
-					parameterReg += argType.getRegCount();
 				}
+				operandIndex += codeReader.getCodeFormat() == CodeFormat.JVM ? 1 : argType.getRegCount();
+				parameterReg += argType.getRegCount();
+			}
+			if (staticCall) {
 				return;
 			}
-			if (insnData.getReg(0) != trackedReg) {
+			if (!aliases.contains(insnData.getReg(0))) {
 				return;
 			}
-			if (opcodeName.startsWith("INVOKE_VIRTUAL") || opcodeName.startsWith("INVOKE_INTERFACE")) {
+			if (virtualCall) {
 				if (callee == null || !callee.getAccessFlags().isFinal()) {
 					dispatch[0] = true;
 					return;
