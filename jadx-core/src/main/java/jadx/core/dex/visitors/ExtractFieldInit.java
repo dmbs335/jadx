@@ -2,8 +2,10 @@ package jadx.core.dex.visitors;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -470,21 +472,23 @@ public class ExtractFieldInit extends AbstractVisitor {
 					&& calledMth.getDeclClass().getType().equals(cls.getSuperClass())) {
 				MethodNode superCtor = cls.root().resolveMethod(calledMth);
 				dispatch[0] = superCtor != null
-						&& constructorCallsOverridableMethod(cls, superCtor, new HashSet<>());
+						&& (superCtor.getCodeReader() == null
+								|| methodCallsOverridableMethod(cls, superCtor,
+										getRawThisRegister(superCtor, superCtor.getCodeReader()), new HashMap<>()));
 			}
 		});
 		return dispatch[0];
 	}
 
-	private static boolean constructorCallsOverridableMethod(ClassNode cls, MethodNode method, Set<MethodInfo> visited) {
-		if (!visited.add(method.getMethodInfo())) {
+	private static boolean methodCallsOverridableMethod(
+			ClassNode cls, MethodNode method, int trackedReg, Map<MethodInfo, Set<Integer>> visited) {
+		if (!visited.computeIfAbsent(method.getMethodInfo(), k -> new HashSet<>()).add(trackedReg)) {
 			return false;
 		}
 		ICodeReader codeReader = method.getCodeReader();
 		if (codeReader == null) {
 			return false;
 		}
-		int thisReg = getRawThisRegister(method, codeReader);
 		boolean[] dispatch = { false };
 		codeReader.copy().visitInstructions(insnData -> {
 			// JVM stack register mappings depend on preceding load instructions.
@@ -493,12 +497,31 @@ public class ExtractFieldInit extends AbstractVisitor {
 					|| insnData.getIndexType() != InsnIndexType.METHOD_REF) {
 				return;
 			}
-			if (insnData.getRegsCount() == 0 || insnData.getReg(0) != thisReg) {
+			if (insnData.getRegsCount() == 0) {
 				return;
 			}
 			String opcodeName = insnData.getOpcode().name();
 			MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
 			MethodNode callee = cls.root().resolveMethod(calledMth);
+			if (opcodeName.startsWith("INVOKE_STATIC")) {
+				int operandIndex = 0;
+				int parameterReg = callee == null || callee.getCodeReader() == null ? 0 : getRawParameterStart(callee);
+				for (ArgType argType : calledMth.getArgumentsTypes()) {
+					if (operandIndex < insnData.getRegsCount() && insnData.getReg(operandIndex) == trackedReg) {
+						dispatch[0] = callee == null || callee.getCodeReader() == null
+								|| methodCallsOverridableMethod(cls, callee, parameterReg, visited);
+						if (dispatch[0]) {
+							return;
+						}
+					}
+					operandIndex += codeReader.getCodeFormat() == CodeFormat.JVM ? 1 : argType.getRegCount();
+					parameterReg += argType.getRegCount();
+				}
+				return;
+			}
+			if (insnData.getReg(0) != trackedReg) {
+				return;
+			}
 			if (opcodeName.startsWith("INVOKE_VIRTUAL") || opcodeName.startsWith("INVOKE_INTERFACE")) {
 				if (callee == null || !callee.getAccessFlags().isFinal()) {
 					dispatch[0] = true;
@@ -508,14 +531,31 @@ public class ExtractFieldInit extends AbstractVisitor {
 			if (opcodeName.startsWith("INVOKE_DIRECT") || opcodeName.startsWith("INVOKE_SUPER")
 					|| opcodeName.startsWith("INVOKE_SPECIAL")
 					|| callee != null && callee.getAccessFlags().isFinal()) {
-				if (callee != null) {
-					dispatch[0] = constructorCallsOverridableMethod(cls, callee, visited);
+				if (callee != null && callee.getCodeReader() != null) {
+					dispatch[0] = methodCallsOverridableMethod(cls, callee,
+							getRawThisRegister(callee, callee.getCodeReader()), visited);
 				} else if (!"java.lang.Object".equals(calledMth.getDeclClass().getType().getObject())) {
 					dispatch[0] = true;
 				}
 			}
 		});
 		return dispatch[0];
+	}
+
+	private static int getRawParameterStart(MethodNode method) {
+		ICodeReader codeReader = method.getCodeReader();
+		if (codeReader.getCodeFormat() == CodeFormat.JVM) {
+			return 0;
+		}
+		int argsStartReg = codeReader.getArgsStartReg();
+		if (argsStartReg >= 0) {
+			return argsStartReg;
+		}
+		int pos = codeReader.getRegistersCount();
+		for (ArgType argType : method.getMethodInfo().getArgumentsTypes()) {
+			pos -= argType.getRegCount();
+		}
+		return pos;
 	}
 
 	private static int getRawThisRegister(MethodNode method, ICodeReader codeReader) {
