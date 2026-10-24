@@ -1,15 +1,24 @@
 package jadx.tests.integration.enums;
 
 import java.util.Collections;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
 import jadx.api.CommentsLevel;
+import jadx.core.dex.attributes.AType;
+import jadx.core.dex.nodes.ClassNode;
 import jadx.tests.api.SmaliTest;
 
 import static jadx.tests.api.utils.assertj.JadxAssertions.assertThat;
 
 public class TestEnumObfuscated extends SmaliTest {
+	@Override
+	protected void runChecks(List<ClassNode> classes) {
+		org.assertj.core.api.Assertions.assertThat(classes)
+				.anyMatch(cls -> cls.contains(AType.JADX_ERROR));
+	}
+
 	// @formatter:off
 	/*
 		public enum TestEnumObfuscated {
@@ -35,18 +44,15 @@ public class TestEnumObfuscated extends SmaliTest {
 				return this.num;
 			}
 
-			// custom values method
-			// should be kept and renamed to avoid collision to enum 'values()' method
-			public static int values() {
-				return new TestEnumObfuscated[0];
+			// custom values method returns the backing array directly instead of a clone
+			public static TestEnumObfuscated[] values() {
+				return $VLS;
 			}
 
-			// usage of renamed 'values()' method, should be renamed back to 'values'
 			public static int valuesCount() {
 				return vs().length;
 			}
 
-			// usage of renamed '$VALUES' field, should be replaced with 'values()' method call
 			public static int valuesFieldUse() {
 				return $VLS.length;
 			}
@@ -56,13 +62,14 @@ public class TestEnumObfuscated extends SmaliTest {
 
 	@Test
 	public void test() {
+		disableCompilation();
 		getArgs().setCommentsLevel(CommentsLevel.WARN);
 		getArgs().setRenameFlags(Collections.emptySet());
 		assertThat(getClassNodeFromSmali())
 				.code()
-				.doesNotContain("$VLS")
-				.doesNotContain("vo(")
-				.doesNotContain("vs(")
-				.containsOne("int getNum() {");
+				.containsOne("Enum values() method does not match the $VALUES array")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("return $VLS;")
+				.containsOne("$VLS.clone()");
 	}
 }

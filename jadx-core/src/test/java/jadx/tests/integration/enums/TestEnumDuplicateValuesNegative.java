@@ -59,4 +59,15 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 				.containsOne("JADX ERROR: Failed to restore enum class")
 				.containsOne("class TestEnumNameMismatchNegative extends Enum");
 	}
+
+	@Test
+	public void testCustomValuesArray() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumCustomValuesNegative"))
+				.code()
+				.containsOne("Enum values() method does not match the $VALUES array")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumCustomValuesNegative extends Enum")
+				.containsOne("SPECIAL.clone()");
+	}
 }

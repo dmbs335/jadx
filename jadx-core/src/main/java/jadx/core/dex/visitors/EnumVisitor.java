@@ -213,6 +213,10 @@ public class EnumVisitor extends AbstractVisitor {
 				}
 			}
 		}
+		if (!isCompatibleValuesMethod(cls, data.valuesField)) {
+			cls.addWarnComment("Enum values() method does not match the $VALUES array");
+			return false;
+		}
 		data.toRemove.add(data.valuesInitInsn);
 
 		// all checks complete, perform transform
@@ -1324,8 +1328,22 @@ public class EnumVisitor extends AbstractVisitor {
 		return null;
 	}
 
+	private boolean isCompatibleValuesMethod(ClassNode cls, FieldNode valuesField) {
+		ArgType clsType = cls.getClassInfo().getType();
+		String valuesMethodShortId = "values()" + TypeGen.signature(ArgType.array(clsType));
+		for (MethodNode mth : cls.getMethods()) {
+			if (mth.getMethodInfo().getShortId().equals(valuesMethodShortId)
+					&& !mth.isNoCode()
+					&& !isValuesMethod(mth, clsType, valuesField.getFieldInfo())) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	private void removeEnumMethods(ClassNode cls, FieldNode valuesField) {
 		ArgType clsType = cls.getClassInfo().getType();
+		FieldInfo valuesFieldInfo = valuesField.getFieldInfo();
 		String valuesMethodShortId = "values()" + TypeGen.signature(ArgType.array(clsType));
 		MethodNode valuesMethod = null;
 		// remove compiler generated methods
@@ -1347,7 +1365,7 @@ public class EnumVisitor extends AbstractVisitor {
 					mth.add(AFlag.DONT_GENERATE);
 				}
 			} else if (mi.getShortId().equals(valuesMethodShortId)) {
-				if (isValuesMethod(mth, clsType)) {
+				if (isValuesMethod(mth, clsType, valuesFieldInfo)) {
 					valuesMethod = mth;
 					mth.add(AFlag.DONT_GENERATE);
 				} else {
@@ -1355,7 +1373,7 @@ public class EnumVisitor extends AbstractVisitor {
 					mth.getMethodInfo().setAlias("valuesCustom");
 					mth.addAttr(new RenameReasonAttr(mth).append("to resolve conflict with enum method"));
 				}
-			} else if (isValuesMethod(mth, clsType)) {
+			} else if (isValuesMethod(mth, clsType, valuesFieldInfo)) {
 				if (!mth.getMethodInfo().getAlias().equals("values") && !mth.getUseIn().isEmpty()) {
 					// rename to use default values method
 					mth.getMethodInfo().setAlias("values");
@@ -1368,7 +1386,6 @@ public class EnumVisitor extends AbstractVisitor {
 				mth.add(AFlag.DONT_GENERATE);
 			}
 		}
-		FieldInfo valuesFieldInfo = valuesField.getFieldInfo();
 		for (MethodNode mth : cls.getMethods()) {
 			// fix access to 'values' field and 'values()' method
 			fixValuesAccess(mth, valuesFieldInfo, clsType, valuesMethod);
@@ -1394,7 +1411,7 @@ public class EnumVisitor extends AbstractVisitor {
 	}
 
 	// TODO: support other method patterns ???
-	private boolean isValuesMethod(MethodNode mth, ArgType clsType) {
+	private boolean isValuesMethod(MethodNode mth, ArgType clsType, FieldInfo valuesFieldInfo) {
 		ArgType retType = mth.getReturnType();
 		if (!retType.isArray() || !retType.getArrayElement().equals(clsType)) {
 			return false;
@@ -1407,7 +1424,30 @@ public class EnumVisitor extends AbstractVisitor {
 		IndexInsnNode castInsn = (IndexInsnNode) checkInsnType(wrappedInsn, InsnType.CHECK_CAST);
 		if (castInsn != null && Objects.equals(castInsn.getIndex(), ArgType.array(clsType))) {
 			InvokeNode invokeInsn = (InvokeNode) checkInsnType(getWrappedInsn(getSingleArg(castInsn)), InsnType.INVOKE);
-			return invokeInsn != null && invokeInsn.getCallMth().equals(cloneMth);
+			return invokeInsn != null
+					&& invokeInsn.getCallMth().equals(cloneMth)
+					&& isValuesFieldRead(invokeInsn.getInstanceArg(), valuesFieldInfo);
+		}
+		return false;
+	}
+
+	private boolean isValuesFieldRead(@Nullable InsnArg arg, FieldInfo valuesFieldInfo) {
+		Set<InsnNode> seen = new HashSet<>();
+		while (arg != null) {
+			InsnNode insn = getWrappedInsn(arg);
+			if (insn == null && arg.isRegister()) {
+				insn = ((RegisterArg) arg).getAssignInsn();
+			}
+			if (insn == null || !seen.add(insn)) {
+				return false;
+			}
+			if (insn.getType() == InsnType.SGET) {
+				return Objects.equals(((IndexInsnNode) insn).getIndex(), valuesFieldInfo);
+			}
+			if (insn.getType() != InsnType.MOVE || insn.getArgsCount() != 1) {
+				return false;
+			}
+			arg = insn.getArg(0);
 		}
 		return false;
 	}
