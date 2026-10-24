@@ -714,7 +714,13 @@ public class SimplifyVisitor extends AbstractVisitor {
 				return newInsn;
 			}
 			int argsCount = wrap.getArgsCount();
-			InsnNode concat = new InsnNode(InsnType.STR_CONCAT, argsCount - 1);
+			// Removing the leading field changes Java '+' evaluation if the next
+			// operands are numeric: field + 1 + 2 is not field += 1 + 2.
+			boolean addStringPrefix = argsCount > 2 && !wrap.getArg(1).getType().equals(ArgType.STRING);
+			InsnNode concat = new InsnNode(InsnType.STR_CONCAT, argsCount - 1 + (addStringPrefix ? 1 : 0));
+			if (addStringPrefix) {
+				concat.addArg(InsnArg.wrapArg(new ConstStringNode("")));
+			}
 			for (int i = 1; i < argsCount; i++) {
 				concat.addArg(wrap.getArg(i).duplicate());
 			}
