@@ -1,5 +1,7 @@
 package jadx.core.dex.instructions;
 
+import java.util.Objects;
+
 import org.jetbrains.annotations.Nullable;
 
 import jadx.api.plugins.input.insns.InsnData;
@@ -115,7 +117,7 @@ public class ArithNode extends InsnNode {
 			return false;
 		}
 		ArithNode other = (ArithNode) obj;
-		return op == other.op && isSameLiteral(other);
+		return op == other.op && Objects.equals(opcodeType, other.opcodeType) && isSameLiteral(other);
 	}
 
 	private boolean isSameLiteral(ArithNode other) {

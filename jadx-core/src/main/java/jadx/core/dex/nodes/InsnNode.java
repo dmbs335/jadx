@@ -404,10 +404,10 @@ public class InsnNode extends LineAttrNode {
 		for (int i = 0; i < size; i++) {
 			InsnArg arg = arguments.get(i);
 			InsnArg otherArg = other.arguments.get(i);
+			if (arg.isInsnWrap() != otherArg.isInsnWrap()) {
+				return false;
+			}
 			if (arg.isInsnWrap()) {
-				if (!otherArg.isInsnWrap()) {
-					return false;
-				}
 				InsnNode wrapInsn = ((InsnWrapArg) arg).getWrapInsn();
 				InsnNode otherWrapInsn = ((InsnWrapArg) otherArg).getWrapInsn();
 				if (!wrapInsn.isSame(otherWrapInsn)) {
