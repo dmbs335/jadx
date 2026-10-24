@@ -2,6 +2,7 @@ package jadx.core.dex.visitors.regions;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -10,6 +11,7 @@ import java.util.Map;
 import java.util.Set;
 
 import jadx.api.plugins.input.data.CodeFormat;
+import jadx.api.plugins.input.data.ITry;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.LoopInfo;
@@ -59,6 +61,9 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		if (tryBlocks.isEmpty()) {
 			return;
 		}
+		List<InterleavedJvmCatch> interleavedJvmCatches = mth.getCodeReader().getCodeFormat() == CodeFormat.JVM
+				? findInterleavedJvmCatches(mth, mth.getCodeReader().getTries())
+				: Collections.emptyList();
 		TryCatchBlockAttr splitTryBlock = tryBlocks.size() == 1 ? tryBlocks.get(0) : null;
 		boolean repeatableRetryHandler = splitTryBlock != null
 				&& hasRepeatableCoroutineRetryHandler(mth, splitTryBlock);
@@ -114,12 +119,18 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		// so recomputing it mid-traversal can strand later protected fragments in another case.
 		DepthRegionTraversal.traverseIncludingExcHandlers(mth, (regionMth, region) -> {
 			boolean changed = checkAndWrap(regionMth, tryBlocks, wrapBudgets, region, exactScopes,
-					repeatedStableReturnHandler);
+					repeatedStableReturnHandler, interleavedJvmCatches);
 			return changed && !tryBlocks.isEmpty();
 		});
 		restoreNestedCatchOrder(mth, mth.getRegion());
 		if (mth.getCodeReader().getCodeFormat() == CodeFormat.JVM) {
 			moveSharedCatchTails(mth.getRegion());
+			if (!interleavedJvmCatches.isEmpty()) {
+				restoreSharedTypedHandlerForNarrowCatch(mth.getRegion(), interleavedJvmCatches);
+				if (interleavedJvmCatches.stream().anyMatch(candidate -> !candidate.repaired)) {
+					mth.addError("Unsupported interleaved JVM exception-table ranges: catch-all scope may be widened", null);
+				}
+			}
 		}
 		// Evaluate coverage only after wrapping is finished. Nested descriptors may
 		// still be covered by an outer region during the traversal.
@@ -137,6 +148,180 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 				mth.addError("Incorrect try/catch scope: unprotected throwing code was included in handler scope", null);
 			}
 		}
+	}
+
+	/**
+	 * JVM table order A/B/A: a narrow typed range, a wider typed range, then a
+	 * catch-all for the narrow range. B must catch exceptions from both sites,
+	 * while the final A handler must not catch exceptions from B's wider tail.
+	 */
+	private static final class InterleavedJvmCatch {
+		private final int start;
+		private final int end;
+		private final int[] widerHandlers;
+		private boolean repaired;
+
+		private InterleavedJvmCatch(int start, int end, int[] widerHandlers) {
+			this.start = start;
+			this.end = end;
+			this.widerHandlers = widerHandlers;
+		}
+	}
+
+	private static List<InterleavedJvmCatch> findInterleavedJvmCatches(MethodNode mth, List<ITry> tries) {
+		List<InterleavedJvmCatch> result = new ArrayList<>();
+		for (int i = 0; i < tries.size(); i++) {
+			ITry first = tries.get(i);
+			if (first.getCatch().getHandlers().length == 0 || first.getCatch().getCatchAllHandler() != -1) {
+				continue;
+			}
+			int laterCatchAll = -1;
+			for (int k = i + 1; k < tries.size(); k++) {
+				ITry last = tries.get(k);
+				if (last.getStartOffset() == first.getStartOffset()
+						&& last.getEndOffset() == first.getEndOffset()
+						&& last.getCatch().getCatchAllHandler() != -1) {
+					laterCatchAll = k;
+					break;
+				}
+			}
+			for (int j = i + 1; j < laterCatchAll; j++) {
+				ITry wider = tries.get(j);
+				if (first.getStartOffset() < wider.getStartOffset()
+						|| first.getEndOffset() > wider.getEndOffset()
+						|| (first.getStartOffset() == wider.getStartOffset()
+								&& first.getEndOffset() == wider.getEndOffset())
+						|| !hasReachableWiderHandler(mth, first, wider)) {
+					continue;
+				}
+				int[] widerHandlers = wider.getCatch().getHandlers();
+				int[] targets = widerHandlers.length != 0 && wider.getCatch().getCatchAllHandler() == -1
+						? widerHandlers
+						: new int[0];
+				boolean duplicate = false;
+				for (InterleavedJvmCatch found : result) {
+					if (found.start == first.getStartOffset() && found.end == first.getEndOffset()
+							&& Arrays.equals(found.widerHandlers, targets)) {
+						duplicate = true;
+						break;
+					}
+				}
+				if (!duplicate) {
+					result.add(new InterleavedJvmCatch(first.getStartOffset(), first.getEndOffset(), targets.clone()));
+				}
+			}
+		}
+		return result;
+	}
+
+	private static boolean hasReachableWiderHandler(MethodNode mth, ITry first, ITry wider) {
+		for (String widerTypeName : wider.getCatch().getTypes()) {
+			ClassInfo widerType = ClassInfo.fromName(mth.root(), widerTypeName);
+			boolean shadowed = false;
+			for (String firstTypeName : first.getCatch().getTypes()) {
+				ClassInfo firstType = ClassInfo.fromName(mth.root(), firstTypeName);
+				if (mth.root().getTypeCompare().compareTypes(firstType, widerType).isWiderOrEqual()) {
+					shadowed = true;
+					break;
+				}
+			}
+			if (!shadowed) {
+				return true;
+			}
+		}
+		return wider.getCatch().getCatchAllHandler() != -1;
+	}
+
+	/**
+	 * Duplicate the shared terminal catch only when both emitted sibling scopes match the input table.
+	 */
+	private static void restoreSharedTypedHandlerForNarrowCatch(IRegion region, List<InterleavedJvmCatch> patterns) {
+		for (IContainer child : region.getSubBlocks()) {
+			if (child instanceof IRegion) {
+				restoreSharedTypedHandlerForNarrowCatch((IRegion) child, patterns);
+			}
+		}
+		if (!(region instanceof Region)) {
+			return;
+		}
+		List<IContainer> children = region.getSubBlocks();
+		for (int i = 0; i < children.size(); i++) {
+			if (!(children.get(i) instanceof TryCatchRegion)) {
+				continue;
+			}
+			TryCatchRegion widerRegion = (TryCatchRegion) children.get(i);
+			if (!(widerRegion.getTryRegion() instanceof Region)) {
+				continue;
+			}
+			Region widerBody = (Region) widerRegion.getTryRegion();
+			List<IContainer> widerChildren = widerBody.getSubBlocks();
+			if (widerChildren.size() < 2 || !(widerChildren.get(0) instanceof TryCatchRegion)) {
+				continue;
+			}
+			TryCatchRegion narrowRegion = (TryCatchRegion) widerChildren.get(0);
+			TryCatchBlockAttr narrow = narrowRegion.getTryCatchBlock();
+			TryCatchBlockAttr wider = widerRegion.getTryCatchBlock();
+			if (narrow == null || wider == null || widerChildren.subList(1, widerChildren.size()).stream()
+					.anyMatch(child -> containsProtectedBlock(child, narrow)
+							|| !hasOnlyProtectedThrowingCode(child, wider, new IdentityHashMap<>()))) {
+				continue;
+			}
+			if (addSharedHandlersToNarrowCatch(narrowRegion, widerRegion, patterns)) {
+				widerChildren.remove(0);
+				children.add(i, narrowRegion);
+				narrowRegion.setParent(region);
+				i++;
+			}
+		}
+		for (int i = 0; i + 1 < children.size(); i++) {
+			if (!(children.get(i) instanceof TryCatchRegion)
+					|| !(children.get(i + 1) instanceof TryCatchRegion)) {
+				continue;
+			}
+			TryCatchRegion narrowRegion = (TryCatchRegion) children.get(i);
+			TryCatchRegion widerRegion = (TryCatchRegion) children.get(i + 1);
+			addSharedHandlersToNarrowCatch(narrowRegion, widerRegion, patterns);
+		}
+	}
+
+	private static boolean addSharedHandlersToNarrowCatch(
+			TryCatchRegion narrowRegion, TryCatchRegion widerRegion, List<InterleavedJvmCatch> patterns) {
+		TryCatchBlockAttr narrow = narrowRegion.getTryCatchBlock();
+		TryCatchBlockAttr wider = widerRegion.getTryCatchBlock();
+		if (narrow == null || wider == null || narrow.getBlocks().size() != 1
+				|| wider.getBlocks().size() <= narrow.getBlocks().size()
+				|| !wider.getBlocks().containsAll(narrow.getBlocks())
+				|| !hasCatchAllHandler(narrow)
+				|| wider.getHandlers().isEmpty()
+				|| wider.getHandlers().stream().anyMatch(ExceptionHandler::isCatchAll)
+				|| !hasTerminalReturnHandlers(wider)) {
+			return false;
+		}
+		int start = narrow.getBlocks().get(0).getStartOffset();
+		int[] handlerTargets = wider.getHandlers().stream()
+				.mapToInt(ExceptionHandler::getHandlerOffset).toArray();
+		boolean protectedBySharedHandler = wider.getHandlers().stream()
+				.allMatch(handler -> handler.getHandlerRegion() != null
+						&& narrow.getBlocks().get(0).getInstructions().stream().anyMatch(insn -> {
+							CatchAttr catchAttr = insn.get(AType.EXC_CATCH);
+							return catchAttr != null && catchAttr.getHandlers().contains(handler);
+						}));
+		if (!protectedBySharedHandler) {
+			return false;
+		}
+		for (InterleavedJvmCatch pattern : patterns) {
+			if (!pattern.repaired && pattern.start == start
+					&& Arrays.equals(pattern.widerHandlers, handlerTargets)
+					&& narrow.getBlocks().get(0).getInstructions().stream()
+							.allMatch(insn -> insn.getOffset() <= pattern.end)) {
+				for (ExceptionHandler handler : wider.getHandlers()) {
+					narrowRegion.addCatchHandler(handler);
+				}
+				pattern.repaired = true;
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -2278,7 +2463,8 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			MethodNode mth,
 			List<TryCatchBlockAttr> tryBlocks,
 			Map<TryCatchBlockAttr, Integer> wrapBudgets,
-			IRegion region, Map<TryCatchBlockAttr, Boolean> exactScopes, boolean repeatedStableReturnHandler) {
+			IRegion region, Map<TryCatchBlockAttr, Boolean> exactScopes,
+			boolean repeatedStableReturnHandler, List<InterleavedJvmCatch> interleavedJvmCatches) {
 		// search top splitter block in this region (don't need to go deeper)
 		for (TryCatchBlockAttr tb : tryBlocks) {
 			if (tb.getOuterTryBlock() != null && tryBlocks.contains(tb.getOuterTryBlock())
@@ -2294,7 +2480,7 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			BlockNode topSplitter = tb.getTopSplitter();
 			if (region.getSubBlocks().contains(topSplitter) && containsProtectedBlock(region, tb)) {
 				int unwrappedBefore = countAllUnwrappedProtectedOccurrences(mth, tb);
-				if (wrapBlocks(region, tb, topSplitter, tbExactScope)) {
+				if (wrapBlocks(region, tb, topSplitter, tbExactScope, interleavedJvmCatches)) {
 					if (!keepForDuplicateWrap(mth, tb, wrapBudgets, unwrappedBefore)) {
 						tryBlocks.remove(tb);
 					}
@@ -2312,7 +2498,7 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 					repeatedStableReturnHandler);
 			if (protectedAnchor != null) {
 				int unwrappedBefore = countAllUnwrappedProtectedOccurrences(mth, tb);
-				if (!wrapBlocks(region, tb, protectedAnchor, tbExactScope)) {
+				if (!wrapBlocks(region, tb, protectedAnchor, tbExactScope, interleavedJvmCatches)) {
 					if (tbExactScope) {
 						continue;
 					}
@@ -2608,15 +2794,20 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 	 * Extract all block dominated by 'dominator' to separate region and mark as try/catch block
 	 */
 	static boolean wrapBlocks(IRegion replaceRegion, TryCatchBlockAttr tb, BlockNode dominator, boolean exactScope) {
+		return wrapBlocks(replaceRegion, tb, dominator, exactScope, Collections.emptyList());
+	}
+
+	private static boolean wrapBlocks(IRegion replaceRegion, TryCatchBlockAttr tb, BlockNode dominator,
+			boolean exactScope, List<InterleavedJvmCatch> interleavedJvmCatches) {
 		if (replaceRegion == null) {
 			return false;
 		}
 		if (replaceRegion instanceof LoopRegion) {
 			LoopRegion loop = (LoopRegion) replaceRegion;
-			return wrapBlocks(loop.getBody(), tb, dominator, exactScope);
+			return wrapBlocks(loop.getBody(), tb, dominator, exactScope, interleavedJvmCatches);
 		}
 		if (replaceRegion instanceof IBranchRegion) {
-			return wrapBlocks(replaceRegion.getParent(), tb, dominator, exactScope);
+			return wrapBlocks(replaceRegion.getParent(), tb, dominator, exactScope, interleavedJvmCatches);
 		}
 		// Tail splitting mutates the region tree. Reject an anchor outside this direct
 		// sequence before splitting, otherwise a failed speculative wrap leaves moved
@@ -2626,7 +2817,8 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		}
 
 		Region tryRegion = new Region(replaceRegion);
-		boolean narrowNestedTail = !exactScope && hasSingleProtectedNestedTryTail(replaceRegion, tb, dominator);
+		boolean narrowNestedTail = !exactScope
+				&& hasSingleProtectedNestedTryTail(replaceRegion, tb, dominator, interleavedJvmCatches);
 		boolean adjacentForeignTry = hasFollowingUnprotectedTry(replaceRegion, tb, dominator);
 		boolean splitProtectedTail = isResourceSuppressionTry(tb)
 				|| hasFinallyTailBoundary(tb)
@@ -2745,8 +2937,14 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 
 	/** Keep an unprotected throwing continuation outside a nested single-site catch. */
 	private static boolean hasSingleProtectedNestedTryTail(
-			IRegion region, TryCatchBlockAttr tb, BlockNode dominator) {
-		if (!isSimpleNestedSingleSiteCatch(tb)) {
+			IRegion region, TryCatchBlockAttr tb, BlockNode dominator,
+			List<InterleavedJvmCatch> interleavedJvmCatches) {
+		boolean interleavedSite = tb.getBlocks().size() == 1
+				&& hasCatchAllHandler(tb) && hasTerminalReturnHandlers(tb)
+				&& interleavedJvmCatches.stream()
+						.anyMatch(pattern -> pattern.start == tb.getBlocks().get(0).getStartOffset());
+		if (!isSimpleNestedSingleSiteCatch(tb)
+				&& !interleavedSite) {
 			return false;
 		}
 		List<IContainer> children = region.getSubBlocks();

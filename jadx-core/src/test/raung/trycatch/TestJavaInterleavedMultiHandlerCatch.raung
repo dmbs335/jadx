@@ -1,0 +1,78 @@
+.version 49.0
+.class public trycatch/TestJavaInterleavedMultiHandlerCatch
+.super java/lang/Object
+
+.method public <init>()V
+    .max stack 1
+    .max locals 1
+    aload 0
+    invokespecial java/lang/Object <init> ()V
+    return
+.end method
+
+.method public static test()I
+    .max stack 1
+    .max locals 1
+
+  :try_start
+    invokestatic trycatch/TestJavaInterleavedMultiHandlerCatch first ()V
+  :middle
+    invokestatic trycatch/TestJavaInterleavedMultiHandlerCatch second ()V
+  :try_end
+    .catch java/lang/IllegalArgumentException :try_start .. :middle goto :argument_handler
+    .catch java/lang/IllegalStateException :try_start .. :try_end goto :state_handler
+    .catch java/lang/RuntimeException :try_start .. :try_end goto :runtime_handler
+    .catch all :try_start .. :middle goto :all_handler
+    iconst_0
+    ireturn
+
+  :argument_handler
+    astore 0
+    iconst_1
+    ireturn
+
+  :state_handler
+    astore 0
+    iconst_2
+    ireturn
+
+  :runtime_handler
+    astore 0
+    iconst_3
+    ireturn
+
+  :all_handler
+    astore 0
+    iconst_4
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 2
+    .max locals 0
+    invokestatic trycatch/TestJavaInterleavedMultiHandlerCatch test ()I
+    iconst_3
+    isub
+    ifeq :ok
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :ok
+    return
+.end method
+
+.method private static first()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static second()V
+    .max stack 2
+    .max locals 0
+    new java/lang/NullPointerException
+    dup
+    invokespecial java/lang/NullPointerException <init> ()V
+    athrow
+.end method
