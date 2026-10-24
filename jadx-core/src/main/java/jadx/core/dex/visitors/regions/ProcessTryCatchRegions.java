@@ -255,6 +255,49 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			}
 			Region widerBody = (Region) widerRegion.getTryRegion();
 			List<IContainer> widerChildren = widerBody.getSubBlocks();
+			int nestedIndex = -1;
+			for (int j = 0; j < widerChildren.size(); j++) {
+				if (widerChildren.get(j) instanceof TryCatchRegion) {
+					if (nestedIndex != -1) {
+						nestedIndex = -1;
+						break;
+					}
+					nestedIndex = j;
+				}
+			}
+			if (nestedIndex > 0 && nestedIndex + 1 < widerChildren.size()) {
+				TryCatchRegion narrowRegion = (TryCatchRegion) widerChildren.get(nestedIndex);
+				TryCatchBlockAttr narrow = narrowRegion.getTryCatchBlock();
+				TryCatchBlockAttr wider = widerRegion.getTryCatchBlock();
+				if (narrow != null && wider != null
+						&& widerChildren.subList(0, nestedIndex).stream().anyMatch(child -> containsProtectedBlock(child, wider))
+						&& widerChildren.subList(nestedIndex + 1, widerChildren.size()).stream()
+								.anyMatch(child -> containsProtectedBlock(child, wider))) {
+					boolean safeSiblings = true;
+					for (int j = 0; j < widerChildren.size(); j++) {
+						if (j != nestedIndex && (containsProtectedBlock(widerChildren.get(j), narrow)
+								|| !hasOnlyProtectedThrowingCode(widerChildren.get(j), wider, new IdentityHashMap<>()))) {
+							safeSiblings = false;
+							break;
+						}
+					}
+					if (safeSiblings && addSharedHandlersToNarrowCatch(narrowRegion, widerRegion, patterns)) {
+						Region prefixBody = new Region(region);
+						for (IContainer prefixChild : new ArrayList<>(widerChildren.subList(0, nestedIndex))) {
+							prefixBody.add(prefixChild);
+						}
+						widerChildren.subList(0, nestedIndex + 1).clear();
+						TryCatchRegion prefixRegion = new TryCatchRegion(region, prefixBody);
+						prefixBody.setParent(prefixRegion);
+						prefixRegion.setTryCatchBlock(wider);
+						children.add(i, prefixRegion);
+						children.add(i + 1, narrowRegion);
+						narrowRegion.setParent(region);
+						i += 2;
+						continue;
+					}
+				}
+			}
 			if (widerChildren.size() < 2 || !(widerChildren.get(0) instanceof TryCatchRegion)) {
 				continue;
 			}
@@ -294,7 +337,7 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 				|| !hasCatchAllHandler(narrow)
 				|| wider.getHandlers().isEmpty()
 				|| wider.getHandlers().stream().anyMatch(ExceptionHandler::isCatchAll)
-				|| !hasTerminalReturnHandlers(wider)) {
+				|| !hasIndependentTerminalHandlers(wider)) {
 			return false;
 		}
 		int start = narrow.getBlocks().get(0).getStartOffset();
@@ -1819,6 +1862,23 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			if (handler.isFinally()
 					|| handlerExitKinds(handler.getHandlerRegion(), new IdentityHashMap<>(),
 							Collections.newSetFromMap(new IdentityHashMap<>())) != HANDLER_RETURN) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean hasIndependentTerminalHandlers(TryCatchBlockAttr tryBlock) {
+		if (tryBlock.getHandlers().isEmpty()) {
+			return false;
+		}
+		for (ExceptionHandler handler : tryBlock.getHandlers()) {
+			if (handler.isFinally()) {
+				return false;
+			}
+			int exitKinds = handlerExitKinds(handler.getHandlerRegion(), new IdentityHashMap<>(),
+					Collections.newSetFromMap(new IdentityHashMap<>()));
+			if (exitKinds == 0 || (exitKinds & ~(HANDLER_RETURN | HANDLER_THROW)) != 0) {
 				return false;
 			}
 		}

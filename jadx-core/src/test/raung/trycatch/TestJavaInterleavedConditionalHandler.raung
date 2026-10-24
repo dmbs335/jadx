@@ -1,0 +1,81 @@
+.version 49.0
+.class public trycatch/TestJavaInterleavedConditionalHandler
+.super java/lang/Object
+
+.method public <init>()V
+    .max stack 1
+    .max locals 1
+    aload 0
+    invokespecial java/lang/Object <init> ()V
+    return
+.end method
+
+.method public static test()I
+    .max stack 2
+    .max locals 1
+
+  :try_start
+    invokestatic trycatch/TestJavaInterleavedConditionalHandler first ()V
+  :middle
+    invokestatic trycatch/TestJavaInterleavedConditionalHandler second ()V
+  :try_end
+    .catch java/lang/IllegalArgumentException :try_start .. :middle goto :argument_handler
+    .catch java/lang/IllegalStateException :try_start .. :try_end goto :state_handler
+    .catch all :try_start .. :middle goto :all_handler
+    iconst_0
+    ireturn
+
+  :argument_handler
+    astore 0
+    iconst_1
+    ireturn
+
+  :state_handler
+    astore 0
+    aload 0
+    invokevirtual java/lang/Throwable getMessage ()Ljava/lang/String;
+    ifnull :return_from_state
+    aload 0
+    athrow
+  :return_from_state
+    iconst_2
+    ireturn
+
+  :all_handler
+    astore 0
+    iconst_3
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 2
+    .max locals 1
+  :call_start
+    invokestatic trycatch/TestJavaInterleavedConditionalHandler test ()I
+    pop
+  :call_end
+    .catch java/lang/IllegalStateException :call_start .. :call_end goto :expected
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :expected
+    astore 0
+    return
+.end method
+
+.method private static first()V
+    .max stack 3
+    .max locals 0
+    new java/lang/IllegalStateException
+    dup
+    ldc "interleaved"
+    invokespecial java/lang/IllegalStateException <init> (Ljava/lang/String;)V
+    athrow
+.end method
+
+.method private static second()V
+    .max stack 0
+    .max locals 0
+    return
+.end method

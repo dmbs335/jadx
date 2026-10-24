@@ -1,0 +1,124 @@
+.version 49.0
+.class public trycatch/TestJavaInterleavedWiderPrefixBranchBlocked
+.super java/lang/Object
+
+.method public <init>()V
+    .max stack 1
+    .max locals 1
+    aload 0
+    invokespecial java/lang/Object <init> ()V
+    return
+.end method
+
+.method public static test(I)I
+    .max stack 2
+    .max locals 2
+
+  :wide_start
+    iload 0
+    ifne :after_prefix
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked state ()V
+  :after_prefix
+    nop
+  :narrow_start
+    iload 0
+    iconst_1
+    isub
+    ifne :after_narrow
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked state ()V
+  :after_narrow
+    nop
+  :narrow_end
+    iload 0
+    iconst_2
+    isub
+    ifne :after_tail
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked nullPointer ()V
+  :after_tail
+    nop
+  :wide_end
+    .catch java/lang/IllegalArgumentException :narrow_start .. :narrow_end goto :argument_handler
+    .catch java/lang/IllegalStateException :wide_start .. :wide_end goto :state_handler
+    .catch all :narrow_start .. :narrow_end goto :all_handler
+    iconst_0
+    ireturn
+
+  :argument_handler
+    astore 1
+    iconst_1
+    ireturn
+
+  :state_handler
+    astore 1
+    iconst_2
+    ireturn
+
+  :all_handler
+    astore 1
+    iconst_3
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 2
+    .max locals 1
+    iconst_0
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked test (I)I
+    iconst_2
+    isub
+    ifeq :prefix_ok
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :prefix_ok
+    iconst_1
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked test (I)I
+    iconst_2
+    isub
+    ifeq :narrow_ok
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :narrow_ok
+  :tail_start
+    iconst_2
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked test (I)I
+    pop
+  :tail_end
+    .catch java/lang/NullPointerException :tail_start .. :tail_end goto :tail_ok
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :tail_ok
+    astore 0
+    iconst_3
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked test (I)I
+    ifeq :done
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :done
+    return
+.end method
+
+.method private static state()V
+    .max stack 2
+    .max locals 0
+    new java/lang/IllegalStateException
+    dup
+    invokespecial java/lang/IllegalStateException <init> ()V
+    athrow
+.end method
+
+.method private static nullPointer()V
+    .max stack 2
+    .max locals 0
+    new java/lang/NullPointerException
+    dup
+    invokespecial java/lang/NullPointerException <init> ()V
+    athrow
+.end method

@@ -1,0 +1,169 @@
+.version 49.0
+.class public trycatch/TestJavaInterleavedWiderPrefixCatch
+.super java/lang/Object
+
+.method public <init>()V
+    .max stack 1
+    .max locals 1
+    aload 0
+    invokespecial java/lang/Object <init> ()V
+    return
+.end method
+
+.method public static test()I
+    .max stack 2
+    .max locals 1
+
+  :wide_start
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch prefix ()V
+  :narrow_start
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch first ()V
+  :narrow_end
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch second ()V
+  :wide_end
+    .catch java/lang/IllegalArgumentException :narrow_start .. :narrow_end goto :argument_handler
+    .catch java/lang/IllegalStateException :wide_start .. :wide_end goto :state_handler
+    .catch all :narrow_start .. :narrow_end goto :all_handler
+    iconst_0
+    ireturn
+
+  :argument_handler
+    astore 0
+    iconst_1
+    ireturn
+
+  :state_handler
+    astore 0
+    iconst_2
+    ireturn
+
+  :all_handler
+    astore 0
+    iconst_3
+    ireturn
+.end method
+
+.method public static testPrefix()I
+    .max stack 2
+    .max locals 1
+
+  :wide_start
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch first ()V
+  :narrow_start
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch prefix ()V
+  :narrow_end
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch prefix ()V
+  :wide_end
+    .catch java/lang/IllegalArgumentException :narrow_start .. :narrow_end goto :argument_handler
+    .catch java/lang/IllegalStateException :wide_start .. :wide_end goto :state_handler
+    .catch all :narrow_start .. :narrow_end goto :all_handler
+    iconst_0
+    ireturn
+
+  :argument_handler
+    astore 0
+    iconst_1
+    ireturn
+
+  :state_handler
+    astore 0
+    iconst_2
+    ireturn
+
+  :all_handler
+    astore 0
+    iconst_3
+    ireturn
+.end method
+
+.method public static testTail()I
+    .max stack 2
+    .max locals 1
+
+  :wide_start
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch prefix ()V
+  :narrow_start
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch prefix ()V
+  :narrow_end
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch second ()V
+  :wide_end
+    .catch java/lang/IllegalArgumentException :narrow_start .. :narrow_end goto :argument_handler
+    .catch java/lang/IllegalStateException :wide_start .. :wide_end goto :state_handler
+    .catch all :narrow_start .. :narrow_end goto :all_handler
+    iconst_0
+    ireturn
+
+  :argument_handler
+    astore 0
+    iconst_1
+    ireturn
+
+  :state_handler
+    astore 0
+    iconst_2
+    ireturn
+
+  :all_handler
+    astore 0
+    iconst_3
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 2
+    .max locals 1
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch test ()I
+    iconst_2
+    isub
+    ifeq :ok
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :ok
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch testPrefix ()I
+    iconst_2
+    isub
+    ifeq :prefix_ok
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :prefix_ok
+  :tail_start
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixCatch testTail ()I
+    pop
+  :tail_end
+    .catch java/lang/NullPointerException :tail_start .. :tail_end goto :tail_ok
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :tail_ok
+    astore 0
+    return
+.end method
+
+.method private static prefix()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static first()V
+    .max stack 2
+    .max locals 0
+    new java/lang/IllegalStateException
+    dup
+    invokespecial java/lang/IllegalStateException <init> ()V
+    athrow
+.end method
+
+.method private static second()V
+    .max stack 2
+    .max locals 0
+    new java/lang/NullPointerException
+    dup
+    invokespecial java/lang/NullPointerException <init> ()V
+    athrow
+.end method
