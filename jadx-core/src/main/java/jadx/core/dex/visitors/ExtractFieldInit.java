@@ -219,7 +219,7 @@ public class ExtractFieldInit extends AbstractVisitor {
 		}
 		MethodNode parentInit = parent.getClassInitMth();
 		if (parentInit != null
-				&& methodReadsField(cls, parentInit.getMethodInfo(), fieldInfo, InsnType.SGET, new HashSet<>())) {
+				&& initializationPathReadsField(cls, parentInit.getMethodInfo(), fieldInfo, new HashSet<>())) {
 			return true;
 		}
 		if (supertypeInitReadsField(cls, parent.getSuperClass(), fieldInfo, visited)) {
@@ -231,6 +231,87 @@ public class ExtractFieldInit extends AbstractVisitor {
 			}
 		}
 		return false;
+	}
+
+	private static boolean triggeredClassInitReadsField(ClassNode cls, ArgType classType, FieldInfo fieldInfo,
+			Set<MethodInfo> visited) {
+		// The target class is already being initialized while its supertypes run.
+		if (classType.equals(cls.getClassInfo().getType())) {
+			return false;
+		}
+		ClassNode triggeredCls = cls.root().resolveClass(classType);
+		if (triggeredCls == null || triggeredCls.getClassInitMth() == null) {
+			return false;
+		}
+		return initializationPathReadsField(cls, triggeredCls.getClassInitMth().getMethodInfo(), fieldInfo, visited);
+	}
+
+	private static boolean initializationPathReadsField(ClassNode cls, MethodInfo methodInfo, FieldInfo fieldInfo,
+			Set<MethodInfo> visited) {
+		if (!visited.add(methodInfo)) {
+			return false;
+		}
+		MethodNode method = cls.root().resolveMethod(methodInfo);
+		ICodeReader codeReader = method == null ? null : method.getCodeReader();
+		if (codeReader == null) {
+			return false;
+		}
+		boolean[] found = { false };
+		codeReader.copy().visitInstructions(insnData -> {
+			if (found[0]) {
+				return;
+			}
+			Opcode opcode = insnData.getOpcode();
+			String opName = opcode.name();
+			if ((opName.startsWith("SGET") || opName.startsWith("SPUT"))
+					&& insnData.getIndexType() == InsnIndexType.FIELD_REF) {
+				insnData.decode();
+				FieldInfo usedField = FieldInfo.fromRef(cls.root(), insnData.getIndexAsField());
+				found[0] = (opName.startsWith("SGET") && fieldInfo.equals(usedField))
+						|| triggeredClassInitReadsField(cls, usedField.getDeclClass().getType(), fieldInfo, visited);
+			} else if (opName.startsWith("INVOKE") && insnData.getIndexType() == InsnIndexType.METHOD_REF) {
+				insnData.decode();
+				MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
+				if (opName.startsWith("INVOKE_STATIC")
+						&& triggeredClassInitReadsField(cls, calledMth.getDeclClass().getType(), fieldInfo, visited)) {
+					found[0] = true;
+					return;
+				}
+				found[0] = initializationPathReadsField(cls, calledMth, fieldInfo, visited);
+				if (!found[0] && (opName.startsWith("INVOKE_VIRTUAL") || opName.startsWith("INVOKE_INTERFACE"))) {
+					MethodNode baseMth = cls.root().resolveMethod(calledMth);
+					MethodOverrideAttr overrideAttr = baseMth == null ? null : baseMth.get(AType.METHOD_OVERRIDE);
+					if (overrideAttr != null) {
+						for (MethodNode relatedMth : overrideAttr.getRelatedMthNodes()) {
+							if (initializationPathReadsField(cls, relatedMth.getMethodInfo(), fieldInfo, visited)) {
+								found[0] = true;
+								break;
+							}
+						}
+					}
+				}
+			} else if (opcode == Opcode.NEW_INSTANCE && insnData.getIndexType() == InsnIndexType.TYPE_REF) {
+				insnData.decode();
+				found[0] = triggeredClassInitReadsField(cls, ArgType.parse(insnData.getIndexAsType()), fieldInfo, visited);
+			} else if (opName.startsWith("INVOKE_CUSTOM") && insnData.getIndexType() == InsnIndexType.CALL_SITE) {
+				insnData.decode();
+				ICallSite callSite = InsnDataUtils.getCallSite(insnData);
+				if (callSite != null) {
+					callSite.load();
+					for (EncodedValue value : callSite.getValues()) {
+						if (value.getType() == EncodedType.ENCODED_METHOD_HANDLE) {
+							IMethodRef methodRef = ((IMethodHandle) value.getValue()).getMethodRef();
+							if (methodRef != null && initializationPathReadsField(cls,
+									MethodInfo.fromRef(cls.root(), methodRef), fieldInfo, visited)) {
+								found[0] = true;
+								break;
+							}
+						}
+					}
+				}
+			}
+		});
+		return found[0];
 	}
 
 	private static boolean isInstanceFieldReadBeforeWrite(ClassNode cls, MethodNode mth, FieldInitInfo target) {
