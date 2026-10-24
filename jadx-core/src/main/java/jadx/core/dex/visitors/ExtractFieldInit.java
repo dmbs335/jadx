@@ -504,6 +504,15 @@ public class ExtractFieldInit extends AbstractVisitor {
 					&& insnData.getRegsCount() >= 2 && aliases.contains(insnData.getReg(1))) {
 				aliases.add(insnData.getReg(0));
 			}
+			// Dex array literals have no separate APUT_OBJECT for the captured receiver.
+			if (opcodeName.startsWith("FILLED_NEW_ARRAY")) {
+				for (int i = 0; i < insnData.getRegsCount(); i++) {
+					if (aliases.contains(insnData.getReg(i))) {
+						dispatch[0] = true;
+						return;
+					}
+				}
+			}
 			// A stored or returned receiver can be dispatched again before the subclass
 			// field assignment. The raw scan cannot prove that the escaped alias is unused.
 			if (("APUT_OBJECT".equals(opcodeName) || "IPUT_OBJECT".equals(opcodeName)
@@ -511,6 +520,15 @@ public class ExtractFieldInit extends AbstractVisitor {
 					&& insnData.getRegsCount() != 0 && aliases.contains(insnData.getReg(0))) {
 				dispatch[0] = true;
 				return;
+			}
+			// A call site can capture the receiver without a resolvable method reference.
+			if (opcodeName.startsWith("INVOKE_CUSTOM") || opcodeName.startsWith("INVOKE_POLYMORPHIC")) {
+				for (int i = 0; i < insnData.getRegsCount(); i++) {
+					if (aliases.contains(insnData.getReg(i))) {
+						dispatch[0] = true;
+						return;
+					}
+				}
 			}
 			if (dispatch[0] || !opcodeName.startsWith("INVOKE")
 					|| insnData.getIndexType() != InsnIndexType.METHOD_REF) {

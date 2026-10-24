@@ -15,12 +15,18 @@ import jadx.tests.integration.others.resolvedbase.BridgeMiddle;
 import jadx.tests.integration.others.resolvedbase.ExternalAliasChild;
 import jadx.tests.integration.others.resolvedbase.ExternalArrayEscapeChild;
 import jadx.tests.integration.others.resolvedbase.ExternalFieldEscapeChild;
+import jadx.tests.integration.others.resolvedbase.ExternalFilledArrayChild;
+import jadx.tests.integration.others.resolvedbase.ExternalLambdaCaptureChild;
 import jadx.tests.integration.others.resolvedbase.ExternalRelayChild;
 import jadx.tests.integration.others.resolvedbase.ExternalReturnEscapeChild;
 import jadx.tests.integration.others.resolvedbase.FieldEscapeBase;
 import jadx.tests.integration.others.resolvedbase.FieldEscapeMiddle;
+import jadx.tests.integration.others.resolvedbase.FilledArrayBase;
+import jadx.tests.integration.others.resolvedbase.FilledArrayMiddle;
 import jadx.tests.integration.others.resolvedbase.ForwardBase;
 import jadx.tests.integration.others.resolvedbase.ForwardMiddle;
+import jadx.tests.integration.others.resolvedbase.LambdaCaptureBase;
+import jadx.tests.integration.others.resolvedbase.LambdaCaptureMiddle;
 import jadx.tests.integration.others.resolvedbase.RelayBase;
 import jadx.tests.integration.others.resolvedbase.RelayMiddle;
 import jadx.tests.integration.others.resolvedbase.ResolvedBase;
@@ -123,5 +129,29 @@ public class TestResolvedSuperConstructorExternalOverride extends IntegrationTes
 				.containsOne("protected final int initial;")
 				.containsOne("this.initial = 43;")
 				.doesNotContain("final int initial = 43");
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testFilledArrayReceiver() {
+		new ExternalFilledArrayChild().check();
+		List<ClassNode> classes = getClassNodes(FilledArrayBase.class, FilledArrayMiddle.class);
+		assertThat(searchCls(classes, FilledArrayMiddle.class.getName())).code()
+				.containsOne(
+						"JADX WARN: Field initializer kept in constructor: superclass constructor may dispatch to an external override")
+				.containsOne("protected final int initial;")
+				.containsOne("this.initial = 47;")
+				.doesNotContain("final int initial = 47");
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testLambdaCapturedReceiver() {
+		new ExternalLambdaCaptureChild().check();
+		List<ClassNode> classes = getClassNodes(LambdaCaptureBase.class, LambdaCaptureMiddle.class);
+		assertThat(searchCls(classes, LambdaCaptureMiddle.class.getName())).code()
+				.containsOne(
+						"JADX WARN: Field initializer kept in constructor: superclass constructor may dispatch to an external override")
+				.containsOne("protected final int initial;")
+				.containsOne("this.initial = 53;")
+				.doesNotContain("final int initial = 53");
 	}
 }
