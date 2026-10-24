@@ -107,20 +107,23 @@ public class EnumVisitor extends AbstractVisitor {
 	public boolean visit(ClassNode cls) throws JadxException {
 		if (cls.isEnum()) {
 			boolean converted;
+			Exception conversionError = null;
 			try {
 				converted = convertToEnum(cls);
 			} catch (Exception e) {
-				cls.addInfoComment("Enum visitor error"
-						+ cls.root().getArgs().getCodeNewLineStr()
-						+ Utils.getStackTrace(e));
+				conversionError = e;
 				converted = false;
 			}
 			if (!converted) {
+				// Enum superclass suppression is only valid after a successful conversion.
+				// Otherwise the fallback class still invokes Enum.<init> and must show
+				// its original hierarchy instead of pretending to extend Object.
+				cls.remove(AFlag.REMOVE_SUPER_CLASS);
 				AccessInfo accessFlags = cls.getAccessFlags();
 				if (accessFlags.isEnum()) {
 					cls.setAccessFlags(accessFlags.remove(AccessFlags.ENUM));
-					cls.addWarnComment("Failed to restore enum class, 'enum' modifier and super class removed");
 				}
+				cls.addError("Failed to restore enum class; fallback Java may not be compilable", conversionError);
 			}
 		}
 		return true;
