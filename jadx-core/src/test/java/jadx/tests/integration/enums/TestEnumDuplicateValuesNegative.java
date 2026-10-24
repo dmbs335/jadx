@@ -50,6 +50,36 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 	}
 
 	@Test
+	public void testDynamicOrdinal() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumDynamicOrdinalNegative"))
+				.code()
+				.containsOne("Enum constructor ordinal is not a known constant")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumDynamicOrdinalNegative extends Enum");
+	}
+
+	@Test
+	public void testDynamicName() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumDynamicNameNegative"))
+				.code()
+				.containsOne("Enum constructor name is not a known constant")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumDynamicNameNegative extends Enum");
+	}
+
+	@Test
+	public void testEncodedNameOverriddenAtRuntime() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumEncodedNameOverrideNegative"))
+				.code()
+				.containsOne("Enum constructor name is not a known constant")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumEncodedNameOverrideNegative extends Enum");
+	}
+
+	@Test
 	public void testNameMismatchWithRenameDisabled() {
 		disableCompilation();
 		getArgs().setRenameFlags(Collections.emptySet());

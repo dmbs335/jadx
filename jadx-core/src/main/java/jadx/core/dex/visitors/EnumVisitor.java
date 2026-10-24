@@ -29,6 +29,7 @@ import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.info.MethodInfo;
+import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeNode;
@@ -193,10 +194,13 @@ public class EnumVisitor extends AbstractVisitor {
 				return false;
 			}
 			String name = enumField.getNameStr();
-			String outputName = name != null
-					&& NameMapper.isValidAndPrintable(name)
+			if (name == null) {
+				cls.addWarnComment("Enum constructor name is not a known constant");
+				return false;
+			}
+			String outputName = NameMapper.isValidAndPrintable(name)
 					&& cls.root().getArgs().isRenameValid() ? name : fieldNode.getAlias();
-			if (name != null && !name.equals(outputName)) {
+			if (!name.equals(outputName)) {
 				cls.addWarnComment("Enum constant name differs from constructor name");
 				return false;
 			}
@@ -210,8 +214,12 @@ public class EnumVisitor extends AbstractVisitor {
 					&& constructorInsn.getArgsCount() >= 2
 					&& ArgType.STRING.equals(argTypes.get(0))
 					&& ArgType.INT.equals(argTypes.get(1))) {
-				Object ordinal = InsnUtils.getConstValueByArg(cls.root(), constructorInsn.getArg(1));
-				if (ordinal instanceof LiteralArg && ((LiteralArg) ordinal).getLiteral() != i) {
+				LiteralArg ordinal = getOrdinalLiteral(cls.root(), constructorInsn.getArg(1));
+				if (ordinal == null) {
+					cls.addWarnComment("Enum constructor ordinal is not a known constant");
+					return false;
+				}
+				if (ordinal.getLiteral() != i) {
 					cls.addWarnComment("Enum constructor ordinal differs from $VALUES array position");
 					return false;
 				}
@@ -271,6 +279,58 @@ public class EnumVisitor extends AbstractVisitor {
 		fixAccessFlags(cls);
 		cls.add(AFlag.CONVERTED_ENUM);
 		return true;
+	}
+
+	private @Nullable LiteralArg getOrdinalLiteral(RootNode root, InsnArg arg) {
+		if (arg instanceof LiteralArg) {
+			return (LiteralArg) arg;
+		}
+		InsnNode sourceInsn = findDirectConstInsn(arg);
+		if (sourceInsn != null && sourceInsn.getType() == InsnType.SGET) {
+			Object value = getSafeFieldConstant(root, sourceInsn);
+			return value instanceof LiteralArg ? (LiteralArg) value : null;
+		}
+		if (sourceInsn != null && sourceInsn.getType() == InsnType.CONST
+				&& sourceInsn.getArgsCount() == 1 && sourceInsn.getArg(0) instanceof LiteralArg) {
+			return (LiteralArg) sourceInsn.getArg(0);
+		}
+		return null;
+	}
+
+	private @Nullable InsnNode findDirectConstInsn(InsnArg arg) {
+		Set<SSAVar> visited = new HashSet<>();
+		InsnArg current = arg;
+		while (true) {
+			InsnNode sourceInsn;
+			if (current instanceof RegisterArg) {
+				SSAVar ssaVar = ((RegisterArg) current).getSVar();
+				if (ssaVar == null || !visited.add(ssaVar)) {
+					return null;
+				}
+				sourceInsn = ssaVar.getAssignInsn();
+			} else if (current.isInsnWrap()) {
+				sourceInsn = ((InsnWrapArg) current).getWrapInsn();
+			} else {
+				return null;
+			}
+			if (sourceInsn == null) {
+				return null;
+			}
+			switch (sourceInsn.getType()) {
+				case CONST:
+				case CONST_STR:
+				case SGET:
+					return sourceInsn;
+				case MOVE:
+					if (sourceInsn.getArgsCount() != 1) {
+						return null;
+					}
+					current = sourceInsn.getArg(0);
+					break;
+				default:
+					return null;
+			}
+		}
 	}
 
 	private static void fixAccessFlags(ClassNode cls) {
@@ -1619,15 +1679,26 @@ public class EnumVisitor extends AbstractVisitor {
 		return null;
 	}
 
-	private String getConstString(RootNode root, InsnArg arg) {
-		if (arg.isInsnWrap()) {
-			InsnNode constInsn = ((InsnWrapArg) arg).getWrapInsn();
-			Object constValue = InsnUtils.getConstValueByInsn(root, constInsn);
-			if (constValue instanceof String) {
-				return (String) constValue;
-			}
+	private @Nullable String getConstString(RootNode root, InsnArg arg) {
+		InsnNode constInsn = findDirectConstInsn(arg);
+		if (constInsn instanceof ConstStringNode) {
+			return ((ConstStringNode) constInsn).getString();
+		}
+		if (constInsn != null && constInsn.getType() == InsnType.SGET) {
+			Object value = getSafeFieldConstant(root, constInsn);
+			return value instanceof String ? (String) value : null;
 		}
 		return null;
+	}
+
+	private @Nullable Object getSafeFieldConstant(RootNode root, InsnNode sgetInsn) {
+		FieldInfo fieldInfo = (FieldInfo) ((IndexInsnNode) sgetInsn).getIndex();
+		FieldNode fieldNode = root.resolveField(fieldInfo);
+		if (fieldNode == null || !fieldNode.isStatic() || !fieldNode.getAccessFlags().isFinal()
+				|| fieldNode.getParentClass().getClassInitMth() != null) {
+			return null;
+		}
+		return InsnUtils.getConstValueByInsn(root, sgetInsn);
 	}
 
 	private static class EnumData {
