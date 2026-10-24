@@ -192,6 +192,10 @@ public class EnumVisitor extends AbstractVisitor {
 			String outputName = name != null
 					&& NameMapper.isValidAndPrintable(name)
 					&& cls.root().getArgs().isRenameValid() ? name : fieldNode.getAlias();
+			if (name != null && !name.equals(outputName)) {
+				cls.addWarnComment("Enum constant name differs from constructor name");
+				return false;
+			}
 			if (!seenNames.add(outputName)) {
 				cls.addWarnComment("Enum constants resolve to duplicate names");
 				return false;

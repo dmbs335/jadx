@@ -1,5 +1,6 @@
 package jadx.tests.integration.enums;
 
+import java.util.Collections;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
@@ -46,5 +47,16 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 				.containsOne("Enum constructor ordinal differs from $VALUES array position")
 				.containsOne("JADX ERROR: Failed to restore enum class")
 				.containsOne("class TestEnumOrdinalMismatchNegative extends Enum");
+	}
+
+	@Test
+	public void testNameMismatchWithRenameDisabled() {
+		disableCompilation();
+		getArgs().setRenameFlags(Collections.emptySet());
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumNameMismatchNegative"))
+				.code()
+				.containsOne("Enum constant name differs from constructor name")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumNameMismatchNegative extends Enum");
 	}
 }
