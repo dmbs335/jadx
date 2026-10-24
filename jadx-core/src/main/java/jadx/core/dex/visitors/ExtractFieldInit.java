@@ -250,8 +250,9 @@ public class ExtractFieldInit extends AbstractVisitor {
 			return false;
 		}
 		// An override in a descendant (including one absent from the input) can
-		// read an inherited field while the unresolved super constructor runs.
-		if (!cls.getAccessFlags().isFinal() && !target.fieldNode.getAccessFlags().isPrivate()) {
+		// read this field while the unresolved super constructor runs. A nestmate
+		// descendant can also read a private field, so visibility is not a proof.
+		if (!cls.getAccessFlags().isFinal()) {
 			return true;
 		}
 		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();

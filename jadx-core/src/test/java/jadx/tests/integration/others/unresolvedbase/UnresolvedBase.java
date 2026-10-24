@@ -10,4 +10,8 @@ public class UnresolvedBase {
 	protected int readInitial() {
 		return -1;
 	}
+
+	public int getObserved() {
+		return observed;
+	}
 }
