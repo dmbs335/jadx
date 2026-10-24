@@ -33,6 +33,7 @@ import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeCustomNode;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.InvokeType;
+import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -120,12 +121,18 @@ public class ExtractFieldInit extends AbstractVisitor {
 				.filter(fi -> isIndirectStaticFieldReadBeforeWrite(cls, classInitMth, fi))
 				.map(fi -> fi.fieldNode)
 				.collect(Collectors.toSet());
+		Set<FieldNode> parentObservedFinalFields = inits.stream()
+				.filter(fi -> fi.fieldNode.getAccessFlags().isFinal())
+				.filter(fi -> isStaticFieldReadDuringParentInit(cls, fi))
+				.map(fi -> fi.fieldNode)
+				.collect(Collectors.toSet());
 		// Encoded values are installed before <clinit> starts. If one of them is
 		// overwritten there, moving any write into a field initializer can place
 		// it before the encoded value and change reads through other methods.
 		if (inits.stream().anyMatch(fi -> fi.fieldNode.get(JadxAttrType.CONSTANT_VALUE) != null
 				&& fi.fieldNode.get(JadxAttrType.CONSTANT_VALUE) != EncodedValue.NULL)
-				|| !possiblyObservedFinalFields.isEmpty()) {
+				|| !possiblyObservedFinalFields.isEmpty()
+				|| !parentObservedFinalFields.isEmpty()) {
 			movableInits.clear();
 		}
 		Set<FieldNode> movableFields = movableInits.stream().map(v -> v.fieldNode).collect(Collectors.toSet());
@@ -150,6 +157,10 @@ public class ExtractFieldInit extends AbstractVisitor {
 					// Keeping it final would turn a literal write into a Java constant.
 					field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
 					field.addWarnComment("Final modifier removed: static field is read through a call before assignment");
+				} else if (parentObservedFinalFields.contains(field)) {
+					field.remove(JadxAttrType.CONSTANT_VALUE);
+					field.addWarnComment(
+							"Field initializer kept in class initializer: superclass initializer may read field before assignment");
 				} else {
 					field.remove(JadxAttrType.CONSTANT_VALUE);
 				}
@@ -181,6 +192,25 @@ public class ExtractFieldInit extends AbstractVisitor {
 		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
 		return hasInsnBeforeFieldWrite(mth, target, innerInsn -> innerInsn instanceof BaseInvokeNode
 				&& invocationReadsField(cls, (BaseInvokeNode) innerInsn, fieldInfo, InsnType.SGET, new HashSet<>()), false);
+	}
+
+	private static boolean isStaticFieldReadDuringParentInit(ClassNode cls, FieldInitInfo target) {
+		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
+		ArgType superType = cls.getSuperClass();
+		Set<ArgType> visited = new HashSet<>();
+		while (superType != null && visited.add(superType)) {
+			ClassNode parent = cls.root().resolveClass(superType);
+			if (parent == null) {
+				return false;
+			}
+			MethodNode parentInit = parent.getClassInitMth();
+			if (parentInit != null
+					&& methodReadsField(cls, parentInit.getMethodInfo(), fieldInfo, InsnType.SGET, new HashSet<>())) {
+				return true;
+			}
+			superType = parent.getSuperClass();
+		}
+		return false;
 	}
 
 	private static boolean isInstanceFieldReadBeforeWrite(ClassNode cls, MethodNode mth, FieldInitInfo target) {
