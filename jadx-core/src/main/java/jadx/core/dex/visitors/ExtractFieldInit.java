@@ -121,9 +121,9 @@ public class ExtractFieldInit extends AbstractVisitor {
 				.filter(fi -> isIndirectStaticFieldReadBeforeWrite(cls, classInitMth, fi))
 				.map(fi -> fi.fieldNode)
 				.collect(Collectors.toSet());
-		Set<FieldNode> parentObservedFinalFields = inits.stream()
+		Set<FieldNode> supertypeObservedFinalFields = inits.stream()
 				.filter(fi -> fi.fieldNode.getAccessFlags().isFinal())
-				.filter(fi -> isStaticFieldReadDuringParentInit(cls, fi))
+				.filter(fi -> isStaticFieldReadDuringSupertypeInit(cls, fi))
 				.map(fi -> fi.fieldNode)
 				.collect(Collectors.toSet());
 		// Encoded values are installed before <clinit> starts. If one of them is
@@ -132,7 +132,7 @@ public class ExtractFieldInit extends AbstractVisitor {
 		if (inits.stream().anyMatch(fi -> fi.fieldNode.get(JadxAttrType.CONSTANT_VALUE) != null
 				&& fi.fieldNode.get(JadxAttrType.CONSTANT_VALUE) != EncodedValue.NULL)
 				|| !possiblyObservedFinalFields.isEmpty()
-				|| !parentObservedFinalFields.isEmpty()) {
+				|| !supertypeObservedFinalFields.isEmpty()) {
 			movableInits.clear();
 		}
 		Set<FieldNode> movableFields = movableInits.stream().map(v -> v.fieldNode).collect(Collectors.toSet());
@@ -157,10 +157,10 @@ public class ExtractFieldInit extends AbstractVisitor {
 					// Keeping it final would turn a literal write into a Java constant.
 					field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
 					field.addWarnComment("Final modifier removed: static field is read through a call before assignment");
-				} else if (parentObservedFinalFields.contains(field)) {
+				} else if (supertypeObservedFinalFields.contains(field)) {
 					field.remove(JadxAttrType.CONSTANT_VALUE);
 					field.addWarnComment(
-							"Field initializer kept in class initializer: superclass initializer may read field before assignment");
+							"Field initializer kept in class initializer: supertype initializer may read field before assignment");
 				} else {
 					field.remove(JadxAttrType.CONSTANT_VALUE);
 				}
@@ -194,21 +194,41 @@ public class ExtractFieldInit extends AbstractVisitor {
 				&& invocationReadsField(cls, (BaseInvokeNode) innerInsn, fieldInfo, InsnType.SGET, new HashSet<>()), false);
 	}
 
-	private static boolean isStaticFieldReadDuringParentInit(ClassNode cls, FieldInitInfo target) {
+	private static boolean isStaticFieldReadDuringSupertypeInit(ClassNode cls, FieldInitInfo target) {
 		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
-		ArgType superType = cls.getSuperClass();
 		Set<ArgType> visited = new HashSet<>();
-		while (superType != null && visited.add(superType)) {
-			ClassNode parent = cls.root().resolveClass(superType);
-			if (parent == null) {
-				return false;
-			}
-			MethodNode parentInit = parent.getClassInitMth();
-			if (parentInit != null
-					&& methodReadsField(cls, parentInit.getMethodInfo(), fieldInfo, InsnType.SGET, new HashSet<>())) {
+		if (supertypeInitReadsField(cls, cls.getSuperClass(), fieldInfo, visited)) {
+			return true;
+		}
+		for (ArgType interfaceType : cls.getInterfaces()) {
+			if (supertypeInitReadsField(cls, interfaceType, fieldInfo, visited)) {
 				return true;
 			}
-			superType = parent.getSuperClass();
+		}
+		return false;
+	}
+
+	private static boolean supertypeInitReadsField(ClassNode cls, ArgType superType, FieldInfo fieldInfo,
+			Set<ArgType> visited) {
+		if (superType == null || !visited.add(superType)) {
+			return false;
+		}
+		ClassNode parent = cls.root().resolveClass(superType);
+		if (parent == null) {
+			return false;
+		}
+		MethodNode parentInit = parent.getClassInitMth();
+		if (parentInit != null
+				&& methodReadsField(cls, parentInit.getMethodInfo(), fieldInfo, InsnType.SGET, new HashSet<>())) {
+			return true;
+		}
+		if (supertypeInitReadsField(cls, parent.getSuperClass(), fieldInfo, visited)) {
+			return true;
+		}
+		for (ArgType interfaceType : parent.getInterfaces()) {
+			if (supertypeInitReadsField(cls, interfaceType, fieldInfo, visited)) {
+				return true;
+			}
 		}
 		return false;
 	}

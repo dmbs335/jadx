@@ -17,7 +17,7 @@ public class TestStaticParentReadBeforeChildInit extends IntegrationTest {
 		List<ClassNode> classes = getClassNodes(StaticParent.class, StaticChild.class);
 		assertThat(searchCls(classes, StaticChild.class.getName())).code()
 				.containsOne(
-						"JADX WARN: Field initializer kept in class initializer: superclass initializer may read field before assignment")
+						"JADX WARN: Field initializer kept in class initializer: supertype initializer may read field before assignment")
 				.containsOne("public static final int initial;")
 				.containsOne("initial = 17;")
 				.doesNotContain("static final int initial = 17");
