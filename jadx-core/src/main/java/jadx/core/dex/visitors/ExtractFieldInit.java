@@ -2,10 +2,8 @@ package jadx.core.dex.visitors;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -219,6 +217,18 @@ public class ExtractFieldInit extends AbstractVisitor {
 				excludedFields.add(initInfo.fieldNode.getFieldInfo());
 			}
 		}
+		// A static initializer reading a field assigned at or after this write must
+		// remain in the class initializer to preserve the value it observes.
+		Set<FieldInfo> staticFieldsWrittenAtOrAfter = new HashSet<>();
+		for (int i = inits.size() - 1; i >= 0; i--) {
+			FieldInitInfo initInfo = inits.get(i);
+			if (initInfo.putInsn.getType() == InsnType.SPUT) {
+				staticFieldsWrittenAtOrAfter.add(initInfo.fieldNode.getFieldInfo());
+				if (insnUseExcludedField(initInfo, staticFieldsWrittenAtOrAfter)) {
+					excludedFields.add(initInfo.fieldNode.getFieldInfo());
+				}
+			}
+		}
 		if (!excludedFields.isEmpty()) {
 			boolean changed;
 			do {
@@ -298,71 +308,17 @@ public class ExtractFieldInit extends AbstractVisitor {
 	}
 
 	private static void fixFieldsOrder(ClassNode cls, List<FieldInitInfo> inits) {
-		List<FieldNode> orderedFields = processFieldsDependencies(cls, inits);
-		applyFieldsOrder(cls, orderedFields);
-	}
-
-	private static List<FieldNode> processFieldsDependencies(ClassNode cls, List<FieldInitInfo> inits) {
+		// Preserve the writes' execution order. A forward read must observe the field's
+		// default value, not the value assigned by a later initializer.
 		List<FieldNode> orderedFields = Utils.collectionMap(inits, v -> v.fieldNode);
-		// collect dependant fields
-		Map<FieldNode, List<FieldNode>> deps = new HashMap<>(inits.size());
-		for (FieldInitInfo initInfo : inits) {
-			IndexInsnNode insn = initInfo.putInsn;
-			boolean staticField = insn.getType() == InsnType.SPUT;
-			InsnType useType = staticField ? InsnType.SGET : InsnType.IGET;
-			insn.visitInsns(subInsn -> {
-				if (subInsn.getType() == useType) {
-					FieldInfo fieldInfo = (FieldInfo) ((IndexInsnNode) subInsn).getIndex();
-					if (fieldInfo.getDeclClass().equals(cls.getClassInfo())) {
-						FieldNode depField = cls.searchField(fieldInfo);
-						if (depField != null) {
-							deps.computeIfAbsent(initInfo.fieldNode, k -> new ArrayList<>())
-									.add(depField);
-						}
-					}
-				}
-			});
-		}
-		if (deps.isEmpty()) {
-			return orderedFields;
-		}
-		// build new list with deps fields before usage field
-		List<FieldNode> result = new ArrayList<>();
-		for (FieldNode field : orderedFields) {
-			int idx = result.indexOf(field);
-			List<FieldNode> fieldDeps = deps.get(field);
-			if (fieldDeps == null) {
-				if (idx == -1) {
-					result.add(field);
-				}
-				continue;
-			}
-			if (idx == -1) {
-				for (FieldNode depField : fieldDeps) {
-					if (!result.contains(depField)) {
-						result.add(depField);
-					}
-				}
-				result.add(field);
-				continue;
-			}
-			for (FieldNode depField : fieldDeps) {
-				int depIdx = result.indexOf(depField);
-				if (depIdx == -1) {
-					result.add(idx, depField);
-				} else if (depIdx > idx) {
-					result.remove(depIdx);
-					result.add(idx, depField);
-				}
-			}
-		}
-		return result;
+		applyFieldsOrder(cls, orderedFields);
 	}
 
 	private static void applyFieldsOrder(ClassNode cls, List<FieldNode> orderedFields) {
 		List<FieldNode> clsFields = cls.getFields();
-		// check if already ordered
-		boolean ordered = Collections.indexOfSubList(clsFields, orderedFields) != -1;
+		// Put all extracted initializers after untouched fields. This also makes a
+		// read of an uninitialized static field a legal Java reference.
+		boolean ordered = Collections.indexOfSubList(clsFields, orderedFields) == clsFields.size() - orderedFields.size();
 		if (!ordered) {
 			cls.moveFieldsToEnd(orderedFields);
 		}
