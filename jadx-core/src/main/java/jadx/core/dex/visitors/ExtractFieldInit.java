@@ -185,8 +185,13 @@ public class ExtractFieldInit extends AbstractVisitor {
 						FieldNode fn = cls.searchField(field);
 						if (fn != null) {
 							boolean canMove = canReorder && singlePathBlocks.contains(block);
-							fieldsInit.add(new FieldInitInfo(fn, putInsn, canMove));
+							FieldInitInfo initInfo = new FieldInitInfo(fn, putInsn, canMove);
+							fieldsInit.add(initInfo);
 							fieldInsn = true;
+							// A write that stays in the constructor must not be passed by a later initializer.
+							if (!checkInsn(initInfo)) {
+								canReorder = false;
+							}
 						}
 					}
 				}
