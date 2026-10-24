@@ -53,13 +53,14 @@ public class SynchronizedRegionMaker {
 		Set<BlockNode> cacheSet = new HashSet<>();
 		traverseMonitorExits(synchRegion, insn.getArg(0), block, exits, cacheSet);
 		for (InsnNode exitInsn : synchRegion.getExitInsns()) {
-			BlockNode insnBlock = BlockUtils.getBlockByInsn(mth, exitInsn);
-			if (insnBlock != null) {
-				insnBlock.add(AFlag.DONT_GENERATE);
-			}
-			// remove arg from MONITOR_EXIT to allow inline in MONITOR_ENTER
+			// The monitor release is represented by the synchronized region. Other
+			// instructions in its block may still perform work after the release.
 			exitInsn.removeArg(0);
 			exitInsn.add(AFlag.DONT_GENERATE);
+			BlockNode insnBlock = BlockUtils.getBlockByInsn(mth, exitInsn);
+			if (insnBlock != null && canOmitMonitorExitBlock(insnBlock)) {
+				insnBlock.add(AFlag.DONT_GENERATE);
+			}
 		}
 
 		BlockNode body = getNextBlock(block);
@@ -118,6 +119,11 @@ public class SynchronizedRegionMaker {
 		synchRegion.getSubBlocks().add(regionMaker.makeRegion(body));
 		stack.pop();
 		return exit;
+	}
+
+	static boolean canOmitMonitorExitBlock(BlockNode block) {
+		return !block.getInstructions().isEmpty()
+				&& block.getInstructions().stream().allMatch(insn -> insn.contains(AFlag.DONT_GENERATE));
 	}
 
 	private @Nullable BlockNode selectUniqueLoopContinuation(BlockNode syncBlock, Set<BlockNode> exits) {
