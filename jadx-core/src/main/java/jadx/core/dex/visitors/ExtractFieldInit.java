@@ -99,6 +99,14 @@ public class ExtractFieldInit extends AbstractVisitor {
 		}
 		List<FieldInitInfo> movableInits = new ArrayList<>(inits);
 		filterFieldsInit(movableInits);
+		// Encoded values are installed before <clinit> starts. If one of them is
+		// overwritten there, moving any write into a field initializer can place
+		// it before the encoded value and change reads through other methods.
+		if (inits.stream().anyMatch(fi -> fi.fieldNode.getAccessFlags().isFinal()
+				&& fi.fieldNode.get(JadxAttrType.CONSTANT_VALUE) != null
+				&& fi.fieldNode.get(JadxAttrType.CONSTANT_VALUE) != EncodedValue.NULL)) {
+			movableInits.clear();
+		}
 		Set<FieldNode> movableFields = movableInits.stream().map(v -> v.fieldNode).collect(Collectors.toSet());
 		for (FieldInitInfo fieldInit : inits) {
 			FieldNode field = fieldInit.fieldNode;
