@@ -98,7 +98,34 @@ public final class LiteralArg extends InsnArg {
 	public LiteralArg negate() {
 		long neg;
 		if (isInteger()) {
+			if (literal == Long.MIN_VALUE) {
+				return null;
+			}
 			neg = -literal;
+			switch (type.getPrimitiveType()) {
+				case BYTE:
+					if (neg < Byte.MIN_VALUE || neg > Byte.MAX_VALUE) {
+						return null;
+					}
+					break;
+				case CHAR:
+					if (neg < Character.MIN_VALUE || neg > Character.MAX_VALUE) {
+						return null;
+					}
+					break;
+				case SHORT:
+					if (neg < Short.MIN_VALUE || neg > Short.MAX_VALUE) {
+						return null;
+					}
+					break;
+				case INT:
+					if (neg < Integer.MIN_VALUE || neg > Integer.MAX_VALUE) {
+						return null;
+					}
+					break;
+				default:
+					break;
+			}
 		} else if (type == ArgType.FLOAT) {
 			neg = ((int) literal) ^ Integer.MIN_VALUE;
 		} else if (type == ArgType.DOUBLE) {
