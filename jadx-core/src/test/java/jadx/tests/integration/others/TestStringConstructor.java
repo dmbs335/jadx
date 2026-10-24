@@ -17,7 +17,7 @@ public class TestStringConstructor extends IntegrationTest {
 	public void test() {
 		JadxAssertions.assertThat(getClassNode(TestCls.class))
 				.code()
-				.containsOne("abc");
+				.containsOne("tag = new String(new byte[]{97, 98, 99});");
 	}
 
 	public static class TestCls2 {
@@ -28,7 +28,7 @@ public class TestStringConstructor extends IntegrationTest {
 	public void test2() {
 		JadxAssertions.assertThat(getClassNode(TestCls2.class))
 				.code()
-				.containsOne("new String(\"abc\".getBytes(), StandardCharsets.UTF_8)");
+				.containsOne("tag = new String(new byte[]{97, 98, 99}, StandardCharsets.UTF_8);");
 	}
 
 	public static class TestCls3 {
@@ -39,7 +39,7 @@ public class TestStringConstructor extends IntegrationTest {
 	public void test3() {
 		JadxAssertions.assertThat(getClassNode(TestCls3.class))
 				.code()
-				.containsOne("\\u0001\\u0002\\u0003abc");
+				.containsOne("tag = new String(new byte[]{1, 2, 3, 97, 98, 99});");
 	}
 
 	public static class TestCls4 {
