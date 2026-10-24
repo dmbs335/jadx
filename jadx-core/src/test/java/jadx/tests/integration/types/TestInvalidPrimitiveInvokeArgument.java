@@ -25,7 +25,7 @@ public class TestInvalidPrimitiveInvokeArgument extends SmaliTest {
 						"Method not decompiled: types.TestInvalidPrimitiveInvokeArgument.intToFloatVirtual(types.TestInvalidPrimitiveInvokeArgument, int):void")
 				.contains(
 						"Method not decompiled: types.TestInvalidPrimitiveInvokeArgument.intToFloatConstructor(int):types.TestInvalidPrimitiveInvokeArgument")
-				.contains("consumeFloat(i);")
+				.contains("consumeFloat((float) i);")
 				.contains("consumeFloat(f);")
 				.doesNotContain("Method not decompiled: types.TestInvalidPrimitiveInvokeArgument.valid");
 	}

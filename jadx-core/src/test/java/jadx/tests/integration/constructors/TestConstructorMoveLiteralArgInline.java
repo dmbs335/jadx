@@ -14,6 +14,6 @@ public class TestConstructorMoveLiteralArgInline extends SmaliTest {
 				.code()
 				.doesNotContain("Illegal instructions before constructor call")
 				.doesNotContain("call moved to the top of the method")
-				.contains("this(20);");
+				.contains("this((float) 20);");
 	}
 }

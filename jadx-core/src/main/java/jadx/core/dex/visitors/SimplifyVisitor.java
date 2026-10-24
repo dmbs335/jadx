@@ -228,6 +228,9 @@ public class SimplifyVisitor extends AbstractVisitor {
 		}
 
 		ArgType castToType = (ArgType) castInsn.getIndex();
+		if (castInsn instanceof NumericCastNode && mustPreserveInputNumericCast(mth, castToType, parentInsn)) {
+			return null;
+		}
 		if (castInsn.getType() == InsnType.CAST && mustPreserveNestedNumericCast(argType, castToType, parentInsn)) {
 			return null;
 		}
@@ -297,6 +300,30 @@ public class SimplifyVisitor extends AbstractVisitor {
 	private static boolean isFloatingPoint(ArgType type) {
 		PrimitiveType primitiveType = type.getPrimitiveType();
 		return primitiveType == PrimitiveType.FLOAT || primitiveType == PrimitiveType.DOUBLE;
+	}
+
+	private static boolean mustPreserveInputNumericCast(MethodNode mth, ArgType castType, @Nullable InsnNode parentInsn) {
+		if (parentInsn == null) {
+			return false;
+		}
+		switch (parentInsn.getType()) {
+			case INVOKE:
+			case CONSTRUCTOR:
+				// Removing an input cast can select another overload.
+				return true;
+			case IPUT:
+			case SPUT:
+				// A cast before assignment can round before a second conversion.
+				FieldInfo field = (FieldInfo) ((IndexInsnNode) parentInsn).getIndex();
+				return !field.getType().equals(castType);
+			case RETURN:
+				return !mth.getReturnType().equals(castType);
+			case STR_CONCAT:
+				// String conversion observes the type and value after the cast.
+				return true;
+			default:
+				return false;
+		}
 	}
 
 	private static boolean mustPreserveNestedNumericCast(ArgType sourceType, ArgType castType, @Nullable InsnNode parentInsn) {

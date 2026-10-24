@@ -56,7 +56,7 @@ public class TestNestedFlowWindowCompaction extends IntegrationTest {
 		assertThat(getClassNode(TestCls.class))
 				.code()
 				.containsOne("while (activeCount > 0 && window > 0) {")
-				.containsOne("Math.ceil(((float) window) / ((float) activeCount))")
+				.containsOne("Math.ceil((double) (((float) window) / ((float) activeCount)))")
 				.containsOne("activeCount = nextCount2;")
 				.doesNotContain("Method not decompiled")
 				.doesNotContain("JADX ERROR");
