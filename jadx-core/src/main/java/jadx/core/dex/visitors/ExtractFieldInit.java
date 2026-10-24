@@ -182,7 +182,35 @@ public class ExtractFieldInit extends AbstractVisitor {
 				&& fieldInfo.equals(((IndexInsnNode) innerInsn).getIndex()), true)
 				|| hasInsnBeforeFieldWrite(mth, target, innerInsn -> innerInsn instanceof BaseInvokeNode
 						&& invocationReadsField(cls, (BaseInvokeNode) innerInsn, fieldInfo, InsnType.IGET, new HashSet<>()),
-						false);
+						false)
+				|| rawConstructorCallReadsFieldBeforeWrite(cls, mth, target);
+	}
+
+	private static boolean rawConstructorCallReadsFieldBeforeWrite(ClassNode cls, MethodNode mth, FieldInitInfo target) {
+		ICodeReader codeReader = mth.getCodeReader();
+		int writeOffset = target.putInsn.getOffset();
+		if (codeReader == null || writeOffset < 0) {
+			return false;
+		}
+		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
+		boolean[] found = { false };
+		codeReader.copy().visitInstructions(insnData -> {
+			if (found[0] || insnData.getOffset() >= writeOffset
+					|| !insnData.getOpcode().name().startsWith("INVOKE")
+					|| insnData.getIndexType() != InsnIndexType.METHOD_REF) {
+				return;
+			}
+			insnData.decode();
+			MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
+			if (calledMth.isConstructor()
+					&& (calledMth.getDeclClass().equals(cls.getClassInfo())
+							|| (cls.getSuperClass() != null
+									&& calledMth.getDeclClass().getType().getObject().equals(cls.getSuperClass().getObject())))) {
+				// Implicit super()/this() calls may already be removed from the IR.
+				found[0] = calledMethodReadsField(cls, calledMth, fieldInfo, InsnType.IGET, new HashSet<>(), false);
+			}
+		});
+		return found[0];
 	}
 
 	private static boolean invocationReadsField(ClassNode cls, BaseInvokeNode invoke, FieldInfo fieldInfo,
