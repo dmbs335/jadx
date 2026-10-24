@@ -10,6 +10,7 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import jadx.api.plugins.input.data.AccessFlags;
+import jadx.api.plugins.input.data.CodeFormat;
 import jadx.api.plugins.input.data.ICallSite;
 import jadx.api.plugins.input.data.ICodeReader;
 import jadx.api.plugins.input.data.IMethodHandle;
@@ -444,6 +445,94 @@ public class ExtractFieldInit extends AbstractVisitor {
 		return false;
 	}
 
+	private static boolean resolvedSuperConstructorMayDispatchToUnknownOverride(
+			ClassNode cls, MethodNode mth, FieldInitInfo target) {
+		if (cls.getAccessFlags().isFinal() || cls.getSuperClass() == null) {
+			return false;
+		}
+		ICodeReader codeReader = mth.getCodeReader();
+		int writeOffset = target.putInsn.getOffset();
+		if (codeReader == null || writeOffset < 0) {
+			return false;
+		}
+		int thisReg = getRawThisRegister(mth, codeReader);
+		boolean[] dispatch = { false };
+		codeReader.copy().visitInstructions(insnData -> {
+			insnData.decode();
+			if (dispatch[0] || insnData.getOffset() >= writeOffset
+					|| !insnData.getOpcode().name().startsWith("INVOKE")
+					|| insnData.getIndexType() != InsnIndexType.METHOD_REF
+					|| insnData.getRegsCount() == 0 || insnData.getReg(0) != thisReg) {
+				return;
+			}
+			MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
+			if (calledMth.isConstructor()
+					&& calledMth.getDeclClass().getType().equals(cls.getSuperClass())) {
+				MethodNode superCtor = cls.root().resolveMethod(calledMth);
+				dispatch[0] = superCtor != null
+						&& constructorCallsOverridableMethod(cls, superCtor, new HashSet<>());
+			}
+		});
+		return dispatch[0];
+	}
+
+	private static boolean constructorCallsOverridableMethod(ClassNode cls, MethodNode method, Set<MethodInfo> visited) {
+		if (!visited.add(method.getMethodInfo())) {
+			return false;
+		}
+		ICodeReader codeReader = method.getCodeReader();
+		if (codeReader == null) {
+			return false;
+		}
+		int thisReg = getRawThisRegister(method, codeReader);
+		boolean[] dispatch = { false };
+		codeReader.copy().visitInstructions(insnData -> {
+			// JVM stack register mappings depend on preceding load instructions.
+			insnData.decode();
+			if (dispatch[0] || !insnData.getOpcode().name().startsWith("INVOKE")
+					|| insnData.getIndexType() != InsnIndexType.METHOD_REF) {
+				return;
+			}
+			if (insnData.getRegsCount() == 0 || insnData.getReg(0) != thisReg) {
+				return;
+			}
+			String opcodeName = insnData.getOpcode().name();
+			MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
+			MethodNode callee = cls.root().resolveMethod(calledMth);
+			if (opcodeName.startsWith("INVOKE_VIRTUAL") || opcodeName.startsWith("INVOKE_INTERFACE")) {
+				if (callee == null || !callee.getAccessFlags().isFinal()) {
+					dispatch[0] = true;
+					return;
+				}
+			}
+			if (opcodeName.startsWith("INVOKE_DIRECT") || opcodeName.startsWith("INVOKE_SUPER")
+					|| opcodeName.startsWith("INVOKE_SPECIAL")
+					|| callee != null && callee.getAccessFlags().isFinal()) {
+				if (callee != null) {
+					dispatch[0] = constructorCallsOverridableMethod(cls, callee, visited);
+				} else if (!"java.lang.Object".equals(calledMth.getDeclClass().getType().getObject())) {
+					dispatch[0] = true;
+				}
+			}
+		});
+		return dispatch[0];
+	}
+
+	private static int getRawThisRegister(MethodNode method, ICodeReader codeReader) {
+		if (codeReader.getCodeFormat() == CodeFormat.JVM) {
+			return 0;
+		}
+		int argsStartReg = codeReader.getArgsStartReg();
+		if (argsStartReg >= 0) {
+			return argsStartReg;
+		}
+		int pos = codeReader.getRegistersCount() - 1;
+		for (ArgType argType : method.getMethodInfo().getArgumentsTypes()) {
+			pos -= argType.getRegCount();
+		}
+		return pos;
+	}
+
 	private static boolean invocationReadsField(ClassNode cls, BaseInvokeNode invoke, FieldInfo fieldInfo,
 			InsnType readType, Set<MethodInfo> visited) {
 		if (invoke instanceof InvokeCustomNode) {
@@ -613,6 +702,7 @@ public class ExtractFieldInit extends AbstractVisitor {
 		List<ConstructorInitInfo> infoList = new ArrayList<>(constructors.size());
 		Set<FieldNode> readBeforeWriteFields = new HashSet<>();
 		Set<FieldNode> unverifiableFields = new HashSet<>();
+		Set<FieldNode> externallyObservableFields = new HashSet<>();
 		for (MethodNode constructorMth : constructors) {
 			List<FieldInitInfo> inits = collectFieldsInit(cls, constructorMth, InsnType.IPUT);
 			infoList.add(new ConstructorInitInfo(constructorMth, inits));
@@ -624,11 +714,13 @@ public class ExtractFieldInit extends AbstractVisitor {
 						readBeforeWriteFields.add(initInfo.fieldNode);
 					} else if (unresolvedSuperConstructorMayReadField(cls, constructorMth, initInfo)) {
 						unverifiableFields.add(initInfo.fieldNode);
+					} else if (resolvedSuperConstructorMayDispatchToUnknownOverride(cls, constructorMth, initInfo)) {
+						externallyObservableFields.add(initInfo.fieldNode);
 					}
 				}
 			}
 		}
-		if (!readBeforeWriteFields.isEmpty() || !unverifiableFields.isEmpty()) {
+		if (!readBeforeWriteFields.isEmpty() || !unverifiableFields.isEmpty() || !externallyObservableFields.isEmpty()) {
 			for (FieldNode field : readBeforeWriteFields) {
 				field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
 				field.addWarnComment("Final modifier removed: instance field is read before assignment in constructor");
@@ -636,6 +728,12 @@ public class ExtractFieldInit extends AbstractVisitor {
 			for (FieldNode field : unverifiableFields) {
 				if (!readBeforeWriteFields.contains(field)) {
 					field.addWarnComment("Field initializer kept in constructor: superclass constructor unavailable to verify read order");
+				}
+			}
+			for (FieldNode field : externallyObservableFields) {
+				if (!readBeforeWriteFields.contains(field) && !unverifiableFields.contains(field)) {
+					field.addWarnComment(
+							"Field initializer kept in constructor: superclass constructor may dispatch to an external override");
 				}
 			}
 			return;
