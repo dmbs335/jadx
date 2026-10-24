@@ -302,14 +302,16 @@ public class EnumVisitor extends AbstractVisitor {
 		}
 		RegisterArg coResArg = co.getResult();
 		// The two usual uses are the enum field and values array, but a second use can instead
-		// be an observable call, constructor or field write that must receive the restored enum constant.
+		// be an observable call, constructor, field write or unrelated array fill that must
+		// receive the restored enum constant. The enum values array itself is in toRemove.
 		boolean usedBySideEffect = coResArg != null && coResArg.getSVar().getUseList().stream()
 				.map(RegisterArg::getParentInsn)
 				.anyMatch(useInsn -> useInsn != null
 						&& (useInsn.getType() == InsnType.INVOKE
 								|| useInsn.getType() == InsnType.CONSTRUCTOR
 								|| useInsn.getType() == InsnType.SPUT
-								|| useInsn.getType() == InsnType.IPUT)
+								|| useInsn.getType() == InsnType.IPUT
+								|| useInsn.getType() == InsnType.FILLED_NEW_ARRAY)
 						&& !data.toRemove.contains(useInsn));
 		if (coResArg == null || (coResArg.getSVar().getUseList().size() <= 2 && !usedBySideEffect)) {
 			data.toRemove.add(co);
