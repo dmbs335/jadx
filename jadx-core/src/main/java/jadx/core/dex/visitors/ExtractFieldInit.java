@@ -18,9 +18,9 @@ import jadx.core.dex.attributes.FieldInitInsnAttr;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.info.FieldInfo;
 import jadx.core.dex.info.MethodInfo;
+import jadx.core.dex.instructions.BaseInvokeNode;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
-import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -166,8 +166,8 @@ public class ExtractFieldInit extends AbstractVisitor {
 
 	private static boolean isIndirectStaticFieldReadBeforeWrite(ClassNode cls, MethodNode mth, FieldInitInfo target) {
 		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
-		return hasInsnBeforeStaticFieldWrite(mth, target, innerInsn -> innerInsn instanceof InvokeNode
-				&& methodReadsStaticField(cls, ((InvokeNode) innerInsn).getCallMth(), fieldInfo, new HashSet<>()), false);
+		return hasInsnBeforeStaticFieldWrite(mth, target, innerInsn -> innerInsn instanceof BaseInvokeNode
+				&& methodReadsStaticField(cls, ((BaseInvokeNode) innerInsn).getCallMth(), fieldInfo, new HashSet<>()), false);
 	}
 
 	private static boolean methodReadsStaticField(ClassNode cls, MethodInfo calledMth, FieldInfo fieldInfo, Set<MethodInfo> visited) {
@@ -185,8 +185,8 @@ public class ExtractFieldInit extends AbstractVisitor {
 							&& fieldInfo.equals(((IndexInsnNode) innerInsn).getIndex())) {
 						return true;
 					}
-					if (innerInsn instanceof InvokeNode
-							&& methodReadsStaticField(cls, ((InvokeNode) innerInsn).getCallMth(), fieldInfo, visited)) {
+					if (innerInsn instanceof BaseInvokeNode
+							&& methodReadsStaticField(cls, ((BaseInvokeNode) innerInsn).getCallMth(), fieldInfo, visited)) {
 						return true;
 					}
 					return null;
