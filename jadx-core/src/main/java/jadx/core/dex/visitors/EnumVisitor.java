@@ -301,30 +301,21 @@ public class EnumVisitor extends AbstractVisitor {
 			markArgsForSkip(ctrMth);
 		}
 		RegisterArg coResArg = co.getResult();
-		// The two usual uses are the enum field and values array, but a second use can instead
-		// be an observable call, constructor, field write or unrelated array fill that must
-		// receive the restored enum constant. The enum values array itself is in toRemove.
-		boolean usedBySideEffect = coResArg != null && coResArg.getSVar().getUseList().stream()
-				.map(RegisterArg::getParentInsn)
-				.anyMatch(useInsn -> useInsn != null
-						&& (useInsn.getType() == InsnType.INVOKE
-								|| useInsn.getType() == InsnType.CONSTRUCTOR
-								|| useInsn.getType() == InsnType.SPUT
-								|| useInsn.getType() == InsnType.IPUT
-								|| useInsn.getType() == InsnType.FILLED_NEW_ARRAY)
-						&& !data.toRemove.contains(useInsn));
-		if (coResArg == null || (coResArg.getSVar().getUseList().size() <= 2 && !usedBySideEffect)) {
+		if (coResArg == null) {
 			data.toRemove.add(co);
-		} else {
-			boolean varUseFound = coResArg.getSVar().getUseList().stream()
-					.anyMatch(useArg -> !data.toRemove.contains(useArg.getParentInsn()));
-			if (varUseFound) {
-				// constructor result used in other places -> replace constructor with enum field get (SGET)
-				IndexInsnNode enumGet = new IndexInsnNode(InsnType.SGET, enumField.getField().getFieldInfo(), 0);
-				enumGet.setResult(coResArg.duplicate());
-				BlockUtils.replaceInsn(classInitMth, co, enumGet);
-			}
+			return;
 		}
+		boolean usedOutsideEnumInit = coResArg.getSVar().getUseList().stream()
+				.anyMatch(useArg -> !data.toRemove.contains(useArg.getParentInsn()));
+		if (!usedOutsideEnumInit) {
+			data.toRemove.add(co);
+			return;
+		}
+		// Preserve the original result variable for all uses outside the enum initialization
+		// scaffolding, regardless of their instruction kind or number of uses.
+		IndexInsnNode enumGet = new IndexInsnNode(InsnType.SGET, enumField.getField().getFieldInfo(), 0);
+		enumGet.setResult(coResArg.duplicate());
+		BlockUtils.replaceInsn(classInitMth, co, enumGet);
 	}
 
 	@Nullable
