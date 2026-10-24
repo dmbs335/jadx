@@ -198,7 +198,13 @@ public class ExtractFieldInit extends AbstractVisitor {
 	private static boolean staticInitTriggerReadsField(ClassNode cls, InsnNode insn, FieldInfo fieldInfo) {
 		if (insn instanceof BaseInvokeNode) {
 			BaseInvokeNode invoke = (BaseInvokeNode) insn;
-			if (invocationReadsField(cls, invoke, fieldInfo, InsnType.SGET, new HashSet<>())) {
+			boolean readsField;
+			if (invoke instanceof InvokeNode || invoke instanceof ConstructorInsn) {
+				readsField = initializationPathReadsField(cls, invoke.getCallMth(), fieldInfo, new HashSet<>());
+			} else {
+				readsField = invocationReadsField(cls, invoke, fieldInfo, InsnType.SGET, new HashSet<>());
+			}
+			if (readsField) {
 				return true;
 			}
 			if (invoke instanceof InvokeNode && ((InvokeNode) invoke).getInvokeType() == InvokeType.STATIC) {
