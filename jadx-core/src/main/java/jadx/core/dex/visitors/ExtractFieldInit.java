@@ -235,15 +235,29 @@ public class ExtractFieldInit extends AbstractVisitor {
 
 	private static boolean triggeredClassInitReadsField(ClassNode cls, ArgType classType, FieldInfo fieldInfo,
 			Set<MethodInfo> visited) {
+		return triggeredClassInitReadsField(cls, classType, fieldInfo, visited, new HashSet<>());
+	}
+
+	private static boolean triggeredClassInitReadsField(ClassNode cls, ArgType classType, FieldInfo fieldInfo,
+			Set<MethodInfo> visited, Set<ArgType> visitedTypes) {
 		// The target class is already being initialized while its supertypes run.
-		if (classType.equals(cls.getClassInfo().getType())) {
+		if (classType == null || classType.equals(cls.getClassInfo().getType()) || !visitedTypes.add(classType)) {
 			return false;
 		}
 		ClassNode triggeredCls = cls.root().resolveClass(classType);
-		if (triggeredCls == null || triggeredCls.getClassInitMth() == null) {
+		if (triggeredCls == null) {
 			return false;
 		}
-		return initializationPathReadsField(cls, triggeredCls.getClassInitMth().getMethodInfo(), fieldInfo, visited);
+		if (triggeredClassInitReadsField(cls, triggeredCls.getSuperClass(), fieldInfo, visited, visitedTypes)) {
+			return true;
+		}
+		for (ArgType interfaceType : triggeredCls.getInterfaces()) {
+			if (triggeredClassInitReadsField(cls, interfaceType, fieldInfo, visited, visitedTypes)) {
+				return true;
+			}
+		}
+		MethodNode classInit = triggeredCls.getClassInitMth();
+		return classInit != null && initializationPathReadsField(cls, classInit.getMethodInfo(), fieldInfo, visited);
 	}
 
 	private static boolean initializationPathReadsField(ClassNode cls, MethodInfo methodInfo, FieldInfo fieldInfo,
