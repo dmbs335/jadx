@@ -249,6 +249,11 @@ public class ExtractFieldInit extends AbstractVisitor {
 		if (!unresolvedSuperCall[0]) {
 			return false;
 		}
+		// An override in a descendant (including one absent from the input) can
+		// read an inherited field while the unresolved super constructor runs.
+		if (!cls.getAccessFlags().isFinal() && !target.fieldNode.getAccessFlags().isPrivate()) {
+			return true;
+		}
 		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
 		for (MethodNode method : cls.getMethods()) {
 			AccessInfo flags = method.getAccessFlags();
