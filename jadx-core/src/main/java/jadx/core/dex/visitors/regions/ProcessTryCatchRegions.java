@@ -25,6 +25,7 @@ import jadx.core.dex.instructions.InvokeType;
 import jadx.core.dex.instructions.PhiInsn;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
+import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.nodes.BlockNode;
@@ -340,8 +341,14 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		}
 		if (insn instanceof ArithNode) {
 			ArithNode arith = (ArithNode) insn;
-			return arith.getOpcodeType() == null || !arith.getOpcodeType().isPrimitive()
-					|| arith.getOp() == ArithOp.DIV || arith.getOp() == ArithOp.REM;
+			if (arith.getOpcodeType() == null || !arith.getOpcodeType().isPrimitive()) {
+				return true;
+			}
+			if (arith.getOp() == ArithOp.DIV || arith.getOp() == ArithOp.REM) {
+				InsnArg divisor = arith.getArg(1);
+				return !(divisor instanceof LiteralArg) || ((LiteralArg) divisor).getLiteral() == 0;
+			}
+			return false;
 		}
 		return true;
 	}
