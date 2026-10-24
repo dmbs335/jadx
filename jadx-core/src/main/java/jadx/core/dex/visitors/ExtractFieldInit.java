@@ -287,23 +287,31 @@ public class ExtractFieldInit extends AbstractVisitor {
 			return;
 		}
 		List<ConstructorInitInfo> infoList = new ArrayList<>(constructors.size());
+		Set<FieldNode> readBeforeWriteFields = new HashSet<>();
 		for (MethodNode constructorMth : constructors) {
 			List<FieldInitInfo> inits = collectFieldsInit(cls, constructorMth, InsnType.IPUT);
+			infoList.add(new ConstructorInitInfo(constructorMth, inits));
 			for (FieldInitInfo initInfo : inits) {
 				if (initInfo.fieldNode.getAccessFlags().isFinal()
 						&& initInfo.putInsn.getArgsCount() > 1
 						&& initInfo.putInsn.getArg(1).isThis()
 						&& isInstanceFieldReadBeforeWrite(cls, constructorMth, initInfo)) {
-					initInfo.fieldNode.setAccessFlags(initInfo.fieldNode.getAccessFlags().remove(AccessFlags.FINAL));
-					initInfo.fieldNode.addWarnComment("Final modifier removed: instance field is read before assignment in constructor");
-					return;
+					readBeforeWriteFields.add(initInfo.fieldNode);
 				}
 			}
-			filterFieldsInit(inits);
-			if (inits.isEmpty()) {
+		}
+		if (!readBeforeWriteFields.isEmpty()) {
+			for (FieldNode field : readBeforeWriteFields) {
+				field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
+				field.addWarnComment("Final modifier removed: instance field is read before assignment in constructor");
+			}
+			return;
+		}
+		for (ConstructorInitInfo info : infoList) {
+			filterFieldsInit(info.fieldInits);
+			if (info.fieldInits.isEmpty()) {
 				return;
 			}
-			infoList.add(new ConstructorInitInfo(constructorMth, inits));
 		}
 		// compare collected instructions
 		ConstructorInitInfo common = null;
