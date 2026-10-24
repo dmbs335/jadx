@@ -23,6 +23,7 @@ public class TestJavaOverlappingTypedCatchHandlerThrow extends RaungTest {
 				.contains("Method not decompiled: trycatch.TestJavaOverlappingTypedCatchHandlerThrow.test():int")
 				.contains("Method not decompiled: trycatch.TestJavaOverlappingTypedCatchHandlerThrow.testReturnInvoke():int")
 				.contains("Method not decompiled: trycatch.TestJavaOverlappingTypedCatchHandlerThrow.testReturnDivision():int")
+				.contains("Method not decompiled: trycatch.TestJavaOverlappingTypedCatchHandlerThrow.testReturnDynamicDivision(int):int")
 				.doesNotContain(
 						"Method not decompiled: trycatch.TestJavaOverlappingTypedCatchHandlerThrow.testIncrementWiderThrow(int):int");
 	}

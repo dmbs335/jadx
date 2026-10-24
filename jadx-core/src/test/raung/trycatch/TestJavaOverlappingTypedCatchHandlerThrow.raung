@@ -72,6 +72,31 @@
     ireturn
 .end method
 
+.method public static testReturnDynamicDivision(I)I
+    .max stack 2
+    .max locals 2
+  :start
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchHandlerThrow firstConditional (I)V
+  :middle
+    invokestatic trycatch/TestJavaOverlappingTypedCatchHandlerThrow second ()V
+  :end
+    .catch java/lang/IllegalArgumentException :start .. :middle goto :argument
+    .catch java/lang/RuntimeException :start .. :end goto :runtime
+    iconst_0
+    ireturn
+  :argument
+    astore 1
+    iconst_1
+    iload 0
+    idiv
+    ireturn
+  :runtime
+    astore 1
+    iconst_2
+    ireturn
+.end method
+
 .method public static testIncrementWiderThrow(I)I
     .max stack 2
     .max locals 2

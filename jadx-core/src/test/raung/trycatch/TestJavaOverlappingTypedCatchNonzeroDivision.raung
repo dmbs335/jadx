@@ -28,6 +28,32 @@
     ireturn
 .end method
 
+.method public static testRemainder(I)I
+    .max stack 2
+    .max locals 2
+  :start
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchNonzeroDivision first (I)V
+  :middle
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchNonzeroDivision second (I)V
+  :end
+    .catch java/lang/IllegalArgumentException :start .. :middle goto :argument
+    .catch java/lang/IllegalStateException :start .. :end goto :state
+    iconst_0
+    ireturn
+  :argument
+    astore 1
+    iload 0
+    iconst_2
+    irem
+    ireturn
+  :state
+    astore 1
+    bipush 9
+    ireturn
+.end method
+
 .method public check()V
     .max stack 3
     .max locals 1
@@ -52,6 +78,43 @@
   :try_start
     iconst_3
     invokestatic trycatch/TestJavaOverlappingTypedCatchNonzeroDivision test (I)I
+    pop
+  :try_end
+    .catch java/lang/IllegalArgumentException :try_start .. :try_end goto :caught
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :caught
+    astore 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchNonzeroDivision checkRemainder ()V
+    return
+.end method
+
+.method private static checkRemainder()V
+    .max stack 3
+    .max locals 1
+    iconst_1
+    invokestatic trycatch/TestJavaOverlappingTypedCatchNonzeroDivision testRemainder (I)I
+    iconst_1
+    if_icmpeq :state_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :state_case
+    iconst_2
+    invokestatic trycatch/TestJavaOverlappingTypedCatchNonzeroDivision testRemainder (I)I
+    bipush 9
+    if_icmpeq :outside_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :outside_case
+  :try_start
+    iconst_3
+    invokestatic trycatch/TestJavaOverlappingTypedCatchNonzeroDivision testRemainder (I)I
     pop
   :try_end
     .catch java/lang/IllegalArgumentException :try_start .. :try_end goto :caught

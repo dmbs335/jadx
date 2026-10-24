@@ -1,0 +1,40 @@
+.version 49.0
+.class public trycatch/TestJavaOverlappingTypedCatchClassLiteral
+.super java/lang/Object
+
+.method public static test()Ljava/lang/Class;
+    .max stack 2
+    .max locals 1
+  :start
+    invokestatic trycatch/TestJavaOverlappingTypedCatchClassLiteral first ()V
+  :middle
+    invokestatic trycatch/TestJavaOverlappingTypedCatchClassLiteral second ()V
+  :end
+    .catch java/lang/IllegalArgumentException :start .. :middle goto :argument
+    .catch java/lang/LinkageError :start .. :end goto :linkage
+    aconst_null
+    areturn
+  :argument
+    astore 0
+    ldc Ltrycatch/MissingClassLiteralTarget;
+    areturn
+  :linkage
+    astore 0
+    ldc Ljava/lang/Object;
+    areturn
+.end method
+
+.method private static first()V
+    .max stack 2
+    .max locals 0
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+.end method
+
+.method private static second()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
