@@ -5,6 +5,7 @@ import java.util.Objects;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.RegDebugInfoAttr;
 import jadx.core.dex.instructions.args.InsnArg;
+import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.nodes.InsnNode;
 
@@ -53,8 +54,14 @@ public final class SameInstructionsStrategyImpl extends SameInstructionsStrategy
 
 	@Override
 	public boolean isSameArgs(InsnArg dupArg, InsnArg fArg) {
-		if (dupArg == null) {
+		if (dupArg == null || fArg == null) {
 			return false;
+		}
+		if (dupArg.isInsnWrap() || fArg.isInsnWrap()) {
+			if (!dupArg.isInsnWrap() || !fArg.isInsnWrap()) {
+				return false;
+			}
+			return sameInsns(((InsnWrapArg) dupArg).getWrapInsn(), ((InsnWrapArg) fArg).getWrapInsn());
 		}
 		boolean isReg = dupArg.isRegister();
 		if (isReg != fArg.isRegister()) {

@@ -42,6 +42,16 @@ public class TestNumericCastOverloadRoundTrip extends IntegrationTest {
 			return select((double) value);
 		}
 
+		public static int callFloatViaLocal(long value) {
+			float converted = (float) value;
+			return select(converted);
+		}
+
+		public static int callDoubleViaLocal(long value) {
+			double converted = (double) value;
+			return select(converted);
+		}
+
 		public static int constructFloat(long value) {
 			return new Target((float) value).kind;
 		}
@@ -53,6 +63,9 @@ public class TestNumericCastOverloadRoundTrip extends IntegrationTest {
 		public void check() {
 			if (callFloat(16_777_217L) != 2 || callDouble(16_777_217L) != 3) {
 				throw new AssertionError("explicit casts must select their overloads");
+			}
+			if (callFloatViaLocal(16_777_217L) != 2 || callDoubleViaLocal(16_777_217L) != 3) {
+				throw new AssertionError("local conversions must select their overloads");
 			}
 			if (constructFloat(16_777_217L) != 2 || constructDouble(16_777_217L) != 3) {
 				throw new AssertionError("explicit casts must select constructor overloads");
