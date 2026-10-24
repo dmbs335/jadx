@@ -91,4 +91,25 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 				.containsOne("JADX ERROR: Failed to restore enum class")
 				.containsOne("class TestEnumValuesOverwriteNegative extends Enum");
 	}
+
+	@Test
+	public void testConstantOverwrite() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumConstantOverwriteNegative"))
+				.code()
+				.containsOne("Enum constant field is assigned more than once")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumConstantOverwriteNegative extends Enum");
+	}
+
+	@Test
+	public void testValuesHelperSideEffect() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumValuesHelperSideEffectNegative"))
+				.code()
+				.containsOne("Enum values helper has side effects")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumValuesHelperSideEffectNegative extends Enum")
+				.containsOne("SIDE_EFFECT = true;");
+	}
 }

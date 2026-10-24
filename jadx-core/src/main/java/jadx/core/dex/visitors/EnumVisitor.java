@@ -157,7 +157,7 @@ public class EnumVisitor extends AbstractVisitor {
 			cls.addWarnComment("Unexpected branching in enum static init block");
 			return false;
 		}
-		EnumData data = new EnumData(cls, classInitMth, staticBlocks);
+		EnumData data = new EnumData(cls, classInitMth, staticBlocks, findFieldsWithMultipleWrites(classInitMth));
 		if (!searchValuesField(data)) {
 			return false;
 		}
@@ -184,6 +184,10 @@ public class EnumVisitor extends AbstractVisitor {
 		for (int i = 0; i < enumFields.size(); i++) {
 			EnumField enumField = enumFields.get(i);
 			FieldNode fieldNode = enumField.getField();
+			if (data.fieldsWithMultipleWrites.contains(fieldNode.getFieldInfo())) {
+				cls.addWarnComment("Enum constant field is assigned more than once");
+				return false;
+			}
 			if (!seenFields.add(fieldNode.getFieldInfo())) {
 				cls.addWarnComment("$VALUES array contains a duplicate enum field");
 				return false;
@@ -326,7 +330,7 @@ public class EnumVisitor extends AbstractVisitor {
 		if (valuesInitPair == null) {
 			return false;
 		}
-		if (hasMultipleValuesWrites(data)) {
+		if (data.fieldsWithMultipleWrites.contains(data.valuesField.getFieldInfo())) {
 			data.cls.addWarnComment("Enum $VALUES field is assigned more than once");
 			return false;
 		}
@@ -334,22 +338,20 @@ public class EnumVisitor extends AbstractVisitor {
 		return true;
 	}
 
-	private boolean hasMultipleValuesWrites(EnumData data) {
-		FieldInfo valuesFieldInfo = data.valuesField.getFieldInfo();
-		boolean found = false;
-		for (BlockNode block : data.classInitMth.getBasicBlocks()) {
+	private Set<FieldInfo> findFieldsWithMultipleWrites(MethodNode classInitMth) {
+		Set<FieldInfo> seen = new HashSet<>();
+		Set<FieldInfo> multipleWrites = new HashSet<>();
+		for (BlockNode block : classInitMth.getBasicBlocks()) {
 			for (InsnNode insn : block.getInstructions()) {
-				if (insn.getType() != InsnType.SPUT
-						|| !Objects.equals(((IndexInsnNode) insn).getIndex(), valuesFieldInfo)) {
-					continue;
+				if (insn.getType() == InsnType.SPUT) {
+					FieldInfo fieldInfo = (FieldInfo) ((IndexInsnNode) insn).getIndex();
+					if (!seen.add(fieldInfo)) {
+						multipleWrites.add(fieldInfo);
+					}
 				}
-				if (found) {
-					return true;
-				}
-				found = true;
 			}
 		}
-		return false;
+		return multipleWrites;
 	}
 
 	private void processConstructorInsn(EnumData data, EnumField enumField, MethodNode classInitMth) {
@@ -412,6 +414,10 @@ public class EnumVisitor extends AbstractVisitor {
 		if (valuesMth == null || valuesMth.isVoidReturn()) {
 			return null;
 		}
+		if (hasValuesHelperSideEffects(valuesMth)) {
+			enumData.cls.addWarnComment("Enum values helper has side effects");
+			return null;
+		}
 		BlockNode returnBlock = Utils.getOne(valuesMth.getPreExitBlocks());
 		InsnNode returnInsn = BlockUtils.getLastInsn(returnBlock);
 		InsnNode wrappedInsn = getWrappedInsn(getSingleArg(returnInsn));
@@ -423,6 +429,31 @@ public class EnumVisitor extends AbstractVisitor {
 			enumData.valuesMth = valuesMth;
 		}
 		return enumFields;
+	}
+
+	private boolean hasValuesHelperSideEffects(MethodNode valuesMth) {
+		for (BlockNode block : valuesMth.getBasicBlocks()) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (Boolean.TRUE.equals(insn.visitInsns(inner -> {
+					switch (inner.getType()) {
+						case SPUT:
+						case IPUT:
+						case APUT:
+						case INVOKE:
+						case CONSTRUCTOR:
+						case THROW:
+						case MONITOR_ENTER:
+						case MONITOR_EXIT:
+							return Boolean.TRUE;
+						default:
+							return null;
+					}
+				}))) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	private BlockInsnPair getValuesInitInsn(EnumData data) {
@@ -1603,6 +1634,7 @@ public class EnumVisitor extends AbstractVisitor {
 		final ClassNode cls;
 		final MethodNode classInitMth;
 		final List<BlockNode> staticBlocks;
+		final Set<FieldInfo> fieldsWithMultipleWrites;
 		final List<InsnNode> toRemove = new ArrayList<>();
 		final List<FieldNode> fakeFields = new ArrayList<>();
 		final List<EnumValueHelper> valueHelpers = new ArrayList<>();
@@ -1611,10 +1643,11 @@ public class EnumVisitor extends AbstractVisitor {
 		FieldNode valuesField;
 		InsnNode valuesInitInsn;
 
-		public EnumData(ClassNode cls, MethodNode classInitMth, List<BlockNode> staticBlocks) {
+		public EnumData(ClassNode cls, MethodNode classInitMth, List<BlockNode> staticBlocks, Set<FieldInfo> fieldsWithMultipleWrites) {
 			this.cls = cls;
 			this.classInitMth = classInitMth;
 			this.staticBlocks = staticBlocks;
+			this.fieldsWithMultipleWrites = fieldsWithMultipleWrites;
 		}
 	}
 
