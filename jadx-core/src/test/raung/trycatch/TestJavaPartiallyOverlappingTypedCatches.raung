@@ -1,0 +1,108 @@
+.version 49.0
+.class public trycatch/TestJavaPartiallyOverlappingTypedCatches
+.super java/lang/Object
+
+.method public static test(I)I
+    .max stack 2
+    .max locals 2
+  :start
+    iload 0
+    invokestatic trycatch/TestJavaPartiallyOverlappingTypedCatches first (I)V
+  :middle
+    iload 0
+    invokestatic trycatch/TestJavaPartiallyOverlappingTypedCatches second (I)V
+  :third
+    iload 0
+    invokestatic trycatch/TestJavaPartiallyOverlappingTypedCatches third (I)V
+  :end
+    .catch java/lang/IllegalArgumentException :start .. :third goto :argument
+    .catch java/lang/IllegalStateException :middle .. :end goto :state
+    iconst_0
+    ireturn
+  :argument
+    astore 1
+    iconst_1
+    ireturn
+  :state
+    astore 1
+    iconst_2
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 3
+    .max locals 1
+    iconst_2
+    invokestatic trycatch/TestJavaPartiallyOverlappingTypedCatches test (I)I
+    iconst_1
+    if_icmpeq :third_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :third_case
+    iconst_4
+    invokestatic trycatch/TestJavaPartiallyOverlappingTypedCatches test (I)I
+    iconst_2
+    if_icmpeq :outside_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :outside_case
+  :try_start
+    iconst_1
+    invokestatic trycatch/TestJavaPartiallyOverlappingTypedCatches test (I)I
+    pop
+  :try_end
+    .catch java/lang/IllegalStateException :try_start .. :try_end goto :caught
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :caught
+    astore 0
+    return
+.end method
+
+.method private static first(I)V
+    .max stack 2
+    .max locals 1
+    iload 0
+    iconst_1
+    if_icmpne :done
+    new java/lang/IllegalStateException
+    dup
+    invokespecial java/lang/IllegalStateException <init> ()V
+    athrow
+  :done
+    return
+.end method
+
+.method private static second(I)V
+    .max stack 2
+    .max locals 1
+    iload 0
+    iconst_2
+    if_icmpne :done
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+  :done
+    return
+.end method
+
+.method private static third(I)V
+    .max stack 2
+    .max locals 1
+    iload 0
+    iconst_4
+    if_icmpne :done
+    new java/lang/IllegalStateException
+    dup
+    invokespecial java/lang/IllegalStateException <init> ()V
+    athrow
+  :done
+    return
+.end method

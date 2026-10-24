@@ -1,0 +1,139 @@
+.version 49.0
+.class public trycatch/TestJavaPartiallyOverlappingSameCatch
+.super java/lang/Object
+
+.method public static test(I)I
+    .max stack 2
+    .max locals 2
+  :start
+    iload 0
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch throwIf (I)V
+  :middle
+    iload 0
+    iconst_1
+    isub
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch throwIf (I)V
+  :third
+    iload 0
+    iconst_3
+    isub
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch throwIf (I)V
+  :end
+    .catch java/lang/IllegalArgumentException :start .. :third goto :first_handler
+    .catch java/lang/IllegalArgumentException :middle .. :end goto :second_handler
+    iconst_0
+    ireturn
+  :first_handler
+    astore 1
+    iconst_1
+    ireturn
+  :second_handler
+    astore 1
+    iconst_2
+    ireturn
+.end method
+
+.method public static testReversed(I)I
+    .max stack 2
+    .max locals 2
+  :start
+    iload 0
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch throwIf (I)V
+  :middle
+    iload 0
+    iconst_1
+    isub
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch throwIf (I)V
+  :third
+    iload 0
+    iconst_3
+    isub
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch throwIf (I)V
+  :end
+    .catch java/lang/IllegalArgumentException :middle .. :end goto :second_handler
+    .catch java/lang/IllegalArgumentException :start .. :third goto :first_handler
+    iconst_0
+    ireturn
+  :first_handler
+    astore 1
+    iconst_1
+    ireturn
+  :second_handler
+    astore 1
+    iconst_2
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 3
+    .max locals 0
+    iconst_1
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch test (I)I
+    iconst_1
+    if_icmpeq :middle_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :middle_case
+    iconst_2
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch test (I)I
+    iconst_1
+    if_icmpeq :third_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :third_case
+    iconst_4
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch test (I)I
+    iconst_2
+    if_icmpeq :done
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :done
+    iconst_1
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch testReversed (I)I
+    iconst_1
+    if_icmpeq :reversed_middle_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :reversed_middle_case
+    iconst_2
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch testReversed (I)I
+    iconst_2
+    if_icmpeq :reversed_third_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :reversed_third_case
+    iconst_4
+    invokestatic trycatch/TestJavaPartiallyOverlappingSameCatch testReversed (I)I
+    iconst_2
+    if_icmpeq :reversed_done
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :reversed_done
+    return
+.end method
+
+.method private static throwIf(I)V
+    .max stack 2
+    .max locals 1
+    iload 0
+    iconst_1
+    if_icmpne :done
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+  :done
+    return
+.end method

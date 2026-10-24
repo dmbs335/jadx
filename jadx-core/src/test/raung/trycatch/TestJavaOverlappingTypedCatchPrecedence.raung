@@ -1,0 +1,79 @@
+.version 49.0
+.class public trycatch/TestJavaOverlappingTypedCatchPrecedence
+.super java/lang/Object
+
+.method public static test(I)I
+    .max stack 2
+    .max locals 2
+  :start
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchPrecedence first (I)V
+  :middle
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchPrecedence second (I)V
+  :end
+    .catch java/lang/RuntimeException :start .. :end goto :runtime
+    .catch java/lang/IllegalArgumentException :start .. :middle goto :argument
+    iconst_0
+    ireturn
+  :argument
+    astore 1
+    iconst_1
+    ireturn
+  :runtime
+    astore 1
+    iconst_2
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 3
+    .max locals 0
+    iconst_1
+    invokestatic trycatch/TestJavaOverlappingTypedCatchPrecedence test (I)I
+    iconst_2
+    if_icmpeq :second_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :second_case
+    iconst_2
+    invokestatic trycatch/TestJavaOverlappingTypedCatchPrecedence test (I)I
+    iconst_2
+    if_icmpeq :done
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :done
+    return
+.end method
+
+.method private static first(I)V
+    .max stack 2
+    .max locals 1
+    iload 0
+    iconst_1
+    if_icmpne :done
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+  :done
+    return
+.end method
+
+.method private static second(I)V
+    .max stack 2
+    .max locals 1
+    iload 0
+    iconst_2
+    if_icmpne :done
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+  :done
+    return
+.end method

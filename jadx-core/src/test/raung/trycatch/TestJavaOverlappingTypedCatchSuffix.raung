@@ -1,0 +1,57 @@
+.version 49.0
+.class public trycatch/TestJavaOverlappingTypedCatchSuffix
+.super java/lang/Object
+
+.method public static test()I
+    .max stack 2
+    .max locals 1
+  :start
+    invokestatic trycatch/TestJavaOverlappingTypedCatchSuffix first ()V
+  :middle
+    invokestatic trycatch/TestJavaOverlappingTypedCatchSuffix second ()V
+  :end
+    .catch java/lang/IllegalArgumentException :middle .. :end goto :argument
+    .catch java/lang/IllegalStateException :start .. :end goto :state
+    iconst_0
+    ireturn
+  :argument
+    astore 0
+    iconst_1
+    ireturn
+  :state
+    astore 0
+    iconst_2
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 2
+    .max locals 1
+  :try_start
+    invokestatic trycatch/TestJavaOverlappingTypedCatchSuffix test ()I
+    pop
+  :try_end
+    .catch java/lang/IllegalArgumentException :try_start .. :try_end goto :caught
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :caught
+    astore 0
+    return
+.end method
+
+.method private static first()V
+    .max stack 2
+    .max locals 0
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+.end method
+
+.method private static second()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
