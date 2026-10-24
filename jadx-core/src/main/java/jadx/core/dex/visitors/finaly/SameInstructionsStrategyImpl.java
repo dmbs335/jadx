@@ -1,13 +1,17 @@
 package jadx.core.dex.visitors.finaly;
 
-import java.util.Objects;
+import java.util.HashSet;
+import java.util.Set;
 
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.RegDebugInfoAttr;
+import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.RegisterArg;
+import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.nodes.InsnNode;
+import jadx.core.utils.Pair;
 
 public final class SameInstructionsStrategyImpl extends SameInstructionsStrategy {
 
@@ -20,32 +24,28 @@ public final class SameInstructionsStrategyImpl extends SameInstructionsStrategy
 		return dupDbgInfo.equals(fDbgInfo);
 	}
 
-	private static boolean assignInsnDifferent(RegisterArg dupReg, RegisterArg fReg) {
+	private boolean assignInsnDifferent(RegisterArg dupReg, RegisterArg fReg, Set<Pair<SSAVar>> comparing) {
 		InsnNode assignInsn = fReg.getAssignInsn();
 		InsnNode dupAssign = dupReg.getAssignInsn();
 		if (assignInsn == null || dupAssign == null) {
 			return true;
 		}
-		if (!assignInsn.isSame(dupAssign)) {
-			return true;
-		}
-		if (assignInsn.isConstInsn() && dupAssign.isConstInsn()) {
-			// Do this and not deep equals since we already know that the result is the same and that the insn
-			// type is the same
-			return !Objects.equals(assignInsn.getArguments(), dupAssign.getArguments());
-		}
-		return false;
+		return !sameInsns(dupAssign, assignInsn, comparing);
 	}
 
 	@Override
 	public boolean sameInsns(InsnNode dupInsn, InsnNode fInsn) {
+		return sameInsns(dupInsn, fInsn, new HashSet<>());
+	}
+
+	private boolean sameInsns(InsnNode dupInsn, InsnNode fInsn, Set<Pair<SSAVar>> comparing) {
 		if (!dupInsn.isSame(fInsn)) {
 			return false;
 		}
 		for (int i = 0; i < dupInsn.getArgsCount(); i++) {
 			InsnArg dupArg = dupInsn.getArg(i);
 			InsnArg fArg = fInsn.getArg(i);
-			if (!isSameArgs(dupArg, fArg)) {
+			if (!isSameArgs(dupArg, fArg, comparing)) {
 				return false;
 			}
 		}
@@ -54,6 +54,10 @@ public final class SameInstructionsStrategyImpl extends SameInstructionsStrategy
 
 	@Override
 	public boolean isSameArgs(InsnArg dupArg, InsnArg fArg) {
+		return isSameArgs(dupArg, fArg, new HashSet<>());
+	}
+
+	private boolean isSameArgs(InsnArg dupArg, InsnArg fArg, Set<Pair<SSAVar>> comparing) {
 		if (dupArg == null || fArg == null) {
 			return false;
 		}
@@ -61,7 +65,7 @@ public final class SameInstructionsStrategyImpl extends SameInstructionsStrategy
 			if (!dupArg.isInsnWrap() || !fArg.isInsnWrap()) {
 				return false;
 			}
-			return sameInsns(((InsnWrapArg) dupArg).getWrapInsn(), ((InsnWrapArg) fArg).getWrapInsn());
+			return sameInsns(((InsnWrapArg) dupArg).getWrapInsn(), ((InsnWrapArg) fArg).getWrapInsn(), comparing);
 		}
 		boolean isReg = dupArg.isRegister();
 		if (isReg != fArg.isRegister()) {
@@ -70,10 +74,20 @@ public final class SameInstructionsStrategyImpl extends SameInstructionsStrategy
 		if (isReg) {
 			RegisterArg dupReg = (RegisterArg) dupArg;
 			RegisterArg fReg = (RegisterArg) fArg;
-			if (!dupReg.sameCodeVar(fReg)
-					&& !sameDebugInfo(dupReg, fReg)
-					&& assignInsnDifferent(dupReg, fReg)) {
-				return false;
+			CodeVar dupCodeVar = dupReg.getSVar().getCodeVarOrNull();
+			if (!(dupCodeVar != null && dupCodeVar == fReg.getSVar().getCodeVarOrNull())
+					&& !sameDebugInfo(dupReg, fReg)) {
+				Pair<SSAVar> pair = new Pair<>(dupReg.getSVar(), fReg.getSVar());
+				if (!comparing.add(pair)) {
+					return false;
+				}
+				try {
+					if (assignInsnDifferent(dupReg, fReg, comparing)) {
+						return false;
+					}
+				} finally {
+					comparing.remove(pair);
+				}
 			}
 		}
 		boolean remConst = dupArg.isConst();
