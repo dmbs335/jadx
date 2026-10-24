@@ -380,13 +380,11 @@ public class ProcessAnonymous extends AbstractVisitor {
 		if (cls.root().getClsp().isImplements(superCls.getObject(), interfaceType.getObject())) {
 			return superCls;
 		}
-		if (cls.root().getArgs().isAllowInlineKotlinLambda()) {
-			if (superCls.getObject().equals("kotlin.jvm.internal.Lambda")) {
-				// Inline such class with have different semantic: missing 'arity' property.
-				// For now, it is unclear how it may affect code execution.
-				return interfaceType;
-			}
-		}
+		// An anonymous class can extend the superclass or implement the interface,
+		// but not both when the superclass does not already implement that interface.
+		// In particular, rendering a Kotlin Lambda as "new Function1() { ... }" loses
+		// its Lambda superclass and leaves an illegal super(arity) constructor call.
+		// Keep the concrete class instead of silently changing its type and behavior.
 		return null;
 	}
 

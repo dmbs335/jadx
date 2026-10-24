@@ -37,13 +37,15 @@ public class TestSyntheticInline3 extends SmaliTest {
 
 	@Test
 	public void testSmali() {
-		allowWarnInCode();
 		disableCompilation();
 		assertThat(getClassNodeFromSmaliFiles())
 				.code()
+				.contains("static final class AnonymousClass1 extends Lambda implements Function1<String, Unit>")
+				.contains("new AnonymousClass1(this);")
+				.contains("this.this$0 = testSyntheticInline3;")
 				.doesNotContain(".access$getDialog$p(")
 				.doesNotContain(".access$getChooserIntent(")
 				.doesNotContain("= r1;")
-				.doesNotContain("this$0");
+				.doesNotContain("new Function1<String, Unit>()");
 	}
 }

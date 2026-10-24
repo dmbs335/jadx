@@ -80,7 +80,7 @@ public class ClassModifier extends AbstractVisitor {
 	 */
 	private static void removeSyntheticFields(ClassNode cls) {
 		boolean inline = cls.isAnonymous();
-		if (inline || cls.getClassInfo().isInner()) {
+		if (inline || cls.getClassInfo().isInner() && !cls.getAccessFlags().isStatic()) {
 			for (FieldNode field : cls.getFields()) {
 				ArgType fldType = field.getType();
 				if (field.getAccessFlags().isSynthetic() && fldType.isObject() && !fldType.isGenericType()) {
