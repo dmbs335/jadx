@@ -437,10 +437,14 @@ public class SimplifyVisitor extends AbstractVisitor {
 			ConstructorInsn constrInsn = (ConstructorInsn) firstInsn;
 			if (constrInsn.getArgsCount() == 1) {
 				ArgType argType = constrInsn.getCallMth().getArgumentsTypes().get(0);
-				if (!argType.isObject()) {
+				InsnArg initialArg = constrInsn.getArg(0);
+				// StringBuilder(String/CharSequence) throws for null, unlike string concatenation.
+				// A constant string is the only value known to preserve constructor semantics here.
+				if (!argType.isObject() || !initialArg.isInsnWrap()
+						|| !(((InsnWrapArg) initialArg).getWrapInsn() instanceof ConstStringNode)) {
 					return null;
 				}
-				args.add(constrInsn.getArg(0));
+				args.add(initialArg);
 			}
 			for (int i = 1; i < chainSize; i++) {
 				InsnNode chainInsn = chain.get(i);
@@ -462,6 +466,11 @@ public class SimplifyVisitor extends AbstractVisitor {
 				String argStr = Utils.listToString(args, InsnArg::toShortString);
 				mth.addDebugComment("TODO: convert one arg to string using `String.valueOf()`, args: " + argStr);
 				return null;
+			}
+			if (args.size() == 1) {
+				// A single concat argument would be emitted unchanged and would not
+				// perform StringBuilder.append's null-to-"null" conversion.
+				args.add(0, InsnArg.wrapArg(new ConstStringNode("")));
 			}
 
 			// all check passed
@@ -582,11 +591,20 @@ public class SimplifyVisitor extends AbstractVisitor {
 		if (chainInsn.getType() == InsnType.INVOKE && chainInsn.getArgsCount() == 2) {
 			MethodInfo callMth = ((InvokeNode) chainInsn).getCallMth();
 			if (callMth.getDeclClass().getFullName().equals(Consts.CLASS_STRING_BUILDER)
-					&& callMth.getName().equals("append")) {
+					&& callMth.getName().equals("append")
+					&& isStringConcatCompatibleAppend(callMth)) {
 				return chainInsn.getArg(1);
 			}
 		}
 		return null;
+	}
+
+	private static boolean isStringConcatCompatibleAppend(MethodInfo callMth) {
+		ArgType type = callMth.getArgumentsTypes().get(0);
+		return type.equals(ArgType.STRING) || type.equals(ArgType.OBJECT)
+				|| type.equals(ArgType.BOOLEAN) || type.equals(ArgType.CHAR)
+				|| type.equals(ArgType.INT) || type.equals(ArgType.LONG)
+				|| type.equals(ArgType.FLOAT) || type.equals(ArgType.DOUBLE);
 	}
 
 	private static InsnNode simplifyArith(ArithNode arith) {
