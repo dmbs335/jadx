@@ -6,6 +6,22 @@ import jadx.tests.api.extensions.profiles.TestWithProfiles;
 
 public class TestNumericCastOverloadRoundTrip extends IntegrationTest {
 	public static class TestCls {
+		public static class Target {
+			final int kind;
+
+			public Target(long value) {
+				this.kind = 1;
+			}
+
+			public Target(float value) {
+				this.kind = 2;
+			}
+
+			public Target(double value) {
+				this.kind = 3;
+			}
+		}
+
 		public static int select(long value) {
 			return 1;
 		}
@@ -26,9 +42,20 @@ public class TestNumericCastOverloadRoundTrip extends IntegrationTest {
 			return select((double) value);
 		}
 
+		public static int constructFloat(long value) {
+			return new Target((float) value).kind;
+		}
+
+		public static int constructDouble(long value) {
+			return new Target((double) value).kind;
+		}
+
 		public void check() {
 			if (callFloat(16_777_217L) != 2 || callDouble(16_777_217L) != 3) {
 				throw new AssertionError("explicit casts must select their overloads");
+			}
+			if (constructFloat(16_777_217L) != 2 || constructDouble(16_777_217L) != 3) {
+				throw new AssertionError("explicit casts must select constructor overloads");
 			}
 		}
 	}

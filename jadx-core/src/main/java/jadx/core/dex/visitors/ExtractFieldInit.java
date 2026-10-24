@@ -362,11 +362,31 @@ public class ExtractFieldInit extends AbstractVisitor {
 		for (int i = 0; i < count; i++) {
 			InsnNode baseInsn = base.get(i).putInsn;
 			InsnNode otherInsn = other.get(i).putInsn;
-			if (!baseInsn.isSame(otherInsn)) {
+			if (!baseInsn.isSame(otherInsn) || !isSameInitArg(baseInsn.getArg(0), otherInsn.getArg(0))) {
 				return false;
 			}
 		}
 		return true;
+	}
+
+	private static boolean isSameInitArg(InsnArg base, InsnArg other) {
+		if (base.isThis() || other.isThis()) {
+			return base.isThis() && other.isThis();
+		}
+		if (base.isInsnWrap() && other.isInsnWrap()) {
+			InsnNode baseInsn = ((InsnWrapArg) base).getWrapInsn();
+			InsnNode otherInsn = ((InsnWrapArg) other).getWrapInsn();
+			if (!baseInsn.isSame(otherInsn)) {
+				return false;
+			}
+			for (int i = 0; i < baseInsn.getArgsCount(); i++) {
+				if (!isSameInitArg(baseInsn.getArg(i), otherInsn.getArg(i))) {
+					return false;
+				}
+			}
+			return true;
+		}
+		return base.equals(other);
 	}
 
 	private static List<MethodNode> getConstructorsList(ClassNode cls) {
