@@ -223,14 +223,18 @@ public class ExtractFieldInit extends AbstractVisitor {
 			boolean changed;
 			do {
 				changed = false;
+				boolean excludedWriteSeen = false;
 				for (FieldInitInfo initInfo : inits) {
 					FieldInfo fieldInfo = initInfo.fieldNode.getFieldInfo();
 					if (excludedFields.contains(fieldInfo)) {
+						excludedWriteSeen = true;
 						continue;
 					}
-					if (insnUseExcludedField(initInfo, excludedFields)) {
+					// A write left in the constructor is an ordering barrier for later writes.
+					if (excludedWriteSeen || insnUseExcludedField(initInfo, excludedFields)) {
 						excludedFields.add(fieldInfo);
 						changed = true;
+						excludedWriteSeen = true;
 					}
 				}
 			} while (changed);
