@@ -75,6 +75,10 @@ public class EncodedValueUtils {
 	}
 
 	public static InsnArg convertToInsnArg(RootNode root, EncodedValue value) {
+		return convertToInsnArg(root, value, null);
+	}
+
+	public static InsnArg convertToInsnArg(RootNode root, EncodedValue value, @Nullable ArgType callerType) {
 		Object obj = value.getValue();
 		switch (value.getType()) {
 			case ENCODED_NULL:
@@ -88,7 +92,7 @@ public class EncodedValueUtils {
 				return (InsnArg) convertToConstValue(value);
 
 			case ENCODED_BOOLEAN:
-				return InsnArg.lit(((Boolean) obj) ? 0 : 1, ArgType.BOOLEAN);
+				return InsnArg.lit(((Boolean) obj) ? 1 : 0, ArgType.BOOLEAN);
 			case ENCODED_STRING:
 				return InsnArg.wrapArg(new ConstStringNode((String) obj));
 			case ENCODED_TYPE:
@@ -96,7 +100,7 @@ public class EncodedValueUtils {
 			case ENCODED_METHOD_TYPE:
 				return InsnArg.wrapArg(buildMethodType(root, (IMethodProto) obj));
 			case ENCODED_METHOD_HANDLE:
-				return InsnArg.wrapArg(buildMethodHandle(root, (IMethodHandle) obj));
+				return InsnArg.wrapArg(buildMethodHandle(root, (IMethodHandle) obj, callerType));
 
 		}
 		throw new JadxRuntimeException("Unsupported type for raw invoke-custom: " + value.getType());
@@ -137,12 +141,45 @@ public class EncodedValueUtils {
 	/**
 	 * Build `MethodHandles.lookup().find{type}(methodCls, methodName, methodType)`
 	 */
-	private static InsnNode buildMethodHandle(RootNode root, IMethodHandle methodHandle) {
+	private static InsnNode buildMethodHandle(RootNode root, IMethodHandle methodHandle, @Nullable ArgType callerType) {
 		if (methodHandle.getType().isField()) {
 			return buildFieldMethodHandle(root, methodHandle);
 		}
 		IMethodRef methodRef = methodHandle.getMethodRef();
+		if (methodRef == null) {
+			throw new JadxRuntimeException("Missing method reference for method handle: " + methodHandle.getType());
+		}
 		methodRef.load();
+		if (methodHandle.getType() == MethodHandleType.INVOKE_CONSTRUCTOR) {
+			if (!"<init>".equals(methodRef.getName()) || !"V".equals(methodRef.getReturnType())) {
+				throw new JadxRuntimeException("Invalid constructor method handle reference: " + methodRef);
+			}
+			ClassInfo lookupCls = ClassInfo.fromName(root, "java.lang.invoke.MethodHandles.Lookup");
+			MethodInfo findConstructor = MethodInfo.fromDetails(root, lookupCls, "findConstructor",
+					Arrays.asList(ArgType.CLASS, ArgType.object("java.lang.invoke.MethodType")),
+					ArgType.object("java.lang.invoke.MethodHandle"));
+			InvokeNode invoke = new InvokeNode(findConstructor, InvokeType.DIRECT, 3);
+			invoke.addArg(buildLookupArg(root));
+			invoke.addArg(InsnArg.wrapArg(new ConstClassNode(ArgType.object(methodRef.getParentClassType()))));
+			invoke.addArg(InsnArg.wrapArg(buildMethodType(root, methodRef)));
+			return invoke;
+		}
+		if (methodHandle.getType() == MethodHandleType.INVOKE_DIRECT) {
+			if (callerType == null) {
+				throw new JadxRuntimeException("Missing caller class for direct method handle: " + methodRef);
+			}
+			ClassInfo lookupCls = ClassInfo.fromName(root, "java.lang.invoke.MethodHandles.Lookup");
+			MethodInfo findSpecial = MethodInfo.fromDetails(root, lookupCls, "findSpecial",
+					Arrays.asList(ArgType.CLASS, ArgType.STRING, ArgType.object("java.lang.invoke.MethodType"), ArgType.CLASS),
+					ArgType.object("java.lang.invoke.MethodHandle"));
+			InvokeNode invoke = new InvokeNode(findSpecial, InvokeType.DIRECT, 5);
+			invoke.addArg(buildLookupArg(root));
+			invoke.addArg(InsnArg.wrapArg(new ConstClassNode(ArgType.object(methodRef.getParentClassType()))));
+			invoke.addArg(InsnArg.wrapArg(new ConstStringNode(methodRef.getName())));
+			invoke.addArg(InsnArg.wrapArg(buildMethodType(root, methodRef)));
+			invoke.addArg(InsnArg.wrapArg(new ConstClassNode(callerType)));
+			return invoke;
+		}
 
 		ClassInfo lookupCls = ClassInfo.fromName(root, "java.lang.invoke.MethodHandles.Lookup");
 		MethodInfo findMethod = MethodInfo.fromDetails(root, lookupCls,
@@ -208,15 +245,12 @@ public class EncodedValueUtils {
 		switch (type) {
 			case INVOKE_STATIC:
 				return "findStatic";
-			case INVOKE_CONSTRUCTOR:
-				return "findConstructor";
 			case INVOKE_INSTANCE:
-			case INVOKE_DIRECT:
 			case INVOKE_INTERFACE:
 				return "findVirtual";
 
 			default:
-				return "<" + type + '>';
+				throw new JadxRuntimeException("Method handle lookup needs caller context: " + type);
 		}
 	}
 }

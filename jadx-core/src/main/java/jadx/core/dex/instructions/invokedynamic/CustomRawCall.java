@@ -9,7 +9,6 @@ import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.insns.InsnData;
 import jadx.core.dex.info.ClassInfo;
 import jadx.core.dex.info.MethodInfo;
-import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.InvokeCustomRawNode;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.InvokeType;
@@ -59,10 +58,9 @@ public class CustomRawCall {
 		for (int i = 1; i < valuesCount; i++) {
 			EncodedValue value = values.get(i);
 			try {
-				list.add(convertToInsnArg(root, value));
+				list.add(convertToInsnArg(root, value, mth.getParentClass().getClassInfo().getType()));
 			} catch (Exception e) {
-				mth.addWarnComment("Failed to build arg in invoke-custom insn: " + value, e);
-				list.add(InsnArg.wrapArg(new ConstStringNode(value.toString())));
+				throw new JadxRuntimeException("Failed to decode invoke-custom argument " + i + ": " + value, e);
 			}
 		}
 		return list;
