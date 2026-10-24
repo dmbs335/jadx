@@ -40,7 +40,6 @@ public class TestSyntheticInline2 extends IntegrationTest {
 
 	@Test
 	public void test() {
-		disableCompilation(); // strange java compiler bug
 		assertThat(getClassNode(TestCls.class))
 				.code()
 				.doesNotContain("synthetic")

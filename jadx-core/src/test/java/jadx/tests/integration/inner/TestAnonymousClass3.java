@@ -40,7 +40,6 @@ public class TestAnonymousClass3 extends IntegrationTest {
 
 	@Test
 	public void test() {
-		disableCompilation();
 		JadxAssertions.assertThat(getClassNode(TestCls.class))
 				.code()
 				.contains(indent(4) + "public void run() {")

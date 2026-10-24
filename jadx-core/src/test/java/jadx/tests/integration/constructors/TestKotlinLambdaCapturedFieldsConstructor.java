@@ -14,6 +14,10 @@ public class TestKotlinLambdaCapturedFieldsConstructor extends SmaliTest {
 		assertThat(getClassNodeFromSmaliFiles())
 				.code()
 				.doesNotContain("'super' call moved")
+				.contains("class Capture extends Lambda implements Function3")
+				.contains("this.capture4 = obj4;")
+				.contains("return new Capture(obj, obj2, obj3, obj4);")
+				.doesNotContain("new Function3()")
 				.contains("super(3);");
 	}
 }
