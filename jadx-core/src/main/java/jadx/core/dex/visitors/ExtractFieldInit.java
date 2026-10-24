@@ -163,17 +163,27 @@ public class ExtractFieldInit extends AbstractVisitor {
 
 	private static boolean isStaticFieldReadBeforeWrite(MethodNode mth, FieldInitInfo target) {
 		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
-		return hasInsnBeforeStaticFieldWrite(mth, target, innerInsn -> innerInsn.getType() == InsnType.SGET
+		return hasInsnBeforeFieldWrite(mth, target, innerInsn -> innerInsn.getType() == InsnType.SGET
 				&& fieldInfo.equals(((IndexInsnNode) innerInsn).getIndex()), true);
 	}
 
 	private static boolean isIndirectStaticFieldReadBeforeWrite(ClassNode cls, MethodNode mth, FieldInitInfo target) {
 		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
-		return hasInsnBeforeStaticFieldWrite(mth, target, innerInsn -> innerInsn instanceof BaseInvokeNode
-				&& methodReadsStaticField(cls, ((BaseInvokeNode) innerInsn).getCallMth(), fieldInfo, new HashSet<>()), false);
+		return hasInsnBeforeFieldWrite(mth, target, innerInsn -> innerInsn instanceof BaseInvokeNode
+				&& methodReadsField(cls, ((BaseInvokeNode) innerInsn).getCallMth(), fieldInfo, InsnType.SGET, new HashSet<>()), false);
 	}
 
-	private static boolean methodReadsStaticField(ClassNode cls, MethodInfo calledMth, FieldInfo fieldInfo, Set<MethodInfo> visited) {
+	private static boolean isInstanceFieldReadBeforeWrite(ClassNode cls, MethodNode mth, FieldInitInfo target) {
+		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
+		return hasInsnBeforeFieldWrite(mth, target, innerInsn -> innerInsn.getType() == InsnType.IGET
+				&& fieldInfo.equals(((IndexInsnNode) innerInsn).getIndex()), true)
+				|| hasInsnBeforeFieldWrite(mth, target, innerInsn -> innerInsn instanceof BaseInvokeNode
+						&& methodReadsField(cls, ((BaseInvokeNode) innerInsn).getCallMth(), fieldInfo, InsnType.IGET, new HashSet<>()),
+						false);
+	}
+
+	private static boolean methodReadsField(ClassNode cls, MethodInfo calledMth, FieldInfo fieldInfo,
+			InsnType readType, Set<MethodInfo> visited) {
 		if (!visited.add(calledMth)) {
 			return false;
 		}
@@ -184,17 +194,17 @@ public class ExtractFieldInit extends AbstractVisitor {
 		// Other classes may be processed concurrently, so inspect their immutable
 		// input code instead of partially built or changing basic blocks.
 		if (callee.getParentClass() != cls || callee.getBasicBlocks() == null) {
-			return rawMethodReadsStaticField(cls, callee, fieldInfo, visited);
+			return rawMethodReadsField(cls, callee, fieldInfo, readType, visited);
 		}
 		for (BlockNode block : callee.getBasicBlocks()) {
 			for (InsnNode insn : block.getInstructions()) {
 				Boolean read = insn.visitInsns(innerInsn -> {
-					if (innerInsn.getType() == InsnType.SGET
+					if (innerInsn.getType() == readType
 							&& fieldInfo.equals(((IndexInsnNode) innerInsn).getIndex())) {
 						return true;
 					}
 					if (innerInsn instanceof BaseInvokeNode
-							&& methodReadsStaticField(cls, ((BaseInvokeNode) innerInsn).getCallMth(), fieldInfo, visited)) {
+							&& methodReadsField(cls, ((BaseInvokeNode) innerInsn).getCallMth(), fieldInfo, readType, visited)) {
 						return true;
 					}
 					return null;
@@ -207,30 +217,32 @@ public class ExtractFieldInit extends AbstractVisitor {
 		return false;
 	}
 
-	private static boolean rawMethodReadsStaticField(ClassNode cls, MethodNode callee, FieldInfo fieldInfo, Set<MethodInfo> visited) {
+	private static boolean rawMethodReadsField(ClassNode cls, MethodNode callee, FieldInfo fieldInfo,
+			InsnType readType, Set<MethodInfo> visited) {
 		ICodeReader codeReader = callee.getCodeReader();
 		if (codeReader == null) {
 			return false;
 		}
+		String readPrefix = readType == InsnType.SGET ? "SGET" : "IGET";
 		boolean[] found = { false };
 		codeReader.copy().visitInstructions(insnData -> {
 			if (found[0]) {
 				return;
 			}
 			Opcode opcode = insnData.getOpcode();
-			if (opcode.name().startsWith("SGET") && insnData.getIndexType() == InsnIndexType.FIELD_REF) {
+			if (opcode.name().startsWith(readPrefix) && insnData.getIndexType() == InsnIndexType.FIELD_REF) {
 				insnData.decode();
 				found[0] = fieldInfo.equals(FieldInfo.fromRef(cls.root(), insnData.getIndexAsField()));
 			} else if (opcode.name().startsWith("INVOKE") && insnData.getIndexType() == InsnIndexType.METHOD_REF) {
 				insnData.decode();
 				MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
-				found[0] = methodReadsStaticField(cls, calledMth, fieldInfo, visited);
+				found[0] = methodReadsField(cls, calledMth, fieldInfo, readType, visited);
 			}
 		});
 		return found[0];
 	}
 
-	private static boolean hasInsnBeforeStaticFieldWrite(MethodNode mth, FieldInitInfo target,
+	private static boolean hasInsnBeforeFieldWrite(MethodNode mth, FieldInitInfo target,
 			Predicate<InsnNode> match, boolean includeWriteInsn) {
 		BlockNode putBlock = null;
 		for (BlockNode block : mth.getBasicBlocks()) {
@@ -277,6 +289,16 @@ public class ExtractFieldInit extends AbstractVisitor {
 		List<ConstructorInitInfo> infoList = new ArrayList<>(constructors.size());
 		for (MethodNode constructorMth : constructors) {
 			List<FieldInitInfo> inits = collectFieldsInit(cls, constructorMth, InsnType.IPUT);
+			for (FieldInitInfo initInfo : inits) {
+				if (initInfo.fieldNode.getAccessFlags().isFinal()
+						&& initInfo.putInsn.getArgsCount() > 1
+						&& initInfo.putInsn.getArg(1).isThis()
+						&& isInstanceFieldReadBeforeWrite(cls, constructorMth, initInfo)) {
+					initInfo.fieldNode.setAccessFlags(initInfo.fieldNode.getAccessFlags().remove(AccessFlags.FINAL));
+					initInfo.fieldNode.addWarnComment("Final modifier removed: instance field is read before assignment in constructor");
+					return;
+				}
+			}
 			filterFieldsInit(inits);
 			if (inits.isEmpty()) {
 				return;
