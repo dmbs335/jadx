@@ -224,7 +224,7 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 								overlapping.add(narrow);
 							}
 							if (precedenceSafe && narrow.getOuterTryBlock() == null && wider.getOuterTryBlock() == null
-									&& hasPureLiteralReturnHandlers(narrow)) {
+									&& hasNonThrowingDirectReturnHandlers(narrow)) {
 								narrow.setOuterTryBlock(wider);
 								wider.addInnerTryBlock(narrow);
 							}
@@ -278,7 +278,8 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		return true;
 	}
 
-	private static boolean hasPureLiteralReturnHandlers(TryCatchBlockAttr tb) {
+	/** Check the emitted return expression too: wrapped calls can throw into the wider catch. */
+	private static boolean hasNonThrowingDirectReturnHandlers(TryCatchBlockAttr tb) {
 		if (tb.getHandlers().isEmpty()) {
 			return false;
 		}
@@ -292,12 +293,13 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 					return false;
 				}
 				for (InsnNode insn : ((IBlock) child).getInstructions()) {
+					if (insn.visitInsns(inner -> inner.canThrowException() ? Boolean.TRUE : null) != null) {
+						return false;
+					}
 					if (insn.contains(AFlag.DONT_GENERATE)) {
 						continue;
 					}
-					if (foundReturn || insn.getType() != InsnType.RETURN
-							|| insn.getArgsCount() > 1
-							|| insn.getArgsCount() == 1 && !insn.getArg(0).isLiteral()) {
+					if (foundReturn || insn.getType() != InsnType.RETURN || insn.getArgsCount() > 1) {
 						return false;
 					}
 					foundReturn = true;

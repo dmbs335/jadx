@@ -26,6 +26,37 @@
     ireturn
 .end method
 
+.method public static testReturnInvoke()I
+    .max stack 2
+    .max locals 1
+  :start
+    invokestatic trycatch/TestJavaOverlappingTypedCatchHandlerThrow first ()V
+  :middle
+    invokestatic trycatch/TestJavaOverlappingTypedCatchHandlerThrow second ()V
+  :end
+    .catch java/lang/IllegalArgumentException :start .. :middle goto :argument
+    .catch java/lang/IllegalStateException :start .. :end goto :state
+    iconst_0
+    ireturn
+  :argument
+    astore 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchHandlerThrow throwingReturn ()I
+    ireturn
+  :state
+    astore 0
+    iconst_2
+    ireturn
+.end method
+
+.method private static throwingReturn()I
+    .max stack 2
+    .max locals 0
+    new java/lang/IllegalStateException
+    dup
+    invokespecial java/lang/IllegalStateException <init> ()V
+    athrow
+.end method
+
 .method private static first()V
     .max stack 2
     .max locals 0

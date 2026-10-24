@@ -20,6 +20,7 @@ public class TestJavaOverlappingTypedCatchHandlerThrow extends RaungTest {
 		disableCompilation();
 		assertThat(getClassNodeFromRaung()).code()
 				.contains("Incorrect JVM typed catch scope: unprotected throwing code was included in a narrower range")
-				.contains("Method not decompiled: trycatch.TestJavaOverlappingTypedCatchHandlerThrow.test():int");
+				.contains("Method not decompiled: trycatch.TestJavaOverlappingTypedCatchHandlerThrow.test():int")
+				.contains("Method not decompiled: trycatch.TestJavaOverlappingTypedCatchHandlerThrow.testReturnInvoke():int");
 	}
 }
