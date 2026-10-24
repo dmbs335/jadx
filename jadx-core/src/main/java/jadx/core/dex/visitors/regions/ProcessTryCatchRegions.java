@@ -16,6 +16,8 @@ import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.nodes.LoopInfo;
 import jadx.core.dex.info.ClassInfo;
+import jadx.core.dex.instructions.ArithNode;
+import jadx.core.dex.instructions.ArithOp;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.InvokeNode;
@@ -135,8 +137,15 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 							null);
 				}
 			}
+			if (!overlappingJvmTypedRanges.isEmpty()) {
+				restoreNestedJvmTypedHandlers(mth.getRegion(), overlappingJvmTypedRanges);
+			}
 			if (overlappingJvmTypedRanges.stream().anyMatch(tb -> hasWidenedJvmCatchScope(mth.getRegion(), tb))) {
 				mth.addError("Incorrect JVM typed catch scope: unprotected throwing code was included in a narrower range", null);
+			}
+			if (overlappingJvmTypedRanges.stream().anyMatch(tb -> tb.getOuterTryBlock() != null
+					&& hasLostWiderJvmCatchScope(mth.getRegion(), tb, tb.getOuterTryBlock(), false))) {
+				mth.addError("Incorrect JVM typed catch coverage: a wider handler was lost from a protected range", null);
 			}
 		}
 		// Evaluate coverage only after wrapping is finished. Nested descriptors may
@@ -224,7 +233,7 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 								overlapping.add(narrow);
 							}
 							if (precedenceSafe && narrow.getOuterTryBlock() == null && wider.getOuterTryBlock() == null
-									&& hasNonThrowingDirectReturnHandlers(narrow)) {
+									&& hasNonThrowingTerminalReturnHandlers(narrow)) {
 								narrow.setOuterTryBlock(wider);
 								wider.addInnerTryBlock(narrow);
 							}
@@ -278,8 +287,10 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		return true;
 	}
 
-	/** Check the emitted return expression too: wrapped calls can throw into the wider catch. */
-	private static boolean hasNonThrowingDirectReturnHandlers(TryCatchBlockAttr tb) {
+	/**
+	 * Check all handler instructions and wrapped operands: a throw would be caught by the wider range.
+	 */
+	private static boolean hasNonThrowingTerminalReturnHandlers(TryCatchBlockAttr tb) {
 		if (tb.getHandlers().isEmpty()) {
 			return false;
 		}
@@ -293,16 +304,27 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 					return false;
 				}
 				for (InsnNode insn : ((IBlock) child).getInstructions()) {
-					if (insn.visitInsns(inner -> inner.canThrowException() ? Boolean.TRUE : null) != null) {
+					if (insn.visitInsns(inner -> canThrowFromNestedCatchHandler(inner) ? Boolean.TRUE : null) != null) {
 						return false;
 					}
 					if (insn.contains(AFlag.DONT_GENERATE)) {
 						continue;
 					}
-					if (foundReturn || insn.getType() != InsnType.RETURN || insn.getArgsCount() > 1) {
+					if (foundReturn) {
 						return false;
 					}
-					foundReturn = true;
+					if (insn.getType() == InsnType.RETURN) {
+						if (insn.getArgsCount() > 1) {
+							return false;
+						}
+						foundReturn = true;
+					} else if (insn.getType() != InsnType.ARITH
+							&& insn.getType() != InsnType.MOVE
+							&& insn.getType() != InsnType.CONST
+							&& insn.getType() != InsnType.NEG
+							&& insn.getType() != InsnType.NOP) {
+						return false;
+					}
 				}
 			}
 			if (!foundReturn) {
@@ -310,6 +332,78 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			}
 		}
 		return true;
+	}
+
+	private static boolean canThrowFromNestedCatchHandler(InsnNode insn) {
+		if (!insn.canThrowException()) {
+			return false;
+		}
+		if (insn instanceof ArithNode) {
+			ArithNode arith = (ArithNode) insn;
+			return arith.getOpcodeType() == null || !arith.getOpcodeType().isPrimitive()
+					|| arith.getOp() == ArithOp.DIV || arith.getOp() == ArithOp.REM;
+		}
+		return true;
+	}
+
+	private static void restoreNestedJvmTypedHandlers(IRegion region, List<TryCatchBlockAttr> overlapping) {
+		for (IContainer child : region.getSubBlocks()) {
+			if (child instanceof IRegion) {
+				restoreNestedJvmTypedHandlers((IRegion) child, overlapping);
+			}
+		}
+		if (!(region instanceof Region)) {
+			return;
+		}
+		List<IContainer> children = region.getSubBlocks();
+		for (int i = 0; i + 1 < children.size(); i++) {
+			if (!(children.get(i) instanceof TryCatchRegion) || !(children.get(i + 1) instanceof TryCatchRegion)) {
+				continue;
+			}
+			TryCatchRegion narrowRegion = (TryCatchRegion) children.get(i);
+			TryCatchRegion widerRegion = (TryCatchRegion) children.get(i + 1);
+			TryCatchBlockAttr narrow = narrowRegion.getTryCatchBlock();
+			TryCatchBlockAttr wider = widerRegion.getTryCatchBlock();
+			if (narrow == null || wider == null || !overlapping.contains(narrow)
+					|| narrow.getOuterTryBlock() != wider
+					|| !hasNonThrowingTerminalReturnHandlers(narrow)
+					|| !hasNonThrowingTerminalReturnHandlers(wider)) {
+				continue;
+			}
+			for (ExceptionHandler handler : wider.getHandlers()) {
+				narrowRegion.addCatchHandler(handler);
+			}
+		}
+	}
+
+	private static boolean hasLostWiderJvmCatchScope(
+			IContainer container, TryCatchBlockAttr narrow, TryCatchBlockAttr wider, boolean withinWiderTry) {
+		if (container instanceof TryCatchRegion) {
+			TryCatchRegion tryCatchRegion = (TryCatchRegion) container;
+			if (tryCatchRegion.getTryCatchBlock() == narrow && !withinWiderTry
+					&& !tryCatchRegion.getCatchRegions().keySet().containsAll(wider.getHandlers())) {
+				return true;
+			}
+			boolean withinTry = withinWiderTry || tryCatchRegion.getTryCatchBlock() == wider;
+			if (hasLostWiderJvmCatchScope(tryCatchRegion.getTryRegion(), narrow, wider, withinTry)) {
+				return true;
+			}
+			for (IContainer catchRegion : tryCatchRegion.getCatchRegions().values()) {
+				if (hasLostWiderJvmCatchScope(catchRegion, narrow, wider, withinWiderTry)) {
+					return true;
+				}
+			}
+			return tryCatchRegion.getFinallyRegion() != null
+					&& hasLostWiderJvmCatchScope(tryCatchRegion.getFinallyRegion(), narrow, wider, withinWiderTry);
+		}
+		if (container instanceof IRegion) {
+			for (IContainer child : ((IRegion) container).getSubBlocks()) {
+				if (hasLostWiderJvmCatchScope(child, narrow, wider, withinWiderTry)) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	private static boolean hasWidenedJvmCatchScope(IRegion root, TryCatchBlockAttr tb) {

@@ -1,0 +1,162 @@
+.version 49.0
+.class public trycatch/TestJavaOverlappingTypedCatchIncrementReturn
+.super java/lang/Object
+
+.method public static test(I)I
+    .max stack 2
+    .max locals 2
+  :start
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn first (I)V
+  :middle
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn second (I)V
+  :end
+    .catch java/lang/IllegalArgumentException :start .. :middle goto :argument
+    .catch java/lang/IllegalStateException :start .. :end goto :state
+    iconst_0
+    ireturn
+  :argument
+    astore 1
+    iinc 0 1
+    iload 0
+    ireturn
+  :state
+    astore 1
+    bipush 9
+    ireturn
+.end method
+
+.method public static testReversed(I)I
+    .max stack 2
+    .max locals 2
+  :start
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn first (I)V
+  :middle
+    iload 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn second (I)V
+  :end
+    .catch java/lang/IllegalStateException :start .. :end goto :state
+    .catch java/lang/IllegalArgumentException :start .. :middle goto :argument
+    iconst_0
+    ireturn
+  :argument
+    astore 1
+    iinc 0 1
+    iload 0
+    ireturn
+  :state
+    astore 1
+    bipush 9
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 3
+    .max locals 1
+    iconst_1
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn test (I)I
+    iconst_2
+    if_icmpeq :state_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :state_case
+    iconst_2
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn test (I)I
+    bipush 9
+    if_icmpeq :second_argument_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :second_argument_case
+  :try_start
+    iconst_3
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn test (I)I
+    pop
+  :try_end
+    .catch java/lang/IllegalArgumentException :try_start .. :try_end goto :caught
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :caught
+    astore 0
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn checkReversed ()V
+    return
+.end method
+
+.method private static checkReversed()V
+    .max stack 3
+    .max locals 1
+    iconst_1
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn testReversed (I)I
+    iconst_2
+    if_icmpeq :state_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :state_case
+    iconst_2
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn testReversed (I)I
+    bipush 9
+    if_icmpeq :second_argument_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :second_argument_case
+  :try_start
+    iconst_3
+    invokestatic trycatch/TestJavaOverlappingTypedCatchIncrementReturn testReversed (I)I
+    pop
+  :try_end
+    .catch java/lang/IllegalArgumentException :try_start .. :try_end goto :caught
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :caught
+    astore 0
+    return
+.end method
+
+.method private static first(I)V
+    .max stack 2
+    .max locals 1
+    iload 0
+    iconst_1
+    if_icmpeq :argument
+    iload 0
+    iconst_2
+    if_icmpeq :state
+    return
+  :argument
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+  :state
+    new java/lang/IllegalStateException
+    dup
+    invokespecial java/lang/IllegalStateException <init> ()V
+    athrow
+.end method
+
+.method private static second(I)V
+    .max stack 2
+    .max locals 1
+    iload 0
+    iconst_3
+    if_icmpne :done
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+  :done
+    return
+.end method
