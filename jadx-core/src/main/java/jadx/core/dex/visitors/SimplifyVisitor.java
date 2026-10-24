@@ -228,6 +228,9 @@ public class SimplifyVisitor extends AbstractVisitor {
 		}
 
 		ArgType castToType = (ArgType) castInsn.getIndex();
+		if (castInsn.getType() == InsnType.CAST && mustPreserveNestedNumericCast(argType, castToType, parentInsn)) {
+			return null;
+		}
 		if (isArithWideUpCast(parentInsn, argType, castToType)) {
 			return null;
 		}
@@ -289,6 +292,26 @@ public class SimplifyVisitor extends AbstractVisitor {
 			return result.isNarrow();
 		}
 		return false;
+	}
+
+	private static boolean isFloatingPoint(ArgType type) {
+		PrimitiveType primitiveType = type.getPrimitiveType();
+		return primitiveType == PrimitiveType.FLOAT || primitiveType == PrimitiveType.DOUBLE;
+	}
+
+	private static boolean mustPreserveNestedNumericCast(ArgType sourceType, ArgType castType, @Nullable InsnNode parentInsn) {
+		if (parentInsn == null || parentInsn.getType() != InsnType.CAST
+				|| !castType.isPrimitive()) {
+			return false;
+		}
+		ArgType outerType = (ArgType) ((IndexInsnNode) parentInsn).getIndex();
+		if (!outerType.isPrimitive()) {
+			return false;
+		}
+		// Floating-point conversion can round or saturate before the outer cast.
+		// Only a fully known integral chain is safe to simplify here.
+		return !sourceType.isPrimitive() || isFloatingPoint(sourceType)
+				|| isFloatingPoint(castType) || isFloatingPoint(outerType);
 	}
 
 	/**
