@@ -1,5 +1,6 @@
 package jadx.core.dex.visitors;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -491,6 +492,29 @@ public class ExtractFieldInit extends AbstractVisitor {
 		}
 		Set<Integer> aliases = new HashSet<>();
 		aliases.add(trackedReg);
+		if (codeReader.getCodeFormat() != CodeFormat.JVM) {
+			// A move can be executed on a later loop iteration, even when it appears
+			// after the virtual call in bytecode order. Use a conservative may-alias
+			// closure instead of relying on a single linear scan.
+			Map<Integer, List<Integer>> moves = new HashMap<>();
+			codeReader.copy().visitInstructions(insnData -> {
+				if (insnData.getOpcode() == Opcode.MOVE_OBJECT) {
+					insnData.decode();
+					if (insnData.getRegsCount() >= 2) {
+						moves.computeIfAbsent(insnData.getReg(1), k -> new ArrayList<>()).add(insnData.getReg(0));
+					}
+				}
+			});
+			ArrayDeque<Integer> pending = new ArrayDeque<>();
+			pending.add(trackedReg);
+			while (!pending.isEmpty()) {
+				for (Integer alias : moves.getOrDefault(pending.removeFirst(), Collections.emptyList())) {
+					if (aliases.add(alias)) {
+						pending.add(alias);
+					}
+				}
+			}
+		}
 		boolean[] dispatch = { false };
 		codeReader.copy().visitInstructions(insnData -> {
 			// JVM stack register mappings depend on preceding load instructions.

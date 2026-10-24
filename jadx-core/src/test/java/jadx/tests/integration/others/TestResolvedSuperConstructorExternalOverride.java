@@ -17,6 +17,7 @@ import jadx.tests.integration.others.resolvedbase.ExternalArrayEscapeChild;
 import jadx.tests.integration.others.resolvedbase.ExternalFieldEscapeChild;
 import jadx.tests.integration.others.resolvedbase.ExternalFilledArrayChild;
 import jadx.tests.integration.others.resolvedbase.ExternalLambdaCaptureChild;
+import jadx.tests.integration.others.resolvedbase.ExternalLoopAliasChild;
 import jadx.tests.integration.others.resolvedbase.ExternalRelayChild;
 import jadx.tests.integration.others.resolvedbase.ExternalReturnEscapeChild;
 import jadx.tests.integration.others.resolvedbase.FieldEscapeBase;
@@ -27,6 +28,8 @@ import jadx.tests.integration.others.resolvedbase.ForwardBase;
 import jadx.tests.integration.others.resolvedbase.ForwardMiddle;
 import jadx.tests.integration.others.resolvedbase.LambdaCaptureBase;
 import jadx.tests.integration.others.resolvedbase.LambdaCaptureMiddle;
+import jadx.tests.integration.others.resolvedbase.LoopAliasBase;
+import jadx.tests.integration.others.resolvedbase.LoopAliasMiddle;
 import jadx.tests.integration.others.resolvedbase.RelayBase;
 import jadx.tests.integration.others.resolvedbase.RelayMiddle;
 import jadx.tests.integration.others.resolvedbase.ResolvedBase;
@@ -153,5 +156,17 @@ public class TestResolvedSuperConstructorExternalOverride extends IntegrationTes
 				.containsOne("protected final int initial;")
 				.containsOne("this.initial = 53;")
 				.doesNotContain("final int initial = 53");
+	}
+
+	@TestWithProfiles({ TestProfile.DX_J8, TestProfile.D8_J8, TestProfile.JAVA8 })
+	public void testLoopCarriedReceiverAlias() {
+		new ExternalLoopAliasChild().check();
+		List<ClassNode> classes = getClassNodes(LoopAliasBase.class, LoopAliasMiddle.class);
+		assertThat(searchCls(classes, LoopAliasMiddle.class.getName())).code()
+				.containsOne(
+						"JADX WARN: Field initializer kept in constructor: superclass constructor may dispatch to an external override")
+				.containsOne("protected final int initial;")
+				.containsOne("this.initial = 59;")
+				.doesNotContain("final int initial = 59");
 	}
 }
