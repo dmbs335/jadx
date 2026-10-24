@@ -178,6 +178,23 @@ public class EnumVisitor extends AbstractVisitor {
 			cls.addWarnComment("Unknown enum class pattern. Please report as an issue!");
 			return false;
 		}
+		Set<FieldInfo> seenFields = new HashSet<>();
+		Set<String> seenNames = new HashSet<>();
+		for (EnumField enumField : enumFields) {
+			FieldNode fieldNode = enumField.getField();
+			if (!seenFields.add(fieldNode.getFieldInfo())) {
+				cls.addWarnComment("$VALUES array contains a duplicate enum field");
+				return false;
+			}
+			String name = enumField.getNameStr();
+			String outputName = name != null
+					&& NameMapper.isValidAndPrintable(name)
+					&& cls.root().getArgs().isRenameValid() ? name : fieldNode.getAlias();
+			if (!seenNames.add(outputName)) {
+				cls.addWarnComment("Enum constants resolve to duplicate names");
+				return false;
+			}
+		}
 		data.toRemove.add(data.valuesInitInsn);
 
 		// all checks complete, perform transform
