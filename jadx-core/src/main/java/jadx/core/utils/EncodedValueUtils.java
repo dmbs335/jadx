@@ -7,6 +7,7 @@ import java.util.List;
 
 import org.jetbrains.annotations.Nullable;
 
+import jadx.api.plugins.input.data.IFieldRef;
 import jadx.api.plugins.input.data.IMethodHandle;
 import jadx.api.plugins.input.data.IMethodProto;
 import jadx.api.plugins.input.data.IMethodRef;
@@ -138,8 +139,7 @@ public class EncodedValueUtils {
 	 */
 	private static InsnNode buildMethodHandle(RootNode root, IMethodHandle methodHandle) {
 		if (methodHandle.getType().isField()) {
-			// TODO: lookup for field
-			return new ConstStringNode("FIELD:" + methodHandle.getFieldRef());
+			return buildFieldMethodHandle(root, methodHandle);
 		}
 		IMethodRef methodRef = methodHandle.getMethodRef();
 		methodRef.load();
@@ -155,6 +155,45 @@ public class EncodedValueUtils {
 		invoke.addArg(InsnArg.wrapArg(new ConstClassNode(ArgType.object(methodRef.getParentClassType()))));
 		invoke.addArg(InsnArg.wrapArg(new ConstStringNode(methodRef.getName())));
 		invoke.addArg(InsnArg.wrapArg(buildMethodType(root, methodRef)));
+		return invoke;
+	}
+
+	private static InvokeNode buildFieldMethodHandle(RootNode root, IMethodHandle methodHandle) {
+		IFieldRef fieldRef = methodHandle.getFieldRef();
+		if (fieldRef == null) {
+			throw new JadxRuntimeException("Missing field reference for method handle: " + methodHandle.getType());
+		}
+		String findMethodName;
+		switch (methodHandle.getType()) {
+			case INSTANCE_GET:
+				findMethodName = "findGetter";
+				break;
+			case STATIC_GET:
+				findMethodName = "findStaticGetter";
+				break;
+			case INSTANCE_PUT:
+				findMethodName = "findSetter";
+				break;
+			case STATIC_PUT:
+				findMethodName = "findStaticSetter";
+				break;
+			default:
+				throw new JadxRuntimeException("Unexpected field method handle type: " + methodHandle.getType());
+		}
+
+		ClassInfo lookupCls = ClassInfo.fromName(root, "java.lang.invoke.MethodHandles.Lookup");
+		MethodInfo findMethod = MethodInfo.fromDetails(root, lookupCls, findMethodName,
+				Arrays.asList(ArgType.CLASS, ArgType.STRING, ArgType.CLASS),
+				ArgType.object("java.lang.invoke.MethodHandle"));
+		InvokeNode invoke = new InvokeNode(findMethod, InvokeType.DIRECT, 4);
+		invoke.addArg(buildLookupArg(root));
+		invoke.addArg(InsnArg.wrapArg(new ConstClassNode(ArgType.object(fieldRef.getParentClassType()))));
+		invoke.addArg(InsnArg.wrapArg(new ConstStringNode(fieldRef.getName())));
+		ArgType fieldType = ArgType.parse(fieldRef.getType());
+		InsnNode fieldTypeClass = fieldType.isPrimitive()
+				? new IndexInsnNode(InsnType.SGET, getTypeField(root, fieldType.getPrimitiveType()), 0)
+				: new ConstClassNode(fieldType);
+		invoke.addArg(InsnArg.wrapArg(fieldTypeClass));
 		return invoke;
 	}
 
