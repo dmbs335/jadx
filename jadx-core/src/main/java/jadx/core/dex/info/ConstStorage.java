@@ -17,6 +17,47 @@ import jadx.core.dex.nodes.IFieldInfoRef;
 import jadx.core.dex.nodes.RootNode;
 
 public class ConstStorage {
+	private static final class NaNConstKey {
+		private final long bits;
+		private final boolean isDouble;
+
+		NaNConstKey(long bits, boolean isDouble) {
+			this.bits = bits;
+			this.isDouble = isDouble;
+		}
+
+		@Override
+		public int hashCode() {
+			return Long.hashCode(bits) * 31 + Boolean.hashCode(isDouble);
+		}
+
+		@Override
+		public boolean equals(Object obj) {
+			if (this == obj) {
+				return true;
+			}
+			if (!(obj instanceof NaNConstKey)) {
+				return false;
+			}
+			NaNConstKey other = (NaNConstKey) obj;
+			return bits == other.bits && isDouble == other.isDouble;
+		}
+	}
+
+	private static Object toValueKey(Object value) {
+		if (value instanceof Float) {
+			float floatValue = (Float) value;
+			if (Float.isNaN(floatValue)) {
+				return new NaNConstKey(Float.floatToRawIntBits(floatValue), false);
+			}
+		} else if (value instanceof Double) {
+			double doubleValue = (Double) value;
+			if (Double.isNaN(doubleValue)) {
+				return new NaNConstKey(Double.doubleToRawLongBits(doubleValue), true);
+			}
+		}
+		return value;
+	}
 
 	private static final class ValueStorage {
 		private final Map<Object, IFieldInfoRef> values = new ConcurrentHashMap<>();
@@ -32,13 +73,14 @@ public class ConstStorage {
 		}
 
 		IFieldInfoRef get(Object key) {
-			return values.get(key);
+			return values.get(toValueKey(key));
 		}
 
 		/**
 		 * @return true if this value is duplicated
 		 */
 		boolean put(Object value, IFieldInfoRef fld) {
+			value = toValueKey(value);
 			if (duplicates.contains(value)) {
 				values.remove(value);
 				return true;
@@ -82,6 +124,7 @@ public class ConstStorage {
 		}
 
 		public boolean contains(Object value) {
+			value = toValueKey(value);
 			return duplicates.contains(value) || values.containsKey(value);
 		}
 
