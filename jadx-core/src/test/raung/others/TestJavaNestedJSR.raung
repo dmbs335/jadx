@@ -1,0 +1,48 @@
+.version 45.3
+.class public super others/TestJavaNestedJSR
+
+.method public static choose(I)I
+    .max stack 2
+    .max locals 4
+    iload 0
+    istore 1
+    jsr :OUTER
+    iload 1
+    ireturn
+  :OUTER
+    astore 2
+    iinc 1 1
+    jsr :INNER
+    iinc 1 3
+    ret 2
+  :INNER
+    astore 3
+    iinc 1 2
+    ret 3
+.end method
+
+.method public check()V
+    .max stack 2
+    .max locals 1
+    iconst_0
+    invokestatic others/TestJavaNestedJSR choose (I)I
+    bipush 6
+    isub
+    ifeq :SECOND
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :SECOND
+    iconst_4
+    invokestatic others/TestJavaNestedJSR choose (I)I
+    bipush 10
+    isub
+    ifeq :DONE
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :DONE
+    return
+.end method

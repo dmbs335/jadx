@@ -1,0 +1,29 @@
+.version 45.3
+.class public super others/TestJavaDupX2Wide
+
+.method public static choose()I
+    .max stack 4
+    .max locals 0
+    lconst_1
+    iconst_2
+    dup_x2
+    i2l
+    lsub
+    l2i
+    isub
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 2
+    .max locals 0
+    invokestatic others/TestJavaDupX2Wide choose ()I
+    iconst_3
+    if_icmpeq :DONE
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :DONE
+    return
+.end method

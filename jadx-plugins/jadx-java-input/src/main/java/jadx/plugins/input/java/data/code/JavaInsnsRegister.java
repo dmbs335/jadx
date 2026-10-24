@@ -146,11 +146,7 @@ public class JavaInsnsRegister {
 				s -> s.push(0, s.peekType(1)).peekFrom(1, 1)
 						.peekFrom(1, 2).peekFrom(2, 3)
 						.peekFrom(2, 4).peekFrom(0, 5));
-		register(arr, 0x5b, "dup_x2", 0, 8, Opcode.MOVE_MULTI,
-				s -> s.push(0, s.peekType(1)).peekFrom(1, 1)
-						.peekFrom(1, 2).peekFrom(2, 3)
-						.peekFrom(2, 4).peekFrom(3, 5)
-						.peekFrom(3, 6).peekFrom(0, 7));
+		register(arr, 0x5b, "dup_x2", 0, 8, Opcode.MOVE_MULTI, JavaInsnsRegister::dupX2);
 		register(arr, 0x5c, "dup2", 0, 4, Opcode.MOVE_MULTI, s -> {
 			if (s.peekType(0) == NARROW) {
 				s.peekFrom(0, 3).peekFrom(1, 1).push(0, NARROW).push(2, NARROW);
@@ -299,6 +295,19 @@ public class JavaInsnsRegister {
 		register(arr, 0xc9, "jsr_w", 4, 1, Opcode.JAVA_JSR, s -> s.push(0).jump(s.reader().readS4()));
 	}
 
+	private static void dupX2(CodeDecodeState s) {
+		boolean wideBelow = s.peekType(1) == WIDE;
+		s.push(0, NARROW).peekFrom(1, 1);
+		s.peekFrom(1, 2).peekFrom(2, 3);
+		if (wideBelow) {
+			s.insn().setRegsCount(6);
+			s.peekFrom(2, 4).peekFrom(0, 5);
+		} else {
+			s.peekFrom(2, 4).peekFrom(3, 5);
+			s.peekFrom(3, 6).peekFrom(0, 7);
+		}
+	}
+
 	private static void dup2x1(CodeDecodeState s) {
 		if (s.peekType(0) == NARROW) {
 			s.insert(2, NARROW);
@@ -319,21 +328,39 @@ public class JavaInsnsRegister {
 
 	private static void dup2x2(CodeDecodeState s) {
 		if (s.peekType(0) == NARROW) {
+			boolean wideBelow = s.peekType(2) == WIDE;
 			s.insert(2, NARROW);
 			s.insert(2, NARROW);
-			s.peekFrom(0, 0).peekFrom(2, 1);
-			s.peekFrom(1, 2).peekFrom(3, 3);
-			s.peekFrom(2, 4).peekFrom(4, 5);
-			s.peekFrom(3, 6).peekFrom(5, 7);
-			s.peekFrom(4, 8).peekFrom(0, 9);
-			s.peekFrom(5, 10).peekFrom(1, 11);
+			if (wideBelow) {
+				s.insn().setRegsCount(10);
+				s.peekFrom(0, 0).peekFrom(2, 1);
+				s.peekFrom(1, 2).peekFrom(3, 3);
+				s.peekFrom(2, 4).peekFrom(4, 5);
+				s.peekFrom(3, 6).peekFrom(0, 7);
+				s.peekFrom(4, 8).peekFrom(1, 9);
+			} else {
+				s.peekFrom(0, 0).peekFrom(2, 1);
+				s.peekFrom(1, 2).peekFrom(3, 3);
+				s.peekFrom(2, 4).peekFrom(4, 5);
+				s.peekFrom(3, 6).peekFrom(5, 7);
+				s.peekFrom(4, 8).peekFrom(0, 9);
+				s.peekFrom(5, 10).peekFrom(1, 11);
+			}
 		} else {
-			s.insn().setRegsCount(8);
-			s.insert(2, WIDE);
-			s.peekFrom(0, 0).peekFrom(1, 1);
-			s.peekFrom(1, 2).peekFrom(2, 3);
-			s.peekFrom(2, 4).peekFrom(3, 5);
-			s.peekFrom(3, 6).peekFrom(0, 7);
+			if (s.peekType(1) == WIDE) {
+				s.insn().setRegsCount(6);
+				s.insert(1, WIDE);
+				s.peekFrom(0, 0).peekFrom(1, 1);
+				s.peekFrom(1, 2).peekFrom(2, 3);
+				s.peekFrom(2, 4).peekFrom(0, 5);
+			} else {
+				s.insn().setRegsCount(8);
+				s.insert(2, WIDE);
+				s.peekFrom(0, 0).peekFrom(1, 1);
+				s.peekFrom(1, 2).peekFrom(2, 3);
+				s.peekFrom(2, 4).peekFrom(3, 5);
+				s.peekFrom(3, 6).peekFrom(0, 7);
+			}
 		}
 	}
 

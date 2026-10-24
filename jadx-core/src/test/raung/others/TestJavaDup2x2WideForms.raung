@@ -1,0 +1,109 @@
+.version 45.3
+.class public super others/TestJavaDup2x2WideForms
+
+.method public static form1()I
+    .max stack 6
+    .max locals 0
+    iconst_1
+    iconst_2
+    iconst_3
+    iconst_4
+    dup2_x2
+    isub
+    isub
+    isub
+    isub
+    isub
+    ireturn
+.end method
+
+.method public static form2()I
+    .max stack 6
+    .max locals 0
+    iconst_4
+    iconst_2
+    lconst_1
+    dup2_x2
+    l2i
+    isub
+    isub
+    i2l
+    lsub
+    l2i
+    ireturn
+.end method
+
+.method public static form4()J
+    .max stack 6
+    .max locals 0
+    lconst_0
+    lconst_1
+    dup2_x2
+    lsub
+    lsub
+    lreturn
+.end method
+
+.method public static form3()I
+    .max stack 6
+    .max locals 0
+    lconst_1
+    iconst_2
+    iconst_3
+    dup2_x2
+    iadd
+    i2l
+    ladd
+    l2i
+    iadd
+    isub
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 4
+    .max locals 0
+    invokestatic others/TestJavaDup2x2WideForms form4 ()J
+    lconst_1
+    lconst_1
+    ladd
+    lcmp
+    ifeq :SECOND
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :SECOND
+    invokestatic others/TestJavaDup2x2WideForms form3 ()I
+    bipush -7
+    if_icmpeq :DONE
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :DONE
+    invokestatic others/TestJavaDup2x2WideForms checkNarrowForms ()V
+    return
+.end method
+
+.method private static checkNarrowForms()V
+    .max stack 2
+    .max locals 0
+    invokestatic others/TestJavaDup2x2WideForms form1 ()I
+    bipush -3
+    if_icmpeq :SECOND
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :SECOND
+    invokestatic others/TestJavaDup2x2WideForms form2 ()I
+    bipush -2
+    if_icmpeq :DONE
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :DONE
+    return
+.end method
