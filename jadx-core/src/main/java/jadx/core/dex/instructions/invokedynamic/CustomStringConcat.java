@@ -18,6 +18,7 @@ import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
+import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.nodes.InsnNode;
 import jadx.core.utils.EncodedValueUtils;
@@ -57,6 +58,14 @@ public class CustomStringConcat {
 			InsnNode concat = new InsnNode(InsnType.STR_CONCAT, argsCount);
 			String recipe = (String) values.get(3).getValue();
 			processRecipe(recipe, concat, values, insn, argTypes);
+			if (needsStringPrefix(concat)) {
+				InsnNode prefixed = new InsnNode(InsnType.STR_CONCAT, concat.getArgsCount() + 1);
+				prefixed.addArg(InsnArg.wrapArg(new ConstStringNode("")));
+				for (InsnArg arg : concat.getArguments()) {
+					prefixed.addArg(arg);
+				}
+				concat = prefixed;
+			}
 			int resReg = insn.getResultReg();
 			if (resReg != -1) {
 				concat.setResult(InsnArg.reg(resReg, ArgType.STRING));
@@ -68,6 +77,26 @@ public class CustomStringConcat {
 			nop.addAttr(AType.JADX_ERROR, new JadxError("Failed to process dynamic string concat: " + e.getMessage(), e));
 			return nop;
 		}
+	}
+
+	private static boolean needsStringPrefix(InsnNode concat) {
+		int count = concat.getArgsCount();
+		if (count == 0) {
+			return true;
+		}
+		InsnArg first = concat.getArg(0);
+		if (count == 1) {
+			return !isConstString(first);
+		}
+		return !isStringValue(first) && !isStringValue(concat.getArg(1));
+	}
+
+	private static boolean isStringValue(InsnArg arg) {
+		return ArgType.STRING.equals(arg.getType()) || isConstString(arg);
+	}
+
+	private static boolean isConstString(InsnArg arg) {
+		return arg instanceof InsnWrapArg && ((InsnWrapArg) arg).getWrapInsn() instanceof ConstStringNode;
 	}
 
 	private static void processRecipe(String recipe, InsnNode concat, List<EncodedValue> values, InsnData insn,

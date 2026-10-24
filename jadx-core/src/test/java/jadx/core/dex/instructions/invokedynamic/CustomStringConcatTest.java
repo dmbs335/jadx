@@ -12,12 +12,23 @@ import jadx.api.plugins.input.data.annotations.EncodedType;
 import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.insns.InsnData;
 import jadx.core.dex.attributes.AType;
+import jadx.core.dex.instructions.ConstStringNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.nodes.InsnNode;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class CustomStringConcatTest {
+	@Test
+	void emptyRecipeYieldsEmptyString() {
+		InsnNode result = CustomStringConcat.buildStringConcat(noArgInsn(), false, values(""));
+		assertThat(result.getType()).isEqualTo(InsnType.STR_CONCAT);
+		assertThat(result.getArgsCount()).isEqualTo(1);
+		ConstStringNode value = (ConstStringNode) ((InsnWrapArg) result.getArg(0)).getWrapInsn();
+		assertThat(value.getString()).isEmpty();
+	}
+
 	@Test
 	void nullBootstrapConstantIsAnExplicitError() {
 		InsnNode result = CustomStringConcat.buildStringConcat(noArgInsn(), false,

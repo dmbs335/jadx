@@ -35,6 +35,14 @@ public class TestStringConcatJava11 extends RaungTest {
 		public String testWide(final long value, final int suffix) {
 			return value + ":" + suffix;
 		}
+
+		public String testNumeric(final int first, final int second) {
+			return "" + first + second;
+		}
+
+		public String testSingleString(final String value) {
+			return "" + value;
+		}
 	}
 
 	@Test
@@ -63,6 +71,8 @@ public class TestStringConcatJava11 extends RaungTest {
 				.code()
 				.containsOne("return str + \"test\";")
 				.containsOne("return str + \"test\" + str + \"7\";")
-				.containsOne("return j + \":\" + i;");
+				.containsOne("return j + \":\" + i;")
+				.containsOne("return \"\" + i + i2;")
+				.containsOne("return \"\" + str;");
 	}
 }
