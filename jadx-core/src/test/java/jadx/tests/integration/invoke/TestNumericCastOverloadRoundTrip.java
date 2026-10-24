@@ -1,5 +1,7 @@
 package jadx.tests.integration.invoke;
 
+import java.util.function.LongToIntFunction;
+
 import jadx.tests.api.IntegrationTest;
 import jadx.tests.api.extensions.profiles.TestProfile;
 import jadx.tests.api.extensions.profiles.TestWithProfiles;
@@ -52,6 +54,11 @@ public class TestNumericCastOverloadRoundTrip extends IntegrationTest {
 			return select(converted);
 		}
 
+		public static int callFloatViaLambda(long value) {
+			LongToIntFunction choose = candidate -> select((float) candidate);
+			return choose.applyAsInt(value);
+		}
+
 		public static int constructFloat(long value) {
 			return new Target((float) value).kind;
 		}
@@ -66,6 +73,9 @@ public class TestNumericCastOverloadRoundTrip extends IntegrationTest {
 			}
 			if (callFloatViaLocal(16_777_217L) != 2 || callDoubleViaLocal(16_777_217L) != 3) {
 				throw new AssertionError("local conversions must select their overloads");
+			}
+			if (callFloatViaLambda(16_777_217L) != 2) {
+				throw new AssertionError("lambda conversion must select its overload");
 			}
 			if (constructFloat(16_777_217L) != 2 || constructDouble(16_777_217L) != 3) {
 				throw new AssertionError("explicit casts must select constructor overloads");

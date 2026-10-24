@@ -1,6 +1,7 @@
 package jadx.core.dex.instructions;
 
 import java.util.List;
+import java.util.Objects;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -77,7 +78,11 @@ public class InvokeCustomRawNode extends InvokeNode {
 			return true;
 		}
 		if (obj instanceof InvokeCustomRawNode) {
-			return super.isSame(obj) && resolve.isSame(((InvokeCustomRawNode) obj).resolve);
+			InvokeCustomRawNode other = (InvokeCustomRawNode) obj;
+			return super.isSame(other)
+					&& resolve.isSame(other.resolve)
+					&& Objects.equals(resolve.getArguments(), other.resolve.getArguments())
+					&& Objects.equals(callSiteValues, other.callSiteValues);
 		}
 		return false;
 	}
