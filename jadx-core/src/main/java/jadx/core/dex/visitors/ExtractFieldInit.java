@@ -10,8 +10,11 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import jadx.api.plugins.input.data.AccessFlags;
+import jadx.api.plugins.input.data.ICodeReader;
 import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.data.attributes.JadxAttrType;
+import jadx.api.plugins.input.insns.InsnIndexType;
+import jadx.api.plugins.input.insns.Opcode;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.FieldInitInsnAttr;
@@ -171,12 +174,17 @@ public class ExtractFieldInit extends AbstractVisitor {
 	}
 
 	private static boolean methodReadsStaticField(ClassNode cls, MethodInfo calledMth, FieldInfo fieldInfo, Set<MethodInfo> visited) {
-		if (!calledMth.getDeclClass().equals(cls.getClassInfo()) || !visited.add(calledMth)) {
+		if (!visited.add(calledMth)) {
 			return false;
 		}
-		MethodNode callee = cls.searchMethod(calledMth);
-		if (callee == null || callee.getBasicBlocks() == null) {
+		MethodNode callee = cls.root().resolveMethod(calledMth);
+		if (callee == null) {
 			return false;
+		}
+		// Other classes may be processed concurrently, so inspect their immutable
+		// input code instead of partially built or changing basic blocks.
+		if (callee.getParentClass() != cls || callee.getBasicBlocks() == null) {
+			return rawMethodReadsStaticField(cls, callee, fieldInfo, visited);
 		}
 		for (BlockNode block : callee.getBasicBlocks()) {
 			for (InsnNode insn : block.getInstructions()) {
@@ -197,6 +205,29 @@ public class ExtractFieldInit extends AbstractVisitor {
 			}
 		}
 		return false;
+	}
+
+	private static boolean rawMethodReadsStaticField(ClassNode cls, MethodNode callee, FieldInfo fieldInfo, Set<MethodInfo> visited) {
+		ICodeReader codeReader = callee.getCodeReader();
+		if (codeReader == null) {
+			return false;
+		}
+		boolean[] found = { false };
+		codeReader.copy().visitInstructions(insnData -> {
+			if (found[0]) {
+				return;
+			}
+			Opcode opcode = insnData.getOpcode();
+			if (opcode.name().startsWith("SGET") && insnData.getIndexType() == InsnIndexType.FIELD_REF) {
+				insnData.decode();
+				found[0] = fieldInfo.equals(FieldInfo.fromRef(cls.root(), insnData.getIndexAsField()));
+			} else if (opcode.name().startsWith("INVOKE") && insnData.getIndexType() == InsnIndexType.METHOD_REF) {
+				insnData.decode();
+				MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
+				found[0] = methodReadsStaticField(cls, calledMth, fieldInfo, visited);
+			}
+		});
+		return found[0];
 	}
 
 	private static boolean hasInsnBeforeStaticFieldWrite(MethodNode mth, FieldInitInfo target,
