@@ -220,6 +220,46 @@ public class ExtractFieldInit extends AbstractVisitor {
 		return found[0];
 	}
 
+	private static boolean unresolvedSuperConstructorMayReadField(ClassNode cls, MethodNode mth, FieldInitInfo target) {
+		ICodeReader codeReader = mth.getCodeReader();
+		int writeOffset = target.putInsn.getOffset();
+		if (codeReader == null || writeOffset < 0 || cls.getSuperClass() == null) {
+			return false;
+		}
+		String superClassName = cls.getSuperClass().getObject();
+		// These JDK constructors cannot dispatch to an overriding method.
+		if ("java.lang.Object".equals(superClassName) || "java.lang.Enum".equals(superClassName)) {
+			return false;
+		}
+		boolean[] unresolvedSuperCall = { false };
+		codeReader.copy().visitInstructions(insnData -> {
+			if (unresolvedSuperCall[0] || insnData.getOffset() >= writeOffset
+					|| !insnData.getOpcode().name().startsWith("INVOKE")
+					|| insnData.getIndexType() != InsnIndexType.METHOD_REF) {
+				return;
+			}
+			insnData.decode();
+			MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
+			if (calledMth.isConstructor()
+					&& calledMth.getDeclClass().getType().getObject().equals(cls.getSuperClass().getObject())
+					&& cls.root().resolveMethod(calledMth) == null) {
+				unresolvedSuperCall[0] = true;
+			}
+		});
+		if (!unresolvedSuperCall[0]) {
+			return false;
+		}
+		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
+		for (MethodNode method : cls.getMethods()) {
+			AccessInfo flags = method.getAccessFlags();
+			if (!flags.isConstructor() && !flags.isStatic() && !flags.isPrivate()
+					&& methodReadsField(cls, method.getMethodInfo(), fieldInfo, InsnType.IGET, new HashSet<>())) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private static boolean invocationReadsField(ClassNode cls, BaseInvokeNode invoke, FieldInfo fieldInfo,
 			InsnType readType, Set<MethodInfo> visited) {
 		if (invoke instanceof InvokeCustomNode) {
@@ -388,22 +428,31 @@ public class ExtractFieldInit extends AbstractVisitor {
 		}
 		List<ConstructorInitInfo> infoList = new ArrayList<>(constructors.size());
 		Set<FieldNode> readBeforeWriteFields = new HashSet<>();
+		Set<FieldNode> unverifiableFields = new HashSet<>();
 		for (MethodNode constructorMth : constructors) {
 			List<FieldInitInfo> inits = collectFieldsInit(cls, constructorMth, InsnType.IPUT);
 			infoList.add(new ConstructorInitInfo(constructorMth, inits));
 			for (FieldInitInfo initInfo : inits) {
 				if (initInfo.fieldNode.getAccessFlags().isFinal()
 						&& initInfo.putInsn.getArgsCount() > 1
-						&& initInfo.putInsn.getArg(1).isThis()
-						&& isInstanceFieldReadBeforeWrite(cls, constructorMth, initInfo)) {
-					readBeforeWriteFields.add(initInfo.fieldNode);
+						&& initInfo.putInsn.getArg(1).isThis()) {
+					if (isInstanceFieldReadBeforeWrite(cls, constructorMth, initInfo)) {
+						readBeforeWriteFields.add(initInfo.fieldNode);
+					} else if (unresolvedSuperConstructorMayReadField(cls, constructorMth, initInfo)) {
+						unverifiableFields.add(initInfo.fieldNode);
+					}
 				}
 			}
 		}
-		if (!readBeforeWriteFields.isEmpty()) {
+		if (!readBeforeWriteFields.isEmpty() || !unverifiableFields.isEmpty()) {
 			for (FieldNode field : readBeforeWriteFields) {
 				field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
 				field.addWarnComment("Final modifier removed: instance field is read before assignment in constructor");
+			}
+			for (FieldNode field : unverifiableFields) {
+				if (!readBeforeWriteFields.contains(field)) {
+					field.addWarnComment("Field initializer kept in constructor: superclass constructor unavailable to verify read order");
+				}
 			}
 			return;
 		}
