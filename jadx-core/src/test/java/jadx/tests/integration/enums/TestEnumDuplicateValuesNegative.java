@@ -81,4 +81,14 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 				.containsOne("class TestEnumCustomValueOfNegative extends Enum")
 				.containsOne("Enum.valueOf(TestEnumCustomValueOfNegative.class, \"ONE\")");
 	}
+
+	@Test
+	public void testValuesOverwrite() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumValuesOverwriteNegative"))
+				.code()
+				.containsOne("Enum $VALUES field is assigned more than once")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumValuesOverwriteNegative extends Enum");
+	}
 }

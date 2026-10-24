@@ -326,8 +326,30 @@ public class EnumVisitor extends AbstractVisitor {
 		if (valuesInitPair == null) {
 			return false;
 		}
+		if (hasMultipleValuesWrites(data)) {
+			data.cls.addWarnComment("Enum $VALUES field is assigned more than once");
+			return false;
+		}
 		data.valuesInitInsn = valuesInitPair.getInsn();
 		return true;
+	}
+
+	private boolean hasMultipleValuesWrites(EnumData data) {
+		FieldInfo valuesFieldInfo = data.valuesField.getFieldInfo();
+		boolean found = false;
+		for (BlockNode block : data.classInitMth.getBasicBlocks()) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn.getType() != InsnType.SPUT
+						|| !Objects.equals(((IndexInsnNode) insn).getIndex(), valuesFieldInfo)) {
+					continue;
+				}
+				if (found) {
+					return true;
+				}
+				found = true;
+			}
+		}
+		return false;
 	}
 
 	private void processConstructorInsn(EnumData data, EnumField enumField, MethodNode classInitMth) {
