@@ -8,7 +8,14 @@
 .field private final timestamp:J
 
 .method static constructor <clinit>()V
-    .registers 7
+    .registers 8
+    new-instance v0, Lenums/TestEnumExternalValueNegative;
+    const-string v1, "HIDDEN"
+    const/4 v2, 0x0
+    const/4 v3, 0x0
+    const-wide/16 v4, 0x0
+    invoke-direct/range {v0 .. v5}, Lenums/TestEnumExternalValueNegative;-><init>(Ljava/lang/String;ILjava/lang/Class;J)V
+    move-object v6, v0
     sget-object v3, Ljava/lang/Integer;->TYPE:Ljava/lang/Class;
     invoke-static {}, Ljava/lang/System;->nanoTime()J
     move-result-wide v4
@@ -24,9 +31,9 @@
     sput-object v0, Lenums/TestEnumExternalValueNegative;->TWO:Lenums/TestEnumExternalValueNegative;
     sget-object v1, Lenums/TestEnumExternalValueNegative;->ONE:Lenums/TestEnumExternalValueNegative;
     sget-object v2, Lenums/TestEnumExternalValueNegative;->TWO:Lenums/TestEnumExternalValueNegative;
-    filled-new-array {v1, v2}, [Lenums/TestEnumExternalValueNegative;
-    move-result-object v6
-    sput-object v6, Lenums/TestEnumExternalValueNegative;->$VALUES:[Lenums/TestEnumExternalValueNegative;
+    filled-new-array {v6, v1, v2}, [Lenums/TestEnumExternalValueNegative;
+    move-result-object v7
+    sput-object v7, Lenums/TestEnumExternalValueNegative;->$VALUES:[Lenums/TestEnumExternalValueNegative;
     return-void
 .end method
 

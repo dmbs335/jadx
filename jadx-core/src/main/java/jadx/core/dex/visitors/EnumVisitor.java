@@ -181,6 +181,16 @@ public class EnumVisitor extends AbstractVisitor {
 		data.toRemove.add(data.valuesInitInsn);
 
 		// all checks complete, perform transform
+		for (FieldNode fakeField : data.fakeFields) {
+			cls.addField(fakeField);
+		}
+		if (data.valuesMth != null) {
+			data.valuesMth.add(AFlag.DONT_GENERATE);
+			if (data.valuesMth.getName().equals("$values")) {
+				// Kotlin synthetic method used for init values; align with $ENTRIES init code.
+				data.valuesMth.getMethodInfo().setAlias("values");
+			}
+		}
 		EnumClassAttr attr = new EnumClassAttr(enumFields);
 		attr.setValueHelpers(data.valueHelpers);
 		attr.setRegionValueHelpers(data.regionValueHelpers);
@@ -342,12 +352,7 @@ public class EnumVisitor extends AbstractVisitor {
 		}
 		List<EnumField> enumFields = extractEnumFieldsFromInsn(enumData, wrappedInsn);
 		if (enumFields != null && ListUtils.isSingleElement(valuesMth.getUseIn(), enumData.classInitMth)) {
-			valuesMth.add(AFlag.DONT_GENERATE);
-			if (valuesMth.getName().equals("$values")) {
-				// Kotlin synthetic method used for init values
-				// rename to actual values method to use in $ENTRIES init code
-				valuesMth.getMethodInfo().setAlias("values");
-			}
+			enumData.valuesMth = valuesMth;
 		}
 		return enumFields;
 	}
@@ -394,7 +399,7 @@ public class EnumVisitor extends AbstractVisitor {
 		ConstructorInsn constructorInsn = castConstructorInsn(wrappedInsn);
 		if (constructorInsn != null) {
 			FieldNode enumFieldNode = createFakeField(data.cls, "EF" + constructorInsn.getOffset());
-			data.cls.addField(enumFieldNode);
+			data.fakeFields.add(enumFieldNode);
 			return createEnumFieldByConstructor(data, enumFieldNode, constructorInsn);
 		}
 		return null;
@@ -445,7 +450,7 @@ public class EnumVisitor extends AbstractVisitor {
 		FieldNode enumFieldNode = searchEnumField(data, ssaVar);
 		if (enumFieldNode == null) {
 			enumFieldNode = createFakeField(data.cls, "EF" + arg.getRegNum());
-			data.cls.addField(enumFieldNode);
+			data.fakeFields.add(enumFieldNode);
 		}
 		return createEnumFieldByConstructor(data, enumFieldNode, (ConstructorInsn) constrInsn);
 	}
@@ -1473,8 +1478,10 @@ public class EnumVisitor extends AbstractVisitor {
 		final MethodNode classInitMth;
 		final List<BlockNode> staticBlocks;
 		final List<InsnNode> toRemove = new ArrayList<>();
+		final List<FieldNode> fakeFields = new ArrayList<>();
 		final List<EnumValueHelper> valueHelpers = new ArrayList<>();
 		final List<EnumRegionValueHelper> regionValueHelpers = new ArrayList<>();
+		MethodNode valuesMth;
 		FieldNode valuesField;
 		InsnNode valuesInitInsn;
 
