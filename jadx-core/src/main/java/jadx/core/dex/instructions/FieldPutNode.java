@@ -1,5 +1,7 @@
 package jadx.core.dex.instructions;
 
+import java.util.Objects;
+
 import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.info.FieldInfo;
@@ -31,6 +33,8 @@ public final class FieldPutNode extends IndexInsnNode {
 
 	@Override
 	public boolean isSame(InsnNode obj) {
-		return obj instanceof FieldPutNode && super.isSame(obj);
+		return obj instanceof FieldPutNode
+				&& super.isSame(obj)
+				&& Objects.equals(invalidSourceType, ((FieldPutNode) obj).invalidSourceType);
 	}
 }

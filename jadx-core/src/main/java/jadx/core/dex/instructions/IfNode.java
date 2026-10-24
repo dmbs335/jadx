@@ -1,6 +1,7 @@
 package jadx.core.dex.instructions;
 
 import java.util.List;
+import java.util.Objects;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -150,7 +151,9 @@ public class IfNode extends GotoNode {
 			return false;
 		}
 		IfNode other = (IfNode) obj;
-		return op == other.op;
+		return op == other.op
+				&& invalidArgIndex == other.invalidArgIndex
+				&& Objects.equals(invalidSourceType, other.invalidSourceType);
 	}
 
 	@Override

@@ -1,5 +1,7 @@
 package jadx.core.dex.instructions;
 
+import java.util.Objects;
+
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -65,7 +67,11 @@ public class FilledNewArrayNode extends InsnNode {
 			return false;
 		}
 		FilledNewArrayNode other = (FilledNewArrayNode) obj;
-		return elemType == other.elemType;
+		return elemType == other.elemType
+				&& invalidArgIndex == other.invalidArgIndex
+				&& Objects.equals(invalidSourceType, other.invalidSourceType)
+				&& Objects.equals(invalidElementType, other.invalidElementType)
+				&& Objects.equals(invalidArrayType, other.invalidArrayType);
 	}
 
 	@Override

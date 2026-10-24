@@ -1,6 +1,7 @@
 package jadx.core.dex.instructions;
 
 import java.util.List;
+import java.util.Objects;
 
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -96,7 +97,8 @@ public class SwitchInsn extends TargetInsnNode {
 		}
 		SwitchInsn other = (SwitchInsn) obj;
 		return dataTarget == other.dataTarget
-				&& packed == other.packed;
+				&& packed == other.packed
+				&& Objects.equals(invalidSourceType, other.invalidSourceType);
 	}
 
 	@Override

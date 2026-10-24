@@ -1,5 +1,7 @@
 package jadx.core.dex.instructions;
 
+import java.util.Objects;
+
 import org.jetbrains.annotations.Nullable;
 
 import jadx.api.plugins.input.insns.Opcode;
@@ -66,6 +68,9 @@ public final class ReturnNode extends InsnNode {
 
 	@Override
 	public boolean isSame(InsnNode obj) {
-		return obj instanceof ReturnNode && returnOpcode == ((ReturnNode) obj).returnOpcode && super.isSame(obj);
+		return obj instanceof ReturnNode
+				&& returnOpcode == ((ReturnNode) obj).returnOpcode
+				&& Objects.equals(invalidSourceType, ((ReturnNode) obj).invalidSourceType)
+				&& super.isSame(obj);
 	}
 }

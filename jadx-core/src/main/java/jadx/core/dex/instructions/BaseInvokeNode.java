@@ -1,5 +1,7 @@
 package jadx.core.dex.instructions;
 
+import java.util.Objects;
+
 import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.info.MethodInfo;
@@ -38,6 +40,20 @@ public abstract class BaseInvokeNode extends InsnNode {
 		target.invalidArgIndex = invalidArgIndex;
 		target.invalidSourceType = invalidSourceType;
 		target.invalidExpectedType = invalidExpectedType;
+	}
+
+	@Override
+	public boolean isSame(InsnNode obj) {
+		if (this == obj) {
+			return true;
+		}
+		if (!(obj instanceof BaseInvokeNode) || !super.isSame(obj)) {
+			return false;
+		}
+		BaseInvokeNode other = (BaseInvokeNode) obj;
+		return invalidArgIndex == other.invalidArgIndex
+				&& Objects.equals(invalidSourceType, other.invalidSourceType)
+				&& Objects.equals(invalidExpectedType, other.invalidExpectedType);
 	}
 
 	public abstract MethodInfo getCallMth();

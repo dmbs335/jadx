@@ -1,5 +1,7 @@
 package jadx.core.dex.instructions;
 
+import java.util.Objects;
+
 import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.instructions.args.ArgType;
@@ -25,6 +27,19 @@ public final class ArrayPutNode extends InsnNode {
 	public void setInvalidSourceType(ArgType sourceType, ArgType elementType) {
 		this.invalidSourceType = sourceType;
 		this.invalidElementType = elementType;
+	}
+
+	@Override
+	public boolean isSame(InsnNode obj) {
+		if (this == obj) {
+			return true;
+		}
+		if (!(obj instanceof ArrayPutNode) || !super.isSame(obj)) {
+			return false;
+		}
+		ArrayPutNode other = (ArrayPutNode) obj;
+		return Objects.equals(invalidSourceType, other.invalidSourceType)
+				&& Objects.equals(invalidElementType, other.invalidElementType);
 	}
 
 	@Override

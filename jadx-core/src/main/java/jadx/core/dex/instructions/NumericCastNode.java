@@ -1,5 +1,7 @@
 package jadx.core.dex.instructions;
 
+import java.util.Objects;
+
 import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.instructions.args.ArgType;
@@ -43,6 +45,7 @@ public final class NumericCastNode extends IndexInsnNode {
 			return false;
 		}
 		NumericCastNode other = (NumericCastNode) obj;
-		return sourceType.equals(other.sourceType);
+		return sourceType.equals(other.sourceType)
+				&& Objects.equals(invalidSourceType, other.invalidSourceType);
 	}
 }

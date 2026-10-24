@@ -117,7 +117,11 @@ public class ArithNode extends InsnNode {
 			return false;
 		}
 		ArithNode other = (ArithNode) obj;
-		return op == other.op && Objects.equals(opcodeType, other.opcodeType) && isSameLiteral(other);
+		return op == other.op
+				&& Objects.equals(opcodeType, other.opcodeType)
+				&& Objects.equals(invalidSourceType, other.invalidSourceType)
+				&& Objects.equals(invalidExpectedType, other.invalidExpectedType)
+				&& isSameLiteral(other);
 	}
 
 	private boolean isSameLiteral(ArithNode other) {

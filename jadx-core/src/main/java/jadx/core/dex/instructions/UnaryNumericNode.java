@@ -1,5 +1,7 @@
 package jadx.core.dex.instructions;
 
+import java.util.Objects;
+
 import org.jetbrains.annotations.Nullable;
 
 import jadx.core.dex.instructions.args.ArgType;
@@ -43,6 +45,7 @@ public final class UnaryNumericNode extends InsnNode {
 			return false;
 		}
 		UnaryNumericNode other = (UnaryNumericNode) obj;
-		return operandType.equals(other.operandType);
+		return operandType.equals(other.operandType)
+				&& Objects.equals(invalidSourceType, other.invalidSourceType);
 	}
 }
