@@ -10,7 +10,12 @@ import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import jadx.api.plugins.input.data.AccessFlags;
+import jadx.api.plugins.input.data.ICallSite;
 import jadx.api.plugins.input.data.ICodeReader;
+import jadx.api.plugins.input.data.IMethodHandle;
+import jadx.api.plugins.input.data.IMethodRef;
+import jadx.api.plugins.input.data.MethodHandleType;
+import jadx.api.plugins.input.data.annotations.EncodedType;
 import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.data.attributes.JadxAttrType;
 import jadx.api.plugins.input.insns.InsnIndexType;
@@ -25,6 +30,7 @@ import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.BaseInvokeNode;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.InvokeCustomNode;
 import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.InvokeType;
 import jadx.core.dex.instructions.args.InsnArg;
@@ -41,6 +47,7 @@ import jadx.core.utils.InsnRemover;
 import jadx.core.utils.ListUtils;
 import jadx.core.utils.Utils;
 import jadx.core.utils.exceptions.JadxException;
+import jadx.core.utils.input.InsnDataUtils;
 
 @JadxVisitor(
 		name = "ExtractFieldInit",
@@ -215,10 +222,22 @@ public class ExtractFieldInit extends AbstractVisitor {
 
 	private static boolean invocationReadsField(ClassNode cls, BaseInvokeNode invoke, FieldInfo fieldInfo,
 			InsnType readType, Set<MethodInfo> visited) {
+		if (invoke instanceof InvokeCustomNode) {
+			InvokeCustomNode custom = (InvokeCustomNode) invoke;
+			InsnNode callInsn = custom.getCallInsn();
+			if (callInsn instanceof BaseInvokeNode
+					&& invocationReadsField(cls, (BaseInvokeNode) callInsn, fieldInfo, readType, visited)) {
+				return true;
+			}
+		}
 		boolean virtualCall = invoke instanceof InvokeNode
 				&& (((InvokeNode) invoke).getInvokeType() == InvokeType.VIRTUAL
 						|| ((InvokeNode) invoke).getInvokeType() == InvokeType.INTERFACE);
 		return calledMethodReadsField(cls, invoke.getCallMth(), fieldInfo, readType, visited, virtualCall);
+	}
+
+	private static boolean isVirtualHandle(MethodHandleType handleType) {
+		return handleType == MethodHandleType.INVOKE_INSTANCE || handleType == MethodHandleType.INVOKE_INTERFACE;
 	}
 
 	private static boolean calledMethodReadsField(ClassNode cls, MethodInfo calledMth, FieldInfo fieldInfo,
@@ -298,6 +317,26 @@ public class ExtractFieldInit extends AbstractVisitor {
 				MethodInfo calledMth = MethodInfo.fromRef(cls.root(), insnData.getIndexAsMethod());
 				boolean virtualCall = opcode.name().startsWith("INVOKE_VIRTUAL") || opcode.name().startsWith("INVOKE_INTERFACE");
 				found[0] = calledMethodReadsField(cls, calledMth, fieldInfo, readType, visited, virtualCall);
+			} else if (opcode.name().startsWith("INVOKE_CUSTOM") && insnData.getIndexType() == InsnIndexType.CALL_SITE) {
+				insnData.decode();
+				ICallSite callSite = InsnDataUtils.getCallSite(insnData);
+				if (callSite != null) {
+					callSite.load();
+					for (EncodedValue value : callSite.getValues()) {
+						if (value.getType() == EncodedType.ENCODED_METHOD_HANDLE) {
+							IMethodHandle handle = (IMethodHandle) value.getValue();
+							IMethodRef methodRef = handle.getMethodRef();
+							if (methodRef != null) {
+								MethodInfo calledMth = MethodInfo.fromRef(cls.root(), methodRef);
+								if (calledMethodReadsField(cls, calledMth, fieldInfo, readType, visited,
+										isVirtualHandle(handle.getType()))) {
+									found[0] = true;
+									break;
+								}
+							}
+						}
+					}
+				}
 			}
 		});
 		return found[0];
