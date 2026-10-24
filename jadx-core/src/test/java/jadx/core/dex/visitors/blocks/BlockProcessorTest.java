@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.instructions.IfNode;
 import jadx.core.dex.instructions.IfOp;
+import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
 import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.InsnArg;
@@ -17,6 +18,34 @@ import jadx.core.dex.trycatch.CatchAttr;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class BlockProcessorTest {
+	@Test
+	void generatedAndSuppressedConstantsMustNotBeDeduplicated() {
+		InsnNode suppressed = constant(ArgType.INT);
+		suppressed.add(AFlag.DONT_GENERATE);
+		InsnNode generated = constant(ArgType.INT);
+
+		assertThat(BlockProcessor.isInsnsEquals(suppressed, generated)).isFalse();
+		assertThat(BlockProcessor.isInsnsEquals(generated, suppressed)).isFalse();
+	}
+
+	@Test
+	void suppressedThrowingInsnMustNotEraseGeneratedCopy() {
+		InsnNode suppressed = checkCast();
+		suppressed.add(AFlag.DONT_GENERATE);
+		InsnNode generated = checkCast();
+
+		assertThat(suppressed.canReorder()).isTrue();
+		assertThat(generated.canReorder()).isFalse();
+		assertThat(BlockProcessor.isSame(suppressed, generated)).isFalse();
+		assertThat(BlockProcessor.isSame(generated, suppressed)).isFalse();
+	}
+
+	private static InsnNode checkCast() {
+		InsnNode insn = new IndexInsnNode(InsnType.CHECK_CAST, ArgType.STRING, 1);
+		insn.addArg(InsnArg.reg(0, ArgType.OBJECT));
+		return insn;
+	}
+
 	@Test
 	void distinctTypedConstantsMustNotBeDeduplicated() {
 		InsnNode intConst = constant(ArgType.INT);

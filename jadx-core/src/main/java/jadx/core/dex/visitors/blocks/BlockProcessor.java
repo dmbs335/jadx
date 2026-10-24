@@ -430,13 +430,17 @@ public class BlockProcessor extends AbstractVisitor {
 		}
 	}
 
-	private static boolean isSame(InsnNode insn, InsnNode curInsn) {
-		return isInsnsEquals(insn, curInsn) && insn.canReorder();
+	static boolean isSame(InsnNode insn, InsnNode curInsn) {
+		return isInsnsEquals(insn, curInsn) && insn.canReorder() && curInsn.canReorder();
 	}
 
 	static boolean isInsnsEquals(InsnNode insn, InsnNode otherInsn) {
 		if (insn == otherInsn) {
 			return true;
+		}
+		// Hoisting the suppressed copy would drop a generated instruction from another path.
+		if (insn.contains(AFlag.DONT_GENERATE) != otherInsn.contains(AFlag.DONT_GENERATE)) {
+			return false;
 		}
 		if (insn.isSame(otherInsn)
 				&& sameArgs(insn.getResult(), otherInsn.getResult())) {
