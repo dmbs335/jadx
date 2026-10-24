@@ -59,9 +59,9 @@ public class EncodedValueUtils {
 			case ENCODED_LONG:
 				return InsnArg.lit((Long) value, ArgType.LONG);
 			case ENCODED_FLOAT:
-				return InsnArg.lit(Float.floatToIntBits((Float) value), ArgType.FLOAT);
+				return InsnArg.lit(Float.floatToRawIntBits((Float) value), ArgType.FLOAT);
 			case ENCODED_DOUBLE:
-				return InsnArg.lit(Double.doubleToLongBits((Double) value), ArgType.DOUBLE);
+				return InsnArg.lit(Double.doubleToRawLongBits((Double) value), ArgType.DOUBLE);
 			case ENCODED_STRING:
 				// noinspection RedundantCast
 				return (String) value;

@@ -100,11 +100,9 @@ public final class LiteralArg extends InsnArg {
 		if (isInteger()) {
 			neg = -literal;
 		} else if (type == ArgType.FLOAT) {
-			float val = Float.intBitsToFloat(((int) literal));
-			neg = Float.floatToIntBits(-val);
+			neg = ((int) literal) ^ Integer.MIN_VALUE;
 		} else if (type == ArgType.DOUBLE) {
-			double val = Double.longBitsToDouble(literal);
-			neg = Double.doubleToLongBits(-val);
+			neg = literal ^ Long.MIN_VALUE;
 		} else {
 			return null;
 		}

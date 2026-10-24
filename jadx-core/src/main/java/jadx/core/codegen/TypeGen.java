@@ -108,9 +108,17 @@ public class TypeGen {
 			case LONG:
 				return stringUtils.formatLong(lit, cast);
 			case FLOAT:
-				return StringUtils.formatFloat(Float.intBitsToFloat((int) lit));
+				float floatValue = Float.intBitsToFloat((int) lit);
+				if (Float.isNaN(floatValue) && (int) lit != Float.floatToIntBits(Float.NaN)) {
+					return "Float.intBitsToFloat(0x" + Integer.toHexString((int) lit) + ')';
+				}
+				return StringUtils.formatFloat(floatValue);
 			case DOUBLE:
-				return StringUtils.formatDouble(Double.longBitsToDouble(lit));
+				double doubleValue = Double.longBitsToDouble(lit);
+				if (Double.isNaN(doubleValue) && lit != Double.doubleToLongBits(Double.NaN)) {
+					return "Double.longBitsToDouble(0x" + Long.toHexString(lit) + "L)";
+				}
+				return StringUtils.formatDouble(doubleValue);
 
 			case OBJECT:
 			case ARRAY:
