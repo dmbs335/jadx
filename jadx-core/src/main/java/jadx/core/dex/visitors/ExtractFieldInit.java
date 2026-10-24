@@ -6,6 +6,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import jadx.api.plugins.input.data.AccessFlags;
@@ -16,8 +17,10 @@ import jadx.core.dex.attributes.AType;
 import jadx.core.dex.attributes.FieldInitInsnAttr;
 import jadx.core.dex.info.AccessInfo;
 import jadx.core.dex.info.FieldInfo;
+import jadx.core.dex.info.MethodInfo;
 import jadx.core.dex.instructions.IndexInsnNode;
 import jadx.core.dex.instructions.InsnType;
+import jadx.core.dex.instructions.InvokeNode;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
 import jadx.core.dex.instructions.args.RegisterArg;
@@ -99,11 +102,17 @@ public class ExtractFieldInit extends AbstractVisitor {
 		}
 		List<FieldInitInfo> movableInits = new ArrayList<>(inits);
 		filterFieldsInit(movableInits);
+		Set<FieldNode> possiblyObservedFinalFields = inits.stream()
+				.filter(fi -> fi.fieldNode.getAccessFlags().isFinal())
+				.filter(fi -> isIndirectStaticFieldReadBeforeWrite(cls, classInitMth, fi))
+				.map(fi -> fi.fieldNode)
+				.collect(Collectors.toSet());
 		// Encoded values are installed before <clinit> starts. If one of them is
 		// overwritten there, moving any write into a field initializer can place
 		// it before the encoded value and change reads through other methods.
 		if (inits.stream().anyMatch(fi -> fi.fieldNode.get(JadxAttrType.CONSTANT_VALUE) != null
-				&& fi.fieldNode.get(JadxAttrType.CONSTANT_VALUE) != EncodedValue.NULL)) {
+				&& fi.fieldNode.get(JadxAttrType.CONSTANT_VALUE) != EncodedValue.NULL)
+				|| !possiblyObservedFinalFields.isEmpty()) {
 			movableInits.clear();
 		}
 		Set<FieldNode> movableFields = movableInits.stream().map(v -> v.fieldNode).collect(Collectors.toSet());
@@ -123,6 +132,11 @@ public class ExtractFieldInit extends AbstractVisitor {
 					// Keep the default value explicit so the read remains observable.
 					field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
 					field.addWarnComment("Final modifier removed: static field is read before assignment in class initializer");
+				} else if (possiblyObservedFinalFields.contains(field)) {
+					// A call can read the default value before the field is assigned.
+					// Keeping it final would turn a literal write into a Java constant.
+					field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
+					field.addWarnComment("Final modifier removed: static field is read through a call before assignment");
 				} else {
 					field.remove(JadxAttrType.CONSTANT_VALUE);
 				}
@@ -146,6 +160,47 @@ public class ExtractFieldInit extends AbstractVisitor {
 
 	private static boolean isStaticFieldReadBeforeWrite(MethodNode mth, FieldInitInfo target) {
 		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
+		return hasInsnBeforeStaticFieldWrite(mth, target, innerInsn -> innerInsn.getType() == InsnType.SGET
+				&& fieldInfo.equals(((IndexInsnNode) innerInsn).getIndex()), true);
+	}
+
+	private static boolean isIndirectStaticFieldReadBeforeWrite(ClassNode cls, MethodNode mth, FieldInitInfo target) {
+		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
+		return hasInsnBeforeStaticFieldWrite(mth, target, innerInsn -> innerInsn instanceof InvokeNode
+				&& methodReadsStaticField(cls, ((InvokeNode) innerInsn).getCallMth(), fieldInfo, new HashSet<>()), false);
+	}
+
+	private static boolean methodReadsStaticField(ClassNode cls, MethodInfo calledMth, FieldInfo fieldInfo, Set<MethodInfo> visited) {
+		if (!calledMth.getDeclClass().equals(cls.getClassInfo()) || !visited.add(calledMth)) {
+			return false;
+		}
+		MethodNode callee = cls.searchMethod(calledMth);
+		if (callee == null || callee.getBasicBlocks() == null) {
+			return false;
+		}
+		for (BlockNode block : callee.getBasicBlocks()) {
+			for (InsnNode insn : block.getInstructions()) {
+				Boolean read = insn.visitInsns(innerInsn -> {
+					if (innerInsn.getType() == InsnType.SGET
+							&& fieldInfo.equals(((IndexInsnNode) innerInsn).getIndex())) {
+						return true;
+					}
+					if (innerInsn instanceof InvokeNode
+							&& methodReadsStaticField(cls, ((InvokeNode) innerInsn).getCallMth(), fieldInfo, visited)) {
+						return true;
+					}
+					return null;
+				});
+				if (Objects.equals(read, Boolean.TRUE)) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static boolean hasInsnBeforeStaticFieldWrite(MethodNode mth, FieldInitInfo target,
+			Predicate<InsnNode> match, boolean includeWriteInsn) {
 		BlockNode putBlock = null;
 		for (BlockNode block : mth.getBasicBlocks()) {
 			for (InsnNode insn : block.getInstructions()) {
@@ -166,14 +221,10 @@ public class ExtractFieldInit extends AbstractVisitor {
 				continue;
 			}
 			for (InsnNode insn : block.getInstructions()) {
-				Boolean read = insn.visitInsns(innerInsn -> {
-					if (innerInsn.getType() == InsnType.SGET
-							&& fieldInfo.equals(((IndexInsnNode) innerInsn).getIndex())) {
-						return true;
-					}
-					return null;
-				});
-				if (Objects.equals(read, Boolean.TRUE)) {
+				if (block == putBlock && insn == target.putInsn && !includeWriteInsn) {
+					return false;
+				}
+				if (Objects.equals(insn.visitInsns(innerInsn -> match.test(innerInsn) ? true : null), Boolean.TRUE)) {
 					return true;
 				}
 				if (block == putBlock && insn == target.putInsn) {
