@@ -242,6 +242,11 @@ public class ExtractFieldInit extends AbstractVisitor {
 			return false;
 		}
 		IndexInsnNode insn = initInfo.putInsn;
+		// Only writes to this instance can become instance field initializers.
+		// A literal value must not let a write to another object pass this check.
+		if (insn.getType() == InsnType.IPUT && (insn.getArgsCount() < 2 || !insn.getArg(1).isThis())) {
+			return false;
+		}
 		InsnArg arg = insn.getArg(0);
 		if (arg.isInsnWrap()) {
 			InsnNode wrapInsn = ((InsnWrapArg) arg).getWrapInsn();
