@@ -133,13 +133,13 @@ public class ConstPoolReader {
 	private MethodHandleType convertMethodHandleKind(int kind) {
 		switch (kind) {
 			case 1:
-				return MethodHandleType.STATIC_PUT;
+				return MethodHandleType.INSTANCE_GET;
 			case 2:
 				return MethodHandleType.STATIC_GET;
 			case 3:
 				return MethodHandleType.INSTANCE_PUT;
 			case 4:
-				return MethodHandleType.INSTANCE_GET;
+				return MethodHandleType.STATIC_PUT;
 			case 5:
 				return MethodHandleType.INVOKE_INSTANCE;
 			case 6:
