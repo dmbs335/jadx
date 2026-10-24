@@ -20,7 +20,7 @@ public class InvokeDecoder implements IJavaInsnDecoder {
 	@Override
 	public void decode(CodeDecodeState state) {
 		DataReader reader = state.reader();
-		int mthIdx = reader.readS2();
+		int mthIdx = reader.readU2();
 		if (payloadSize == 4) {
 			reader.skip(2);
 		}

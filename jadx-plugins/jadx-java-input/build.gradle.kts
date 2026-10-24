@@ -9,4 +9,5 @@ dependencies {
 	implementation("io.github.skylot:raung-disasm:0.1.1")
 
 	testImplementation(project(":jadx-core"))
+	testImplementation("org.ow2.asm:asm:9.10.1")
 }
