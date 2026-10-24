@@ -64,6 +64,9 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 		List<InterleavedJvmCatch> interleavedJvmCatches = mth.getCodeReader().getCodeFormat() == CodeFormat.JVM
 				? findInterleavedJvmCatches(mth, mth.getCodeReader().getTries())
 				: Collections.emptyList();
+		List<TryCatchBlockAttr> overlappingJvmTypedRanges = mth.getCodeReader().getCodeFormat() == CodeFormat.JVM
+				? linkNestedJvmTypedRanges(mth, tryBlocks)
+				: Collections.emptyList();
 		TryCatchBlockAttr splitTryBlock = tryBlocks.size() == 1 ? tryBlocks.get(0) : null;
 		boolean repeatableRetryHandler = splitTryBlock != null
 				&& hasRepeatableCoroutineRetryHandler(mth, splitTryBlock);
@@ -128,8 +131,12 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			if (!interleavedJvmCatches.isEmpty()) {
 				restoreSharedTypedHandlerForNarrowCatch(mth.getRegion(), interleavedJvmCatches);
 				if (interleavedJvmCatches.stream().anyMatch(candidate -> !candidate.repaired)) {
-					mth.addError("Unsupported interleaved JVM exception-table ranges: catch-all scope may be widened", null);
+					mth.addError("Unsupported interleaved JVM exception-table ranges: catch scope or shared handler effects may change",
+							null);
 				}
+			}
+			if (overlappingJvmTypedRanges.stream().anyMatch(tb -> hasWidenedJvmCatchScope(mth.getRegion(), tb))) {
+				mth.addError("Incorrect JVM typed catch scope: unprotected throwing code was included in a narrower range", null);
 			}
 		}
 		// Evaluate coverage only after wrapping is finished. Nested descriptors may
@@ -166,6 +173,203 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			this.end = end;
 			this.widerHandlers = widerHandlers;
 		}
+	}
+
+	/**
+	 * JVM tables can list overlapping typed ranges without recording their nesting in
+	 * TryCatchBlockAttr. Only a non-throwing terminal narrow catch can be nested under the wider
+	 * catch: otherwise the wider catch would also cover exceptions from the handler. If the wider
+	 * table entry comes first, both catch domains must be disjoint so nesting preserves precedence.
+	 */
+	private static List<TryCatchBlockAttr> linkNestedJvmTypedRanges(MethodNode mth, List<TryCatchBlockAttr> tryBlocks) {
+		List<ITry> tries = mth.getCodeReader().getTries();
+		List<TryCatchBlockAttr> overlapping = new ArrayList<>();
+		for (int i = 0; i < tries.size(); i++) {
+			for (int j = i + 1; j < tries.size(); j++) {
+				ITry first = tries.get(i);
+				ITry second = tries.get(j);
+				if (first.getStartOffset() != second.getStartOffset()
+						|| first.getEndOffset() == second.getEndOffset()) {
+					continue;
+				}
+				boolean narrowFirst = first.getEndOffset() < second.getEndOffset();
+				ITry narrowTry = narrowFirst ? first : second;
+				ITry widerTry = narrowFirst ? second : first;
+				if (narrowTry.getCatch().getCatchAllHandler() != -1
+						|| narrowTry.getCatch().getHandlers().length == 0
+						|| hasLaterCatchAllForSameRange(tries, narrowFirst ? i : j)
+						|| widerTry.getCatch().getCatchAllHandler() != -1
+						|| widerTry.getCatch().getHandlers().length == 0) {
+					continue;
+				}
+				boolean precedenceSafe = narrowFirst || haveDisjointJvmCatchTypes(mth, narrowTry, widerTry);
+				for (TryCatchBlockAttr narrow : tryBlocks) {
+					if (narrow.getBlocks().size() != 1
+							|| !matchesJvmTryHandlers(narrow, narrowTry)
+							|| narrow.getBlocks().get(0).getStartOffset() != narrowTry.getStartOffset()
+							|| narrow.getBlocks().get(0).getInstructions().stream()
+									.anyMatch(insn -> insn.getOffset() > narrowTry.getEndOffset())) {
+						continue;
+					}
+					for (TryCatchBlockAttr wider : tryBlocks) {
+						if (wider != narrow
+								&& matchesJvmTryHandlers(wider, widerTry)
+								&& wider.getBlocks().size() > narrow.getBlocks().size()
+								&& wider.getBlocks().containsAll(narrow.getBlocks())
+								&& wider.getBlocks().stream().anyMatch(block -> block.getStartOffset() > narrowTry.getEndOffset())
+								&& wider.getBlocks().stream().allMatch(block -> block.getStartOffset() <= widerTry.getEndOffset()
+										&& block.getInstructions().stream().allMatch(insn -> insn.getOffset() <= widerTry.getEndOffset()))
+								&& wider.getTopSplitter() == narrow.getTopSplitter()) {
+							if (!overlapping.contains(narrow)) {
+								overlapping.add(narrow);
+							}
+							if (precedenceSafe && narrow.getOuterTryBlock() == null && wider.getOuterTryBlock() == null
+									&& hasPureLiteralReturnHandlers(narrow)) {
+								narrow.setOuterTryBlock(wider);
+								wider.addInnerTryBlock(narrow);
+							}
+							break;
+						}
+					}
+				}
+			}
+		}
+		return overlapping;
+	}
+
+	private static boolean haveDisjointJvmCatchTypes(MethodNode mth, ITry first, ITry second) {
+		for (String firstTypeName : first.getCatch().getTypes()) {
+			ClassInfo firstType = ClassInfo.fromName(mth.root(), firstTypeName);
+			for (String secondTypeName : second.getCatch().getTypes()) {
+				ClassInfo secondType = ClassInfo.fromName(mth.root(), secondTypeName);
+				if (!mth.root().getTypeCompare().compareTypes(firstType, secondType).isConflict()) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private static boolean hasLaterCatchAllForSameRange(List<ITry> tries, int index) {
+		ITry first = tries.get(index);
+		for (int i = index + 1; i < tries.size(); i++) {
+			ITry later = tries.get(i);
+			if (later.getStartOffset() == first.getStartOffset()
+					&& later.getEndOffset() == first.getEndOffset()
+					&& later.getCatch().getCatchAllHandler() != -1) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static boolean matchesJvmTryHandlers(TryCatchBlockAttr tb, ITry rawTry) {
+		int[] targets = rawTry.getCatch().getHandlers();
+		if (tb.getHandlers().size() != targets.length) {
+			return false;
+		}
+		Set<Integer> matched = new HashSet<>();
+		for (int target : targets) {
+			if (!matched.add(target)
+					|| tb.getHandlers().stream().noneMatch(handler -> handler.getHandlerOffset() == target)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean hasPureLiteralReturnHandlers(TryCatchBlockAttr tb) {
+		if (tb.getHandlers().isEmpty()) {
+			return false;
+		}
+		for (ExceptionHandler handler : tb.getHandlers()) {
+			if (handler.isFinally() || !(handler.getHandlerRegion() instanceof Region)) {
+				return false;
+			}
+			boolean foundReturn = false;
+			for (IContainer child : ((Region) handler.getHandlerRegion()).getSubBlocks()) {
+				if (!(child instanceof IBlock)) {
+					return false;
+				}
+				for (InsnNode insn : ((IBlock) child).getInstructions()) {
+					if (insn.contains(AFlag.DONT_GENERATE)) {
+						continue;
+					}
+					if (foundReturn || insn.getType() != InsnType.RETURN
+							|| insn.getArgsCount() > 1
+							|| insn.getArgsCount() == 1 && !insn.getArg(0).isLiteral()) {
+						return false;
+					}
+					foundReturn = true;
+				}
+			}
+			if (!foundReturn) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static boolean hasWidenedJvmCatchScope(IRegion root, TryCatchBlockAttr tb) {
+		boolean found = false;
+		ArrayDeque<IRegion> pending = new ArrayDeque<>();
+		Set<IRegion> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+		pending.add(root);
+		while (!pending.isEmpty()) {
+			IRegion region = pending.removeLast();
+			if (!visited.add(region)) {
+				continue;
+			}
+			if (region instanceof TryCatchRegion && ((TryCatchRegion) region).getTryCatchBlock() == tb) {
+				found = true;
+				if (hasThrowingCodeOutsideJvmCatch(((TryCatchRegion) region).getTryRegion(), tb,
+						Collections.newSetFromMap(new IdentityHashMap<>()))) {
+					return true;
+				}
+				continue;
+			}
+			for (IContainer child : region.getSubBlocks()) {
+				if (child instanceof IRegion) {
+					pending.add((IRegion) child);
+				}
+			}
+		}
+		return !found;
+	}
+
+	private static boolean hasThrowingCodeOutsideJvmCatch(
+			IContainer container, TryCatchBlockAttr tb, Set<IContainer> visited) {
+		if (!visited.add(container)) {
+			return false;
+		}
+		if (container instanceof IBlock) {
+			for (InsnNode insn : ((IBlock) container).getInstructions()) {
+				Boolean outside = insn.visitInsns(inner -> {
+					if (inner.contains(AFlag.DONT_GENERATE) || !inner.canThrowException()) {
+						return null;
+					}
+					CatchAttr catchAttr = inner.get(AType.EXC_CATCH);
+					return catchAttr != null && catchAttr.getHandlers().containsAll(tb.getHandlers())
+							? null
+							: Boolean.TRUE;
+				});
+				if (outside != null) {
+					return true;
+				}
+			}
+			return false;
+		}
+		if (container instanceof TryCatchRegion) {
+			return hasThrowingCodeOutsideJvmCatch(((TryCatchRegion) container).getTryRegion(), tb, visited);
+		}
+		if (container instanceof IRegion) {
+			for (IContainer child : ((IRegion) container).getSubBlocks()) {
+				if (hasThrowingCodeOutsideJvmCatch(child, tb, visited)) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	private static List<InterleavedJvmCatch> findInterleavedJvmCatches(MethodNode mth, List<ITry> tries) {
@@ -375,6 +579,8 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 	/**
 	 * A shared empty loop-end handler represents a pure back edge. A copy on the first sibling
 	 * needs an explicit continue, otherwise execution falls through to the second sibling.
+	 * Non-empty handlers need a CFG-level clone before SSA: copying their instructions into an
+	 * InsnContainer here leaves register uses outside the method's basic-block tree.
 	 */
 	private static boolean hasSharedLoopBackHandler(TryCatchRegion narrowRegion, TryCatchRegion widerRegion) {
 		IRegion parent = narrowRegion.getParent();

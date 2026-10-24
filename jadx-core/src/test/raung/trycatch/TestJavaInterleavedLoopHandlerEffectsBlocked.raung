@@ -1,0 +1,49 @@
+.version 49.0
+.class public trycatch/TestJavaInterleavedLoopHandlerEffectsBlocked
+.super java/lang/Object
+
+.method public static test()I
+    .max stack 1
+    .max locals 2
+
+    iconst_0
+    istore 1
+
+  :try_start
+    invokestatic trycatch/TestJavaInterleavedLoopHandlerEffectsBlocked first ()V
+  :middle
+    invokestatic trycatch/TestJavaInterleavedLoopHandlerEffectsBlocked second ()V
+  :try_end
+    .catch java/lang/IllegalArgumentException :try_start .. :middle goto :argument_handler
+    .catch java/lang/IllegalStateException :try_start .. :try_end goto :state_handler
+    .catch all :try_start .. :middle goto :all_handler
+    iload 1
+    ireturn
+
+  :argument_handler
+    astore 0
+    iconst_1
+    ireturn
+
+  :state_handler
+    astore 0
+    iinc 1 1
+    goto :try_start
+
+  :all_handler
+    astore 0
+    iconst_3
+    ireturn
+.end method
+
+.method private static first()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static second()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
