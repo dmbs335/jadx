@@ -141,7 +141,7 @@ public class JavaInsnsRegister {
 		register(arr, 0x57, "pop", 0, 0, Opcode.NOP, CodeDecodeState::discard);
 		register(arr, 0x58, "pop2", 0, 0, Opcode.NOP, CodeDecodeState::discardWord);
 
-		register(arr, 0x59, "dup", 0, 2, Opcode.MOVE, s -> s.peek(1).push(0, s.peekType(1)));
+		register(arr, 0x59, "dup", 0, 2, Opcode.MOVE, s -> s.peek(1).push(0, NARROW));
 		register(arr, 0x5a, "dup_x1", 0, 6, Opcode.MOVE_MULTI,
 				s -> s.push(0, s.peekType(1)).peekFrom(1, 1)
 						.peekFrom(1, 2).peekFrom(2, 3)
@@ -151,7 +151,7 @@ public class JavaInsnsRegister {
 			if (s.peekType(0) == NARROW) {
 				s.peekFrom(0, 3).peekFrom(1, 1).push(0, NARROW).push(2, NARROW);
 			} else {
-				s.peek(1).push(0, s.peekType(1));
+				s.peek(1).push(0, WIDE);
 			}
 		});
 		register(arr, 0x5d, "dup2_x1", 0, 10, Opcode.MOVE_MULTI, JavaInsnsRegister::dup2x1);

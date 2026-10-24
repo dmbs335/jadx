@@ -1,0 +1,41 @@
+.version 45.3
+.class public super others/TestJavaDupStackTypes
+
+.method public static duplicateLong()J
+    .max stack 4
+    .max locals 0
+    lconst_1
+    dup2
+    pop2
+    lreturn
+.end method
+
+.method public static duplicateIntAboveLong()J
+    .max stack 4
+    .max locals 0
+    lconst_1
+    iconst_2
+    dup
+    pop2
+    lreturn
+.end method
+
+.method public check()V
+    .max stack 4
+    .max locals 0
+    invokestatic others/TestJavaDupStackTypes duplicateLong ()J
+    lconst_1
+    lcmp
+    ifne :FAIL
+    invokestatic others/TestJavaDupStackTypes duplicateIntAboveLong ()J
+    lconst_1
+    lcmp
+    ifeq :DONE
+  :FAIL
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :DONE
+    return
+.end method
