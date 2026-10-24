@@ -57,6 +57,7 @@ public class InvokeCustomNode extends InvokeNode {
 				&& implMthInfo.equals(other.implMthInfo)
 				&& Objects.equals(instantiatedMthInfo, other.instantiatedMthInfo)
 				&& callInsn.isSame(other.callInsn)
+				&& Objects.equals(callInsn.getArguments(), other.callInsn.getArguments())
 				&& inlineInsn == other.inlineInsn
 				&& useRef == other.useRef
 				&& lambdaInterfaces.equals(other.lambdaInterfaces);
