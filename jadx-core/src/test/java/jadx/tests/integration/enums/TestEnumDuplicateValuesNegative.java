@@ -70,4 +70,15 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 				.containsOne("class TestEnumCustomValuesNegative extends Enum")
 				.containsOne("SPECIAL.clone()");
 	}
+
+	@Test
+	public void testCustomValueOfArgument() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumCustomValueOfNegative"))
+				.code()
+				.containsOne("Enum valueOf(String) method is not the default implementation")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumCustomValueOfNegative extends Enum")
+				.containsOne("Enum.valueOf(TestEnumCustomValueOfNegative.class, \"ONE\")");
+	}
 }

@@ -217,6 +217,10 @@ public class EnumVisitor extends AbstractVisitor {
 			cls.addWarnComment("Enum values() method does not match the $VALUES array");
 			return false;
 		}
+		if (!isCompatibleValueOfMethod(cls)) {
+			cls.addWarnComment("Enum valueOf(String) method is not the default implementation");
+			return false;
+		}
 		data.toRemove.add(data.valuesInitInsn);
 
 		// all checks complete, perform transform
@@ -1341,6 +1345,19 @@ public class EnumVisitor extends AbstractVisitor {
 		return true;
 	}
 
+	private boolean isCompatibleValueOfMethod(ClassNode cls) {
+		ArgType clsType = cls.getClassInfo().getType();
+		String valueOfMethodShortId = "valueOf(Ljava/lang/String;)" + TypeGen.signature(clsType);
+		for (MethodNode mth : cls.getMethods()) {
+			if (mth.getMethodInfo().getShortId().equals(valueOfMethodShortId)
+					&& !mth.isNoCode()
+					&& !simpleValueOfMth(mth, clsType)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	private void removeEnumMethods(ClassNode cls, FieldNode valuesField) {
 		ArgType clsType = cls.getClassInfo().getType();
 		FieldInfo valuesFieldInfo = valuesField.getFieldInfo();
@@ -1453,15 +1470,24 @@ public class EnumVisitor extends AbstractVisitor {
 	}
 
 	private boolean simpleValueOfMth(MethodNode mth, ArgType clsType) {
-		InsnNode returnInsn = InsnUtils.searchSingleReturnInsn(mth, insn -> insn.getArgsCount() == 1);
-		if (returnInsn == null) {
+		InsnNode returnInsn = BlockUtils.getOnlyOneInsnFromMth(mth);
+		if (returnInsn == null || returnInsn.getType() != InsnType.RETURN || returnInsn.getArgsCount() != 1) {
 			return false;
 		}
 		InsnNode wrappedInsn = getWrappedInsn(getSingleArg(returnInsn));
 		IndexInsnNode castInsn = (IndexInsnNode) checkInsnType(wrappedInsn, InsnType.CHECK_CAST);
 		if (castInsn != null && Objects.equals(castInsn.getIndex(), clsType)) {
 			InvokeNode invokeInsn = (InvokeNode) checkInsnType(getWrappedInsn(getSingleArg(castInsn)), InsnType.INVOKE);
-			return invokeInsn != null && invokeInsn.getCallMth().equals(enumValueOfMth);
+			if (invokeInsn == null || !invokeInsn.getCallMth().equals(enumValueOfMth)
+					|| invokeInsn.getArgsCount() != 2 || mth.getArgRegs().size() != 1) {
+				return false;
+			}
+			if (!Objects.equals(InsnUtils.getConstValueByArg(mth.root(), invokeInsn.getArg(0)), clsType)) {
+				return false;
+			}
+			InsnArg nameArg = invokeInsn.getArg(1);
+			return nameArg.isRegister()
+					&& ((RegisterArg) nameArg).getSVar() == mth.getArgRegs().get(0).getSVar();
 		}
 		return false;
 	}
