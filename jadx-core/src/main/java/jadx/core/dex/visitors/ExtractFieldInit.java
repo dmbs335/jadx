@@ -8,6 +8,8 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import jadx.api.plugins.input.data.AccessFlags;
+import jadx.api.plugins.input.data.annotations.EncodedValue;
 import jadx.api.plugins.input.data.attributes.JadxAttrType;
 import jadx.core.dex.attributes.AFlag;
 import jadx.core.dex.attributes.AType;
@@ -95,18 +97,34 @@ public class ExtractFieldInit extends AbstractVisitor {
 		if (inits.isEmpty()) {
 			return false;
 		}
-		// ignore field init constant if field initialized in class init method
+		List<FieldInitInfo> movableInits = new ArrayList<>(inits);
+		filterFieldsInit(movableInits);
+		Set<FieldNode> movableFields = movableInits.stream().map(v -> v.fieldNode).collect(Collectors.toSet());
 		for (FieldInitInfo fieldInit : inits) {
 			FieldNode field = fieldInit.fieldNode;
 			if (field.getAccessFlags().isFinal()) {
-				field.remove(JadxAttrType.CONSTANT_VALUE);
+				EncodedValue encodedValue = field.get(JadxAttrType.CONSTANT_VALUE);
+				if (movableFields.contains(field)) {
+					field.remove(JadxAttrType.CONSTANT_VALUE);
+				} else if (encodedValue != null && encodedValue != EncodedValue.NULL) {
+					// Java cannot express both an encoded static value and a later assignment
+					// to a final field. Preserve the values and report the lost modifier.
+					field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
+					field.addWarnComment("Final modifier removed: encoded static value is overwritten in class initializer");
+				} else if (isStaticFieldReadBeforeWrite(classInitMth, fieldInit)) {
+					// A direct read before assignment is also illegal for a Java final field.
+					// Keep the default value explicit so the read remains observable.
+					field.setAccessFlags(field.getAccessFlags().remove(AccessFlags.FINAL));
+					field.addWarnComment("Final modifier removed: static field is read before assignment in class initializer");
+				} else {
+					field.remove(JadxAttrType.CONSTANT_VALUE);
+				}
 			}
 		}
-		filterFieldsInit(inits);
-		if (inits.isEmpty()) {
+		if (movableInits.isEmpty()) {
 			return false;
 		}
-		for (FieldInitInfo fieldInit : inits) {
+		for (FieldInitInfo fieldInit : movableInits) {
 			IndexInsnNode insn = fieldInit.putInsn;
 			InsnArg arg = insn.getArg(0);
 			if (arg instanceof InsnWrapArg) {
@@ -115,8 +133,48 @@ public class ExtractFieldInit extends AbstractVisitor {
 			InsnRemover.remove(classInitMth, insn);
 			addFieldInitAttr(classInitMth, fieldInit.fieldNode, insn);
 		}
-		fixFieldsOrder(cls, inits);
+		fixFieldsOrder(cls, movableInits);
 		return true;
+	}
+
+	private static boolean isStaticFieldReadBeforeWrite(MethodNode mth, FieldInitInfo target) {
+		FieldInfo fieldInfo = target.fieldNode.getFieldInfo();
+		BlockNode putBlock = null;
+		for (BlockNode block : mth.getBasicBlocks()) {
+			for (InsnNode insn : block.getInstructions()) {
+				if (insn == target.putInsn) {
+					putBlock = block;
+					break;
+				}
+			}
+			if (putBlock != null) {
+				break;
+			}
+		}
+		if (putBlock == null) {
+			return false;
+		}
+		for (BlockNode block : mth.getBasicBlocks()) {
+			if (block != putBlock && !BlockUtils.isAnyPathExists(block, putBlock)) {
+				continue;
+			}
+			for (InsnNode insn : block.getInstructions()) {
+				Boolean read = insn.visitInsns(innerInsn -> {
+					if (innerInsn.getType() == InsnType.SGET
+							&& fieldInfo.equals(((IndexInsnNode) innerInsn).getIndex())) {
+						return true;
+					}
+					return null;
+				});
+				if (Objects.equals(read, Boolean.TRUE)) {
+					return true;
+				}
+				if (block == putBlock && insn == target.putInsn) {
+					return false;
+				}
+			}
+		}
+		return false;
 	}
 
 	private static void moveCommonFieldsInit(ClassNode cls) {
