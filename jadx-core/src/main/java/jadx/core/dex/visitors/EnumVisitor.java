@@ -37,6 +37,7 @@ import jadx.core.dex.instructions.args.ArgType;
 import jadx.core.dex.instructions.args.CodeVar;
 import jadx.core.dex.instructions.args.InsnArg;
 import jadx.core.dex.instructions.args.InsnWrapArg;
+import jadx.core.dex.instructions.args.LiteralArg;
 import jadx.core.dex.instructions.args.RegisterArg;
 import jadx.core.dex.instructions.args.SSAVar;
 import jadx.core.dex.instructions.mods.ConstructorInsn;
@@ -180,7 +181,8 @@ public class EnumVisitor extends AbstractVisitor {
 		}
 		Set<FieldInfo> seenFields = new HashSet<>();
 		Set<String> seenNames = new HashSet<>();
-		for (EnumField enumField : enumFields) {
+		for (int i = 0; i < enumFields.size(); i++) {
+			EnumField enumField = enumFields.get(i);
 			FieldNode fieldNode = enumField.getField();
 			if (!seenFields.add(fieldNode.getFieldInfo())) {
 				cls.addWarnComment("$VALUES array contains a duplicate enum field");
@@ -193,6 +195,18 @@ public class EnumVisitor extends AbstractVisitor {
 			if (!seenNames.add(outputName)) {
 				cls.addWarnComment("Enum constants resolve to duplicate names");
 				return false;
+			}
+			ConstructorInsn constructorInsn = enumField.getConstrInsn();
+			List<ArgType> argTypes = constructorInsn.getCallMth().getArgumentsTypes();
+			if (argTypes.size() >= 2
+					&& constructorInsn.getArgsCount() >= 2
+					&& ArgType.STRING.equals(argTypes.get(0))
+					&& ArgType.INT.equals(argTypes.get(1))) {
+				Object ordinal = InsnUtils.getConstValueByArg(cls.root(), constructorInsn.getArg(1));
+				if (ordinal instanceof LiteralArg && ((LiteralArg) ordinal).getLiteral() != i) {
+					cls.addWarnComment("Enum constructor ordinal differs from $VALUES array position");
+					return false;
+				}
 			}
 		}
 		data.toRemove.add(data.valuesInitInsn);

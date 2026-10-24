@@ -37,4 +37,14 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 				.containsOne("JADX ERROR: Failed to restore enum class")
 				.containsOne("class TestEnumDuplicateNamesNegative extends Enum");
 	}
+
+	@Test
+	public void testOrdinalMismatch() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumOrdinalMismatchNegative"))
+				.code()
+				.containsOne("Enum constructor ordinal differs from $VALUES array position")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumOrdinalMismatchNegative extends Enum");
+	}
 }
