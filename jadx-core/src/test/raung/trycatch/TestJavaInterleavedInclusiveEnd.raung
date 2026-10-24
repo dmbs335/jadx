@@ -1,0 +1,89 @@
+.version 49.0
+.class public trycatch/TestJavaInterleavedInclusiveEnd
+.super java/lang/Object
+
+.method public <init>()V
+    .max stack 1
+    .max locals 1
+    aload 0
+    invokespecial java/lang/Object <init> ()V
+    return
+.end method
+
+.method public static test(I)I
+    .max stack 2
+    .max locals 2
+
+  :wide_start
+    invokestatic trycatch/TestJavaInterleavedInclusiveEnd prefix ()V
+  :narrow_start
+    iconst_1
+    iload 0
+    idiv
+  :narrow_end
+    pop
+    invokestatic trycatch/TestJavaInterleavedInclusiveEnd second ()V
+  :wide_end
+    .catch java/lang/IllegalArgumentException :narrow_start .. :narrow_end goto :argument_handler
+    .catch java/lang/IllegalStateException :wide_start .. :wide_end goto :state_handler
+    .catch all :narrow_start .. :narrow_end goto :all_handler
+    iconst_0
+    ireturn
+
+  :argument_handler
+    astore 1
+    iconst_1
+    ireturn
+
+  :state_handler
+    astore 1
+    iconst_2
+    ireturn
+
+  :all_handler
+    astore 1
+    iconst_3
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 2
+    .max locals 1
+    iconst_0
+    invokestatic trycatch/TestJavaInterleavedInclusiveEnd test (I)I
+    iconst_3
+    if_icmpeq :caught_division
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :caught_division
+  :tail_start
+    iconst_1
+    invokestatic trycatch/TestJavaInterleavedInclusiveEnd test (I)I
+    pop
+  :tail_end
+    .catch java/lang/NullPointerException :tail_start .. :tail_end goto :caught_tail
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :caught_tail
+    astore 0
+    return
+.end method
+
+.method private static prefix()V
+    .max stack 0
+    .max locals 0
+    return
+.end method
+
+.method private static second()V
+    .max stack 2
+    .max locals 0
+    new java/lang/NullPointerException
+    dup
+    invokespecial java/lang/NullPointerException <init> ()V
+    athrow
+.end method

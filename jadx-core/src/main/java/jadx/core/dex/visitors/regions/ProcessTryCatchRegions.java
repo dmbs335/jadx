@@ -331,37 +331,116 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 			TryCatchRegion narrowRegion, TryCatchRegion widerRegion, List<InterleavedJvmCatch> patterns) {
 		TryCatchBlockAttr narrow = narrowRegion.getTryCatchBlock();
 		TryCatchBlockAttr wider = widerRegion.getTryCatchBlock();
-		if (narrow == null || wider == null || narrow.getBlocks().size() != 1
+		boolean loopBack = narrow != null && wider != null && hasSharedLoopBackHandler(narrowRegion, widerRegion);
+		if (narrow == null || wider == null || narrow.getBlocks().isEmpty()
 				|| wider.getBlocks().size() <= narrow.getBlocks().size()
 				|| !wider.getBlocks().containsAll(narrow.getBlocks())
 				|| !hasCatchAllHandler(narrow)
 				|| wider.getHandlers().isEmpty()
 				|| wider.getHandlers().stream().anyMatch(ExceptionHandler::isCatchAll)
-				|| !hasIndependentTerminalHandlers(wider)) {
+				|| (!hasIndependentTerminalHandlers(wider) && !loopBack)) {
 			return false;
 		}
-		int start = narrow.getBlocks().get(0).getStartOffset();
+		int start = narrow.getBlocks().stream().mapToInt(BlockNode::getStartOffset).min().orElse(-1);
 		int[] handlerTargets = wider.getHandlers().stream()
 				.mapToInt(ExceptionHandler::getHandlerOffset).toArray();
-		boolean protectedBySharedHandler = wider.getHandlers().stream()
-				.allMatch(handler -> handler.getHandlerRegion() != null
-						&& narrow.getBlocks().get(0).getInstructions().stream().anyMatch(insn -> {
-							CatchAttr catchAttr = insn.get(AType.EXC_CATCH);
-							return catchAttr != null && catchAttr.getHandlers().contains(handler);
-						}));
-		if (!protectedBySharedHandler) {
+		if (wider.getHandlers().stream().anyMatch(handler -> handler.getHandlerRegion() == null)) {
 			return false;
 		}
 		for (InterleavedJvmCatch pattern : patterns) {
+			// ITry.getEndOffset() is inclusive, including a one-byte throwing instruction.
 			if (!pattern.repaired && pattern.start == start
 					&& Arrays.equals(pattern.widerHandlers, handlerTargets)
-					&& narrow.getBlocks().get(0).getInstructions().stream()
-							.allMatch(insn -> insn.getOffset() <= pattern.end)) {
+					&& narrow.getBlocks().stream().allMatch(block -> block.getStartOffset() >= pattern.start
+							&& block.getStartOffset() <= pattern.end
+							&& block.getInstructions().stream().allMatch(insn -> insn.getOffset() <= pattern.end))
+					&& hasOnlySharedProtectedThrowingCode(narrowRegion.getTryRegion(), narrow, wider, pattern)) {
 				for (ExceptionHandler handler : wider.getHandlers()) {
 					narrowRegion.addCatchHandler(handler);
+					if (loopBack) {
+						InsnNode continueInsn = new InsnNode(InsnType.CONTINUE, 0);
+						continueInsn.add(AFlag.SYNTHETIC);
+						Region continueRegion = new Region(narrowRegion);
+						continueRegion.add(new InsnContainer(continueInsn));
+						narrowRegion.setCatchRegion(handler, continueRegion);
+					}
 				}
 				pattern.repaired = true;
 				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * A shared empty loop-end handler represents a pure back edge. A copy on the first sibling
+	 * needs an explicit continue, otherwise execution falls through to the second sibling.
+	 */
+	private static boolean hasSharedLoopBackHandler(TryCatchRegion narrowRegion, TryCatchRegion widerRegion) {
+		IRegion parent = narrowRegion.getParent();
+		if (parent == null || parent != widerRegion.getParent() || !(parent.getParent() instanceof LoopRegion)) {
+			return false;
+		}
+		LoopInfo loop = ((LoopRegion) parent.getParent()).getInfo();
+		TryCatchBlockAttr wider = widerRegion.getTryCatchBlock();
+		if (wider.getTopSplitter() != loop.getStart() || wider.getHandlers().size() != 1) {
+			return false;
+		}
+		ExceptionHandler handler = wider.getHandlers().get(0);
+		BlockNode handlerBlock = handler.getHandlerBlock();
+		if (handler.isFinally() || handlerBlock != loop.getEnd()
+				|| !handlerBlock.getInstructions().isEmpty()
+				|| handlerBlock.getSuccessors().size() != 1
+				|| handlerBlock.getSuccessors().get(0) != loop.getStart()
+				|| !(handler.getHandlerRegion() instanceof Region)) {
+			return false;
+		}
+		List<IContainer> handlerChildren = ((Region) handler.getHandlerRegion()).getSubBlocks();
+		return handlerChildren.size() == 1 && handlerChildren.get(0) == handlerBlock;
+	}
+
+	private static boolean hasOnlySharedProtectedThrowingCode(
+			IContainer tryRegion, TryCatchBlockAttr narrow, TryCatchBlockAttr wider, InterleavedJvmCatch pattern) {
+		// Do not pull an inner catch's own handler into a sibling scope: its rethrow can
+		// have a different set of enclosing handlers than the protected body.
+		if (containsNestedCatch(tryRegion, Collections.newSetFromMap(new IdentityHashMap<>()))) {
+			return false;
+		}
+		Set<IBlock> emittedBlocks = new HashSet<>();
+		RegionUtils.getAllRegionBlocks(tryRegion, emittedBlocks);
+		if (!emittedBlocks.containsAll(narrow.getBlocks())) {
+			return false;
+		}
+		for (IBlock block : emittedBlocks) {
+			for (InsnNode insn : block.getInstructions()) {
+				Boolean unprotected = insn.visitInsns(inner -> {
+					if (inner.contains(AFlag.DONT_GENERATE) || !inner.canThrowException()) {
+						return null;
+					}
+					CatchAttr catchAttr = inner.get(AType.EXC_CATCH);
+					return inner.getOffset() >= pattern.start
+							&& inner.getOffset() <= pattern.end
+							&& catchAttr != null
+							&& catchAttr.getHandlers().containsAll(narrow.getHandlers())
+							&& catchAttr.getHandlers().containsAll(wider.getHandlers()) ? null : Boolean.TRUE;
+				});
+				if (unprotected != null) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	private static boolean containsNestedCatch(IContainer container, Set<IContainer> visited) {
+		if (!visited.add(container) || container instanceof TryCatchRegion) {
+			return true;
+		}
+		if (container instanceof IRegion) {
+			for (IContainer child : ((IRegion) container).getSubBlocks()) {
+				if (containsNestedCatch(child, visited)) {
+					return true;
+				}
 			}
 		}
 		return false;
@@ -2999,10 +3078,12 @@ public class ProcessTryCatchRegions extends AbstractRegionVisitor {
 	private static boolean hasSingleProtectedNestedTryTail(
 			IRegion region, TryCatchBlockAttr tb, BlockNode dominator,
 			List<InterleavedJvmCatch> interleavedJvmCatches) {
-		boolean interleavedSite = tb.getBlocks().size() == 1
+		boolean interleavedSite = !tb.getBlocks().isEmpty()
 				&& hasCatchAllHandler(tb) && hasTerminalReturnHandlers(tb)
 				&& interleavedJvmCatches.stream()
-						.anyMatch(pattern -> pattern.start == tb.getBlocks().get(0).getStartOffset());
+						.anyMatch(pattern -> pattern.start == tb.getBlocks().stream()
+								.mapToInt(BlockNode::getStartOffset).min().orElse(-1)
+								&& tb.getBlocks().stream().allMatch(block -> block.getStartOffset() <= pattern.end));
 		if (!isSimpleNestedSingleSiteCatch(tb)
 				&& !interleavedSite) {
 			return false;

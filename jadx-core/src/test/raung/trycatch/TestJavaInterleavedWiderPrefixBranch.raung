@@ -1,5 +1,5 @@
 .version 49.0
-.class public trycatch/TestJavaInterleavedWiderPrefixBranchBlocked
+.class public trycatch/TestJavaInterleavedWiderPrefixBranch
 .super java/lang/Object
 
 .method public <init>()V
@@ -17,7 +17,7 @@
   :wide_start
     iload 0
     ifne :after_prefix
-    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked state ()V
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranch state ()V
   :after_prefix
     nop
   :narrow_start
@@ -25,7 +25,7 @@
     iconst_1
     isub
     ifne :after_narrow
-    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked state ()V
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranch state ()V
   :after_narrow
     nop
   :narrow_end
@@ -33,7 +33,7 @@
     iconst_2
     isub
     ifne :after_tail
-    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked nullPointer ()V
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranch nullPointer ()V
   :after_tail
     nop
   :wide_end
@@ -63,7 +63,7 @@
     .max stack 2
     .max locals 1
     iconst_0
-    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked test (I)I
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranch test (I)I
     iconst_2
     isub
     ifeq :prefix_ok
@@ -73,7 +73,7 @@
     athrow
   :prefix_ok
     iconst_1
-    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked test (I)I
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranch test (I)I
     iconst_2
     isub
     ifeq :narrow_ok
@@ -84,7 +84,7 @@
   :narrow_ok
   :tail_start
     iconst_2
-    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked test (I)I
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranch test (I)I
     pop
   :tail_end
     .catch java/lang/NullPointerException :tail_start .. :tail_end goto :tail_ok
@@ -95,7 +95,7 @@
   :tail_ok
     astore 0
     iconst_3
-    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranchBlocked test (I)I
+    invokestatic trycatch/TestJavaInterleavedWiderPrefixBranch test (I)I
     ifeq :done
     new java/lang/AssertionError
     dup

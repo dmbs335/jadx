@@ -1,0 +1,175 @@
+.version 49.0
+.class public trycatch/TestJavaInterleavedLoopHandler
+.super java/lang/Object
+.field private static mode I
+.field private static attempts I
+.field private static firstCalls I
+
+.method public <init>()V
+    .max stack 1
+    .max locals 1
+    aload 0
+    invokespecial java/lang/Object <init> ()V
+    return
+.end method
+
+.method public static test()I
+    .max stack 1
+    .max locals 1
+
+  :try_start
+    invokestatic trycatch/TestJavaInterleavedLoopHandler first ()V
+  :middle
+    invokestatic trycatch/TestJavaInterleavedLoopHandler second ()V
+  :try_end
+    .catch java/lang/IllegalArgumentException :try_start .. :middle goto :argument_handler
+    .catch java/lang/IllegalStateException :try_start .. :try_end goto :state_handler
+    .catch all :try_start .. :middle goto :all_handler
+    iconst_0
+    ireturn
+
+  :argument_handler
+    astore 0
+    iconst_1
+    ireturn
+
+  :state_handler
+    astore 0
+    goto :try_start
+
+  :all_handler
+    astore 0
+    iconst_3
+    ireturn
+.end method
+
+.method public check()V
+    .max stack 3
+    .max locals 1
+    iconst_0
+    putstatic trycatch/TestJavaInterleavedLoopHandler mode I
+    iconst_0
+    putstatic trycatch/TestJavaInterleavedLoopHandler attempts I
+    iconst_0
+    putstatic trycatch/TestJavaInterleavedLoopHandler firstCalls I
+    invokestatic trycatch/TestJavaInterleavedLoopHandler test ()I
+    ifeq :retry_ok
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :retry_ok
+    getstatic trycatch/TestJavaInterleavedLoopHandler attempts I
+    iconst_2
+    if_icmpeq :first_count
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :first_count
+    getstatic trycatch/TestJavaInterleavedLoopHandler firstCalls I
+    iconst_3
+    if_icmpeq :argument_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :argument_case
+    iconst_1
+    putstatic trycatch/TestJavaInterleavedLoopHandler mode I
+    invokestatic trycatch/TestJavaInterleavedLoopHandler test ()I
+    iconst_1
+    if_icmpeq :all_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :all_case
+    iconst_2
+    putstatic trycatch/TestJavaInterleavedLoopHandler mode I
+    invokestatic trycatch/TestJavaInterleavedLoopHandler test ()I
+    iconst_3
+    if_icmpeq :tail_case
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :tail_case
+    iconst_3
+    putstatic trycatch/TestJavaInterleavedLoopHandler mode I
+  :throw_start
+    invokestatic trycatch/TestJavaInterleavedLoopHandler test ()I
+    pop
+  :throw_end
+    .catch java/lang/NullPointerException :throw_start .. :throw_end goto :caught
+    new java/lang/AssertionError
+    dup
+    invokespecial java/lang/AssertionError <init> ()V
+    athrow
+  :caught
+    astore 0
+    return
+.end method
+
+.method private static first()V
+    .max stack 2
+    .max locals 0
+    getstatic trycatch/TestJavaInterleavedLoopHandler firstCalls I
+    iconst_1
+    iadd
+    putstatic trycatch/TestJavaInterleavedLoopHandler firstCalls I
+    getstatic trycatch/TestJavaInterleavedLoopHandler mode I
+    iconst_1
+    if_icmpeq :argument
+    getstatic trycatch/TestJavaInterleavedLoopHandler mode I
+    iconst_2
+    if_icmpeq :null
+    getstatic trycatch/TestJavaInterleavedLoopHandler mode I
+    ifne :done
+    getstatic trycatch/TestJavaInterleavedLoopHandler attempts I
+    ifne :done
+    iconst_1
+    putstatic trycatch/TestJavaInterleavedLoopHandler attempts I
+    new java/lang/IllegalStateException
+    dup
+    invokespecial java/lang/IllegalStateException <init> ()V
+    athrow
+  :argument
+    new java/lang/IllegalArgumentException
+    dup
+    invokespecial java/lang/IllegalArgumentException <init> ()V
+    athrow
+  :null
+    new java/lang/NullPointerException
+    dup
+    invokespecial java/lang/NullPointerException <init> ()V
+    athrow
+  :done
+    return
+.end method
+
+.method private static second()V
+    .max stack 2
+    .max locals 0
+    getstatic trycatch/TestJavaInterleavedLoopHandler mode I
+    iconst_3
+    if_icmpeq :null
+    getstatic trycatch/TestJavaInterleavedLoopHandler mode I
+    ifne :done
+    getstatic trycatch/TestJavaInterleavedLoopHandler attempts I
+    iconst_1
+    if_icmpne :done
+    iconst_2
+    putstatic trycatch/TestJavaInterleavedLoopHandler attempts I
+    new java/lang/IllegalStateException
+    dup
+    invokespecial java/lang/IllegalStateException <init> ()V
+    athrow
+  :null
+    new java/lang/NullPointerException
+    dup
+    invokespecial java/lang/NullPointerException <init> ()V
+    athrow
+  :done
+    return
+.end method
