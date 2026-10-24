@@ -23,6 +23,7 @@ import jadx.api.JadxDecompiler;
 import jadx.api.plugins.input.ICodeLoader;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 
 class CustomLoadTest {
@@ -113,6 +114,16 @@ class CustomLoadTest {
 				.satisfiesOnlyOnce(cls -> assertThat(cls.getName()).isEqualTo("HelloWorld"));
 
 		System.out.println(jadx.getClassesWithInners().get(0).getCode());
+	}
+
+	@Test
+	void consumerFailureMustNotBeHiddenAsClassLoadFailure() throws IOException {
+		byte[] content = Files.readAllBytes(getSample("HelloWorld.class"));
+		try (ICodeLoader loader = JavaInputPlugin.loadSingleClass(content, "HelloWorld.class")) {
+			assertThatThrownBy(() -> loader.visitClasses(cls -> {
+				throw new IllegalStateException("consumer failed");
+			})).isInstanceOf(IllegalStateException.class).hasMessage("consumer failed");
+		}
 	}
 
 	@Test

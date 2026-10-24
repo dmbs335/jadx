@@ -31,11 +31,14 @@ public class JavaLoadResult implements ICodeLoader {
 	@Override
 	public void visitClasses(Consumer<IClassData> consumer) {
 		for (JavaClassReader reader : readers) {
+			IClassData classData;
 			try {
-				consumer.accept(reader.loadClassData());
+				classData = reader.loadClassData();
 			} catch (Exception e) {
 				LOG.error("Failed to load class data for file: {}", reader.getFileName(), e);
+				continue;
 			}
+			consumer.accept(classData);
 		}
 	}
 
