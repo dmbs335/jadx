@@ -8,6 +8,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -433,7 +434,7 @@ public class BlockProcessor extends AbstractVisitor {
 		return isInsnsEquals(insn, curInsn) && insn.canReorder();
 	}
 
-	private static boolean isInsnsEquals(InsnNode insn, InsnNode otherInsn) {
+	static boolean isInsnsEquals(InsnNode insn, InsnNode otherInsn) {
 		if (insn == otherInsn) {
 			return true;
 		}
@@ -459,10 +460,14 @@ public class BlockProcessor extends AbstractVisitor {
 		}
 		if (arg.getClass().equals(otherArg.getClass())) {
 			if (arg.isRegister()) {
-				return ((RegisterArg) arg).getRegNum() == ((RegisterArg) otherArg).getRegNum();
+				RegisterArg reg = (RegisterArg) arg;
+				RegisterArg otherReg = (RegisterArg) otherArg;
+				return reg.getRegNum() == otherReg.getRegNum()
+						&& Objects.equals(reg.getInitType(), otherReg.getInitType());
 			}
 			if (arg.isLiteral()) {
-				return ((LiteralArg) arg).getLiteral() == ((LiteralArg) otherArg).getLiteral();
+				return ((LiteralArg) arg).getLiteral() == ((LiteralArg) otherArg).getLiteral()
+						&& Objects.equals(arg.getType(), otherArg.getType());
 			}
 			throw new JadxRuntimeException("Unexpected InsnArg types: " + arg + " and " + otherArg);
 		}

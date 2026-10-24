@@ -18,6 +18,53 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class BlockProcessorTest {
 	@Test
+	void distinctTypedConstantsMustNotBeDeduplicated() {
+		InsnNode intConst = constant(ArgType.INT);
+		InsnNode floatConst = constant(ArgType.FLOAT);
+
+		assertThat(BlockProcessor.isInsnsEquals(intConst, floatConst)).isFalse();
+		assertThat(BlockProcessor.isInsnsEquals(floatConst, intConst)).isFalse();
+		assertThat(BlockProcessor.isInsnsEquals(intConst, constant(ArgType.INT))).isTrue();
+	}
+
+	@Test
+	void distinctTypedInputsMustNotBeDeduplicated() {
+		InsnNode intMove = moveWithInput(ArgType.INT);
+		InsnNode floatMove = moveWithInput(ArgType.FLOAT);
+
+		assertThat(BlockProcessor.isInsnsEquals(intMove, floatMove)).isFalse();
+		assertThat(BlockProcessor.isInsnsEquals(floatMove, intMove)).isFalse();
+		assertThat(BlockProcessor.isInsnsEquals(intMove, moveWithInput(ArgType.INT))).isTrue();
+	}
+
+	@Test
+	void distinctTypedResultsMustNotBeDeduplicated() {
+		InsnNode intMove = moveWithTypes(ArgType.INT, ArgType.UNKNOWN);
+		InsnNode floatMove = moveWithTypes(ArgType.FLOAT, ArgType.UNKNOWN);
+
+		assertThat(BlockProcessor.isInsnsEquals(intMove, floatMove)).isFalse();
+		assertThat(BlockProcessor.isInsnsEquals(floatMove, intMove)).isFalse();
+	}
+
+	private static InsnNode constant(ArgType type) {
+		InsnNode insn = new InsnNode(InsnType.CONST, 1);
+		insn.setResult(InsnArg.reg(0, type));
+		insn.addArg(InsnArg.lit(0x3f800000, type));
+		return insn;
+	}
+
+	private static InsnNode moveWithInput(ArgType inputType) {
+		return moveWithTypes(ArgType.UNKNOWN, inputType);
+	}
+
+	private static InsnNode moveWithTypes(ArgType resultType, ArgType inputType) {
+		InsnNode insn = new InsnNode(InsnType.MOVE, 1);
+		insn.setResult(InsnArg.reg(0, resultType));
+		insn.addArg(InsnArg.reg(1, inputType));
+		return insn;
+	}
+
+	@Test
 	void protectsAssignmentsBeforeInstructionLevelTryEntry() {
 		BlockNode block = makeBranchBlock(0, ArgType.INT);
 		block.getInstructions().get(1).add(AFlag.TRY_ENTER);
