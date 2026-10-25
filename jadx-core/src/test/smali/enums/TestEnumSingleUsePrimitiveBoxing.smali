@@ -5,6 +5,15 @@
 .field public static final enum ONE:Lenums/TestEnumSingleUsePrimitiveBoxing;
 .field private final value:Ljava/lang/Integer;
 
+.method public static valueOf(Ljava/lang/String;)Lenums/TestEnumSingleUsePrimitiveBoxing;
+    .registers 2
+    const-class v0, Lenums/TestEnumSingleUsePrimitiveBoxing;
+    invoke-static {v0, p0}, Ljava/lang/Enum;->valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;
+    move-result-object v0
+    check-cast v0, Lenums/TestEnumSingleUsePrimitiveBoxing;
+    return-object v0
+.end method
+
 .method static constructor <clinit>()V
     .registers 5
 

@@ -5,6 +5,15 @@
 .field public static final enum ALPHA:Lenums/TestEnumNamedConstantClasses;
 .field public static final enum BETA:Lenums/TestEnumNamedConstantClasses;
 
+.method public static valueOf(Ljava/lang/String;)Lenums/TestEnumNamedConstantClasses;
+    .registers 2
+    const-class v0, Lenums/TestEnumNamedConstantClasses;
+    invoke-static {v0, p0}, Ljava/lang/Enum;->valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;
+    move-result-object v0
+    check-cast v0, Lenums/TestEnumNamedConstantClasses;
+    return-object v0
+.end method
+
 .method static constructor <clinit>()V
     .registers 5
 

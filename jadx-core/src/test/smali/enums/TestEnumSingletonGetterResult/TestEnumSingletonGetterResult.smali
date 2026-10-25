@@ -5,6 +5,15 @@
 .field public static final enum ONE:Lenums/TestEnumSingletonGetterResult;
 .field private final value:Ljava/lang/String;
 
+.method public static valueOf(Ljava/lang/String;)Lenums/TestEnumSingletonGetterResult;
+    .registers 2
+    const-class v0, Lenums/TestEnumSingletonGetterResult;
+    invoke-static {v0, p0}, Ljava/lang/Enum;->valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;
+    move-result-object v0
+    check-cast v0, Lenums/TestEnumSingletonGetterResult;
+    return-object v0
+.end method
+
 .method static constructor <clinit>()V
     .registers 5
 

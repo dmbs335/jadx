@@ -5,6 +5,15 @@
 .field public static final enum ONE:Lenums/TestEnumConditionalArrayArg;
 .field private final values:[Ljava/lang/String;
 
+.method public static valueOf(Ljava/lang/String;)Lenums/TestEnumConditionalArrayArg;
+    .registers 2
+    const-class v0, Lenums/TestEnumConditionalArrayArg;
+    invoke-static {v0, p0}, Ljava/lang/Enum;->valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;
+    move-result-object v0
+    check-cast v0, Lenums/TestEnumConditionalArrayArg;
+    return-object v0
+.end method
+
 .method static constructor <clinit>()V
     .registers 8
 

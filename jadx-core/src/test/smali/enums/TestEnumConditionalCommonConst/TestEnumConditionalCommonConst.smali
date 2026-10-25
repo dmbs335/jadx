@@ -6,6 +6,15 @@
 .field private final common:I
 .field private final values:[Ljava/lang/String;
 
+.method public static valueOf(Ljava/lang/String;)Lenums/TestEnumConditionalCommonConst;
+    .registers 2
+    const-class v0, Lenums/TestEnumConditionalCommonConst;
+    invoke-static {v0, p0}, Ljava/lang/Enum;->valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;
+    move-result-object v0
+    check-cast v0, Lenums/TestEnumConditionalCommonConst;
+    return-object v0
+.end method
+
 .method static constructor <clinit>()V
     .registers 12
 

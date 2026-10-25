@@ -5,6 +5,15 @@
 .field public static final enum ONE:Lenums/TestEnumInitializerInstanceFieldUse;
 .field public static holder:Lenums/TestEnumInitializerInstanceFieldUse$Holder;
 
+.method public static valueOf(Ljava/lang/String;)Lenums/TestEnumInitializerInstanceFieldUse;
+    .registers 2
+    const-class v0, Lenums/TestEnumInitializerInstanceFieldUse;
+    invoke-static {v0, p0}, Ljava/lang/Enum;->valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;
+    move-result-object v0
+    check-cast v0, Lenums/TestEnumInitializerInstanceFieldUse;
+    return-object v0
+.end method
+
 .method static constructor <clinit>()V
     .registers 4
     new-instance v0, Lenums/TestEnumInitializerInstanceFieldUse;

@@ -5,6 +5,15 @@
 .field public static final enum ONE:Lenums/TestEnumRepeatedSelectorExpression;
 .field private final label:Ljava/lang/String;
 
+.method public static valueOf(Ljava/lang/String;)Lenums/TestEnumRepeatedSelectorExpression;
+    .registers 2
+    const-class v0, Lenums/TestEnumRepeatedSelectorExpression;
+    invoke-static {v0, p0}, Ljava/lang/Enum;->valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;
+    move-result-object v0
+    check-cast v0, Lenums/TestEnumRepeatedSelectorExpression;
+    return-object v0
+.end method
+
 .method static constructor <clinit>()V
     .registers 7
 

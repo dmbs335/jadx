@@ -6,6 +6,15 @@
 .field public static final enum B:Lenums/TestEnumSharedLiteralTernary;
 .field private final value:Ljava/lang/Object;
 
+.method public static valueOf(Ljava/lang/String;)Lenums/TestEnumSharedLiteralTernary;
+    .registers 2
+    const-class v0, Lenums/TestEnumSharedLiteralTernary;
+    invoke-static {v0, p0}, Ljava/lang/Enum;->valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;
+    move-result-object v0
+    check-cast v0, Lenums/TestEnumSharedLiteralTernary;
+    return-object v0
+.end method
+
 .method static constructor <clinit>()V
     .registers 8
 

@@ -4,6 +4,15 @@
 .field private static final synthetic $VALUES:[Lenums/TestEnumValuesAliasNegative;
 .field public static final enum ONE:Lenums/TestEnumValuesAliasNegative;
 
+.method public static valueOf(Ljava/lang/String;)Lenums/TestEnumValuesAliasNegative;
+    .registers 2
+    const-class v0, Lenums/TestEnumValuesAliasNegative;
+    invoke-static {v0, p0}, Ljava/lang/Enum;->valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;
+    move-result-object v0
+    check-cast v0, Lenums/TestEnumValuesAliasNegative;
+    return-object v0
+.end method
+
 .method static constructor <clinit>()V
     .registers 3
     new-instance v0, Lenums/TestEnumValuesAliasNegative;

@@ -135,6 +135,26 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 	}
 
 	@Test
+	public void testMissingValueOf() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumMissingValueOfNegative"))
+				.code()
+				.containsOne("Enum valueOf(String) method not found")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumMissingValueOfNegative extends Enum");
+	}
+
+	@Test
+	public void testMissingValues() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumMissingValuesNegative"))
+				.code()
+				.containsOne("Enum values() method not found")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumMissingValuesNegative extends Enum");
+	}
+
+	@Test
 	public void testSynchronizedValues() {
 		disableCompilation();
 		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumSynchronizedValuesNegative"))

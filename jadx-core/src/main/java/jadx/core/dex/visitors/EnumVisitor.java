@@ -225,8 +225,17 @@ public class EnumVisitor extends AbstractVisitor {
 				}
 			}
 		}
+		ArgType clsType = cls.getClassInfo().getType();
+		if (!hasMethod(cls, "values()" + TypeGen.signature(ArgType.array(clsType)))) {
+			cls.addWarnComment("Enum values() method not found");
+			return false;
+		}
 		if (!isCompatibleValuesMethod(cls, data.valuesField)) {
 			cls.addWarnComment("Enum values() method does not match the $VALUES array");
+			return false;
+		}
+		if (!hasMethod(cls, "valueOf(Ljava/lang/String;)" + TypeGen.signature(clsType))) {
+			cls.addWarnComment("Enum valueOf(String) method not found");
 			return false;
 		}
 		if (!isCompatibleValueOfMethod(cls)) {
@@ -1479,6 +1488,15 @@ public class EnumVisitor extends AbstractVisitor {
 			}
 		}
 		return true;
+	}
+
+	private boolean hasMethod(ClassNode cls, String shortId) {
+		for (MethodNode mth : cls.getMethods()) {
+			if (mth.getMethodInfo().getShortId().equals(shortId)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private boolean hasRawValuesAccess(ClassNode cls, FieldNode valuesField) {

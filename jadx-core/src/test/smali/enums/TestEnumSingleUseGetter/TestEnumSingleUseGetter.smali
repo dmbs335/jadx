@@ -6,6 +6,15 @@
 .field public static final enum TWO:Lenums/TestEnumSingleUseGetter;
 .field private final label:Ljava/lang/String;
 
+.method public static valueOf(Ljava/lang/String;)Lenums/TestEnumSingleUseGetter;
+    .registers 2
+    const-class v0, Lenums/TestEnumSingleUseGetter;
+    invoke-static {v0, p0}, Ljava/lang/Enum;->valueOf(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;
+    move-result-object v0
+    check-cast v0, Lenums/TestEnumSingleUseGetter;
+    return-object v0
+.end method
+
 .method static constructor <clinit>()V
     .registers 7
     sget-object v0, Lenums/TestEnumSingleUseGetter$Helper;->INSTANCE:Lenums/TestEnumSingleUseGetter$Helper;
