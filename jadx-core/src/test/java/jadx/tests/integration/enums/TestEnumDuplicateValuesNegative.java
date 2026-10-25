@@ -142,4 +142,26 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 				.containsOne("class TestEnumValuesHelperSideEffectNegative extends Enum")
 				.containsOne("SIDE_EFFECT = true;");
 	}
+
+	@Test
+	public void testRawValuesArrayAccess() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumRawValuesAccessNegative"))
+				.code()
+				.containsOne("Enum $VALUES array is accessed outside the default values() method")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumRawValuesAccessNegative extends Enum")
+				.containsOne("return $VALUES == $VALUES;");
+	}
+
+	@Test
+	public void testValuesAliasAccess() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumValuesAliasNegative"))
+				.code()
+				.containsOne("Enum $VALUES array is accessed outside the default values() method")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumValuesAliasNegative extends Enum")
+				.containsOne("snapshot()");
+	}
 }

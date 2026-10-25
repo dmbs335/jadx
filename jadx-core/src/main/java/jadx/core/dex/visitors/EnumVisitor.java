@@ -233,6 +233,10 @@ public class EnumVisitor extends AbstractVisitor {
 			cls.addWarnComment("Enum valueOf(String) method is not the default implementation");
 			return false;
 		}
+		if (hasRawValuesAccess(cls, data.valuesField)) {
+			cls.addWarnComment("Enum $VALUES array is accessed outside the default values() method");
+			return false;
+		}
 		data.toRemove.add(data.valuesInitInsn);
 
 		// all checks complete, perform transform
@@ -1469,6 +1473,40 @@ public class EnumVisitor extends AbstractVisitor {
 			}
 		}
 		return true;
+	}
+
+	private boolean hasRawValuesAccess(ClassNode cls, FieldNode valuesField) {
+		FieldInfo valuesFieldInfo = valuesField.getFieldInfo();
+		ArgType clsType = cls.getClassInfo().getType();
+		for (MethodNode mth : valuesField.getUseIn()) {
+			if (!mth.isNoCode() && mth != cls.getClassInitMth()
+					&& !isCanonicalValuesMethod(cls, mth, clsType, valuesFieldInfo)) {
+				return true;
+			}
+		}
+		for (MethodNode mth : cls.getMethods()) {
+			if (mth == cls.getClassInitMth() || mth.isNoCode()
+					|| isCanonicalValuesMethod(cls, mth, clsType, valuesFieldInfo)) {
+				continue;
+			}
+			for (BlockNode block : mth.getBasicBlocks()) {
+				for (InsnNode insn : block.getInstructions()) {
+					if (Boolean.TRUE.equals(insn.visitInsns(inner -> inner.getType() == InsnType.SGET
+							&& Objects.equals(((IndexInsnNode) inner).getIndex(), valuesFieldInfo) ? Boolean.TRUE : null))) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	}
+
+	private boolean isCanonicalValuesMethod(ClassNode cls, MethodNode mth, ArgType clsType, FieldInfo valuesFieldInfo) {
+		return mth.getParentClass() == cls
+				&& mth.getMethodInfo().getShortId().equals("values()" + TypeGen.signature(ArgType.array(clsType)))
+				&& mth.getAccessFlags().isPublic()
+				&& mth.getAccessFlags().isStatic()
+				&& isValuesMethod(mth, clsType, valuesFieldInfo);
 	}
 
 	private void removeEnumMethods(ClassNode cls, FieldNode valuesField) {
