@@ -285,9 +285,14 @@ public class ClassModifier extends AbstractVisitor {
 		if (!mth.getParentClass().equals(wrappedMth.getParentClass())) {
 			return false;
 		}
-		// all args must be registers passed from method args (allow only casts insns)
-		for (InsnArg arg : insn.getArguments()) {
-			if (!registersAndCastsOnly(arg)) {
+		// A bridge can only be merged when it forwards the receiver and each argument in
+		// its original position. Merely using argument registers permits reordered calls.
+		List<RegisterArg> methodArgs = mth.getAllArgRegs();
+		if (invokeInsn.getArgsCount() != methodArgs.size()) {
+			return false;
+		}
+		for (int i = 0; i < methodArgs.size(); i++) {
+			if (!registersAndCastsOnly(invokeInsn.getArg(i), methodArgs.get(i).getRegNum())) {
 				return false;
 			}
 		}
@@ -310,14 +315,14 @@ public class ClassModifier extends AbstractVisitor {
 		return true;
 	}
 
-	private static boolean registersAndCastsOnly(InsnArg arg) {
+	private static boolean registersAndCastsOnly(InsnArg arg, int expectedRegNum) {
 		if (arg.isRegister()) {
-			return true;
+			return ((RegisterArg) arg).getRegNum() == expectedRegNum;
 		}
 		if (arg.isInsnWrap()) {
 			InsnNode wrapInsn = ((InsnWrapArg) arg).getWrapInsn();
 			if (wrapInsn.getType() == InsnType.CHECK_CAST) {
-				return registersAndCastsOnly(wrapInsn.getArg(0));
+				return registersAndCastsOnly(wrapInsn.getArg(0), expectedRegNum);
 			}
 		}
 		return false;
