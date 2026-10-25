@@ -1457,6 +1457,7 @@ public class EnumVisitor extends AbstractVisitor {
 					&& (mth.isNoCode()
 							|| !mth.getAccessFlags().isPublic()
 							|| !mth.getAccessFlags().isStatic()
+							|| mth.getAccessFlags().isSynchronized()
 							|| !isValuesMethod(mth, clsType, valuesField.getFieldInfo()))) {
 				return false;
 			}
@@ -1472,6 +1473,7 @@ public class EnumVisitor extends AbstractVisitor {
 					&& (mth.isNoCode()
 							|| !mth.getAccessFlags().isPublic()
 							|| !mth.getAccessFlags().isStatic()
+							|| mth.getAccessFlags().isSynchronized()
 							|| !simpleValueOfMth(mth, clsType))) {
 				return false;
 			}

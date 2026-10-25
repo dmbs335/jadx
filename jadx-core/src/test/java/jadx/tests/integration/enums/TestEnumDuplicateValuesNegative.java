@@ -124,6 +124,28 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 	}
 
 	@Test
+	public void testSynchronizedValueOf() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumSynchronizedValueOfNegative"))
+				.code()
+				.containsOne("Enum valueOf(String) method is not the default implementation")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumSynchronizedValueOfNegative extends Enum")
+				.containsOne("synchronized TestEnumSynchronizedValueOfNegative valueOf");
+	}
+
+	@Test
+	public void testSynchronizedValues() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumSynchronizedValuesNegative"))
+				.code()
+				.containsOne("Enum values() method does not match the $VALUES array")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumSynchronizedValuesNegative extends Enum")
+				.containsOne("synchronized TestEnumSynchronizedValuesNegative[] values");
+	}
+
+	@Test
 	public void testValuesOverwrite() {
 		disableCompilation();
 		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumValuesOverwriteNegative"))
