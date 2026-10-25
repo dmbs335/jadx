@@ -155,6 +155,16 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 	}
 
 	@Test
+	public void testPrivateEnumConstant() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumPrivateConstantNegative"))
+				.code()
+				.containsOne("Enum constant field has non-standard access flags")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("private static final TestEnumPrivateConstantNegative ONE");
+	}
+
+	@Test
 	public void testSynchronizedValues() {
 		disableCompilation();
 		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumSynchronizedValuesNegative"))

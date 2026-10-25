@@ -185,6 +185,14 @@ public class EnumVisitor extends AbstractVisitor {
 		for (int i = 0; i < enumFields.size(); i++) {
 			EnumField enumField = enumFields.get(i);
 			FieldNode fieldNode = enumField.getField();
+			if (!data.fakeFields.contains(fieldNode)
+					&& (!fieldNode.getAccessFlags().isPublic()
+							|| !fieldNode.getAccessFlags().isStatic()
+							|| !fieldNode.getAccessFlags().isFinal()
+							|| !fieldNode.getAccessFlags().isEnum())) {
+				cls.addWarnComment("Enum constant field has non-standard access flags");
+				return false;
+			}
 			if (data.fieldsWithMultipleWrites.contains(fieldNode.getFieldInfo())) {
 				cls.addWarnComment("Enum constant field is assigned more than once");
 				return false;
