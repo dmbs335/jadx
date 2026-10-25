@@ -1517,6 +1517,7 @@ public class EnumVisitor extends AbstractVisitor {
 		ArgType clsType = cls.getClassInfo().getType();
 		FieldInfo valuesFieldInfo = valuesField.getFieldInfo();
 		String valuesMethodShortId = "values()" + TypeGen.signature(ArgType.array(clsType));
+		String valueOfMethodShortId = "valueOf(Ljava/lang/String;)" + TypeGen.signature(clsType);
 		MethodNode valuesMethod = null;
 		// remove compiler generated methods
 		for (MethodNode mth : cls.getMethods()) {
@@ -1554,7 +1555,7 @@ public class EnumVisitor extends AbstractVisitor {
 				}
 				valuesMethod = mth;
 				mth.add(AFlag.DONT_GENERATE);
-			} else if (simpleValueOfMth(mth, clsType)) {
+			} else if (mi.getShortId().equals(valueOfMethodShortId) && simpleValueOfMth(mth, clsType)) {
 				mth.add(AFlag.DONT_GENERATE);
 			}
 		}
