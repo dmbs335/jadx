@@ -113,6 +113,17 @@ public class TestEnumDuplicateValuesNegative extends SmaliTest {
 	}
 
 	@Test
+	public void testPrivateValueOf() {
+		disableCompilation();
+		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumPrivateValueOfNegative"))
+				.code()
+				.containsOne("Enum valueOf(String) method is not the default implementation")
+				.containsOne("JADX ERROR: Failed to restore enum class")
+				.containsOne("class TestEnumPrivateValueOfNegative extends Enum")
+				.containsOne("private static TestEnumPrivateValueOfNegative valueOf");
+	}
+
+	@Test
 	public void testValuesOverwrite() {
 		disableCompilation();
 		assertThat(getClassNodeFromSmaliWithPkg("enums", "TestEnumValuesOverwriteNegative"))

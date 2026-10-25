@@ -1454,8 +1454,10 @@ public class EnumVisitor extends AbstractVisitor {
 		String valuesMethodShortId = "values()" + TypeGen.signature(ArgType.array(clsType));
 		for (MethodNode mth : cls.getMethods()) {
 			if (mth.getMethodInfo().getShortId().equals(valuesMethodShortId)
-					&& !mth.isNoCode()
-					&& !isValuesMethod(mth, clsType, valuesField.getFieldInfo())) {
+					&& (mth.isNoCode()
+							|| !mth.getAccessFlags().isPublic()
+							|| !mth.getAccessFlags().isStatic()
+							|| !isValuesMethod(mth, clsType, valuesField.getFieldInfo()))) {
 				return false;
 			}
 		}
@@ -1467,8 +1469,10 @@ public class EnumVisitor extends AbstractVisitor {
 		String valueOfMethodShortId = "valueOf(Ljava/lang/String;)" + TypeGen.signature(clsType);
 		for (MethodNode mth : cls.getMethods()) {
 			if (mth.getMethodInfo().getShortId().equals(valueOfMethodShortId)
-					&& !mth.isNoCode()
-					&& !simpleValueOfMth(mth, clsType)) {
+					&& (mth.isNoCode()
+							|| !mth.getAccessFlags().isPublic()
+							|| !mth.getAccessFlags().isStatic()
+							|| !simpleValueOfMth(mth, clsType))) {
 				return false;
 			}
 		}
